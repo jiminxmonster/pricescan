@@ -1,0 +1,34 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: pricescan-backend
+    working_dir: /app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8400:8000"
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+      DATA_DIR: /app/data
+      DATABASE_PATH: /app/data/pricescan.db
+    volumes:
+      - pricescan_data:/app/data
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: pricescan-frontend
+    working_dir: /app
+    command: npm run dev -- --host 0.0.0.0 --port 8300
+    ports:
+      - "8300:8300"
+    environment:
+      VITE_PROXY_TARGET: http://backend:8000
+    depends_on:
+      - backend
+
+volumes:
+  pricescan_data:
