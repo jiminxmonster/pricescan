@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
-const API_BASE = "/api";
+const basePath = import.meta.env.BASE_URL.replace(/\/$/, "");
+const API_BASE = `${basePath}/api`;
 const TOKEN_KEY = "pricescan_admin_token";
 
 type Tab = "dashboard" | "search" | "api" | "publish" | "pricing" | "invoice" | "tenant" | "logs";

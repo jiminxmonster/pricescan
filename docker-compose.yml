@@ -27,6 +27,7 @@ services:
       - "8300:8300"
     environment:
       VITE_PROXY_TARGET: http://backend:8000
+      VITE_BASE_PATH: /pricescan/
     depends_on:
       - backend
 

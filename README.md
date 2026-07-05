@@ -29,7 +29,7 @@ docker compose up --build
 접속:
 
 ```text
-http://127.0.0.1:8300
+http://127.0.0.1:8300/pricescan/
 ```
 
 백엔드 확인:
@@ -42,6 +42,42 @@ http://127.0.0.1:8400/health
 
 ```text
 admin / admin
+```
+
+## Vultr 배포
+
+서버에서:
+
+```bash
+apt update && apt upgrade -y
+apt install -y git docker.io docker-compose-plugin nginx certbot python3-certbot-nginx
+systemctl enable --now docker
+
+cd /opt
+git clone https://github.com/jiminxmonster/pricescan.git
+cd pricescan
+docker compose up -d --build
+```
+
+Nginx 경로 배포:
+
+```bash
+cp /opt/pricescan/deploy/nginx/d2blue-pricescan.conf /etc/nginx/sites-available/d2blue
+ln -sf /etc/nginx/sites-available/d2blue /etc/nginx/sites-enabled/d2blue
+nginx -t
+systemctl reload nginx
+```
+
+DNS에서 `www.d2blue.com`의 A 레코드를 Vultr 서버 IP로 연결한 뒤 SSL을 발급합니다.
+
+```bash
+certbot --nginx -d www.d2blue.com
+```
+
+최종 접속:
+
+```text
+https://www.d2blue.com/pricescan/
 ```
 
 ## 보관본
