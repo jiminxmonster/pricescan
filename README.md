@@ -50,7 +50,7 @@ admin / admin
 
 ```bash
 apt update && apt upgrade -y
-apt install -y git docker.io docker-compose-plugin nginx certbot python3-certbot-nginx
+apt install -y git docker.io docker-compose-v2 nginx certbot python3-certbot-nginx
 systemctl enable --now docker
 
 cd /opt
@@ -68,16 +68,16 @@ nginx -t
 systemctl reload nginx
 ```
 
-DNS에서 `www.d2blue.com`의 A 레코드를 Vultr 서버 IP로 연결한 뒤 SSL을 발급합니다.
+DNS에서 `pricescan.d2blue.com`의 A 레코드를 Vultr 서버 IP로 연결한 뒤 SSL을 발급합니다.
 
 ```bash
-certbot --nginx -d www.d2blue.com
+certbot --nginx -d pricescan.d2blue.com
 ```
 
 최종 접속:
 
 ```text
-https://www.d2blue.com/pricescan/
+https://pricescan.d2blue.com/pricescan/
 ```
 
 ## 보관본
