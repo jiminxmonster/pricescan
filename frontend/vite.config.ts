@@ -9,6 +9,7 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 8300,
+    allowedHosts: [".d2blue.com", "141.164.35.141", "127.0.0.1", "localhost"],
     proxy: {
       "/api": {
         target: apiProxyTarget,
