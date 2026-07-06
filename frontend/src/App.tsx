@@ -3,8 +3,52 @@ import { useEffect, useState } from "react";
 const basePath = import.meta.env.BASE_URL.replace(/\/$/, "");
 const API_BASE = `${basePath}/api`;
 const TOKEN_KEY = "pricescan_admin_token";
+const SETTINGS_KEY = "pricescan_admin_settings";
 
-type Tab = "dashboard" | "search" | "api" | "publish" | "pricing" | "invoice" | "tenant" | "logs";
+type FeatureKey = "publish" | "pricing" | "invoice" | "tenant";
+type Tab = "search" | "api" | "settings" | FeatureKey;
+
+type AdminSettings = {
+  showSidebar: boolean;
+  features: Record<FeatureKey, boolean>;
+};
+
+const defaultSettings: AdminSettings = {
+  showSidebar: false,
+  features: {
+    publish: false,
+    pricing: false,
+    invoice: false,
+    tenant: false,
+  },
+};
+
+const primaryTabs: Array<{ key: Tab; label: string; description: string }> = [
+  { key: "search", label: "상품검색", description: "API 등을 통해 해당상품 가격 검색" },
+  { key: "api", label: "쇼핑몰셋업", description: "쇼핑몰/API 키 등록과 연동 테스트" },
+  { key: "settings", label: "관리자설정", description: "메뉴와 기능 사용여부 설정" },
+];
+
+const optionalTabs: Array<{ key: FeatureKey; label: string; description: string }> = [
+  { key: "publish", label: "쇼핑몰 자동등록", description: "상품등록 자동화 기능" },
+  { key: "pricing", label: "통합가격 조정", description: "마진 기준 가격 일괄 조정" },
+  { key: "invoice", label: "송장 출력", description: "주문 송장 자동 출력" },
+  { key: "tenant", label: "회원권한", description: "셀러별 권한/워크스페이스" },
+];
+
+function readSettings(): AdminSettings {
+  try {
+    const saved = localStorage.getItem(SETTINGS_KEY);
+    if (!saved) return defaultSettings;
+    const parsed = JSON.parse(saved) as Partial<AdminSettings>;
+    return {
+      showSidebar: Boolean(parsed.showSidebar),
+      features: { ...defaultSettings.features, ...(parsed.features || {}) },
+    };
+  } catch {
+    return defaultSettings;
+  }
+}
 
 type Dashboard = {
   stats: {
@@ -157,7 +201,8 @@ function LoginScreen({ onLogin }: { onLogin: (token: string) => void }) {
 
 export default function App() {
   const [token, setToken] = useState(() => localStorage.getItem(TOKEN_KEY) || "");
-  const [tab, setTab] = useState<Tab>("dashboard");
+  const [tab, setTab] = useState<Tab>("search");
+  const [settings, setSettings] = useState<AdminSettings>(readSettings);
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [searchPayload, setSearchPayload] = useState<SearchPayload>({ run: null, items: [], summary: { collected_count: 0, lowest_count: 0, excluded_count: 0 } });
   const [apiKeys, setApiKeys] = useState<ApiKey[]>([]);
@@ -200,6 +245,15 @@ export default function App() {
   useEffect(() => {
     loadAll().catch((error) => setNotice(error.message));
   }, [token]);
+
+  useEffect(() => {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+    const enabledTabs = new Set<Tab>([
+      ...primaryTabs.map((item) => item.key),
+      ...optionalTabs.filter((item) => settings.features[item.key]).map((item) => item.key),
+    ]);
+    if (!enabledTabs.has(tab)) setTab("search");
+  }, [settings, tab]);
 
   const refreshLogs = async () => {
     setLogs(await request<LogItem[]>("/logs", token));
@@ -273,6 +327,20 @@ export default function App() {
     await refreshLogs();
   };
 
+  const toggleFeature = (feature: FeatureKey) => {
+    setSettings((current) => ({
+      ...current,
+      features: {
+        ...current.features,
+        [feature]: !current.features[feature],
+      },
+    }));
+  };
+
+  const toggleSidebar = () => {
+    setSettings((current) => ({ ...current, showSidebar: !current.showSidebar }));
+  };
+
   const logout = () => {
     localStorage.removeItem(TOKEN_KEY);
     setToken("");
@@ -280,83 +348,71 @@ export default function App() {
 
   if (!token) return <LoginScreen onLogin={setToken} />;
 
+  const enabledOptionalTabs = optionalTabs.filter((item) => settings.features[item.key]);
+  const visibleTabs = [...primaryTabs, ...enabledOptionalTabs];
+
   return (
-    <div className="app">
-      <aside className="sidebar">
-        <div className="brand">
-          <strong>PriceScan</strong>
-          <span>Auto Seller recovery</span>
-        </div>
-        <nav className="nav" aria-label="주 메뉴">
-          {[
-            ["dashboard", "대시보드"],
-            ["search", "상품검색/가격비교"],
-            ["api", "API 등록 모드"],
-            ["publish", "쇼핑몰 자동등록"],
-            ["pricing", "통합가격 조정"],
-            ["invoice", "송장 자동출력"],
-            ["tenant", "회원/권한"],
-            ["logs", "작업 로그"],
-          ].map(([key, label]) => (
-            <button key={key} className={`${tab === key ? "active" : ""} ${key === "api" ? "orange" : ""}`} onClick={() => setTab(key as Tab)}>
-              {label}
-            </button>
-          ))}
-        </nav>
-        <div className="login-note">
-          로그인: <strong>admin</strong> / <strong>admin</strong>
-          <button className="btn small" onClick={logout}>로그아웃</button>
-        </div>
-      </aside>
+    <div className={`app ${settings.showSidebar ? "with-sidebar" : ""}`}>
+      {settings.showSidebar && (
+        <aside className="sidebar">
+          <div className="brand">
+            <strong>PriceScan</strong>
+            <span>관리자 설정에서 임시 표시 중</span>
+          </div>
+          <nav className="nav" aria-label="좌측 임시 메뉴">
+            {visibleTabs.map((item) => (
+              <button key={item.key} className={`${tab === item.key ? "active" : ""} ${item.key === "api" ? "orange" : ""}`} onClick={() => setTab(item.key)}>
+                {item.label}
+              </button>
+            ))}
+          </nav>
+          <div className="login-note">
+            로그인: <strong>admin</strong> / <strong>admin</strong>
+            <button className="btn small" onClick={logout}>로그아웃</button>
+          </div>
+        </aside>
+      )}
 
       <main className="main">
-        <header className="top">
-          <div>
-            <div className="eyebrow">market price automation</div>
-            <h1>셀러용 가격수집·상품등록 자동화</h1>
-            <p className="lead">가격 수집, 최저가 기준 선택, 이상가 제외, 마진 계산, 송장 출력까지 실제 백엔드와 연결된 복구 버전입니다.</p>
+        <header className="top-shell">
+          <div className="top-brand">
+            <strong>PriceScan</strong>
+            <span>상품검색 · 쇼핑몰셋업 중심 운영</span>
           </div>
-          <span className="pill blue">FastAPI 연결됨</span>
+          <nav className="top-nav" aria-label="상단 메뉴">
+            {visibleTabs.map((item) => (
+              <button key={item.key} className={`${tab === item.key ? "active" : ""} ${item.key === "api" ? "orange" : ""}`} onClick={() => setTab(item.key)}>
+                <strong>{item.label}</strong>
+                <span>{item.description}</span>
+              </button>
+            ))}
+          </nav>
+          <div className="top-actions">
+            <span className="pill blue">FastAPI 연결됨</span>
+            <button className="btn small" onClick={logout}>로그아웃</button>
+          </div>
         </header>
+
+        <section className="page-title">
+          <div className="eyebrow">focused seller automation</div>
+          <h1>상품검색과 쇼핑몰셋업에 집중</h1>
+          <p className="lead">좌측 메뉴는 기본 숨김 처리했고, 확장 기능은 관리자설정에서 필요할 때만 켤 수 있습니다.</p>
+        </section>
 
         {notice && <div className="notice">{notice}</div>}
 
-        <section className="grid stats">
+        <section className="grid stats focused-stats">
           <StatCard label="누적 수집 상품" value={dashboard?.stats.collected_products ?? 0} />
           <StatCard label="최저가 후보" value={dashboard?.stats.lowest_candidates ?? 0} />
-          <StatCard label="등록 대기" value={dashboard?.stats.pending_publish ?? 0} />
-          <StatCard label="가격조정 대상" value={dashboard?.stats.pricing_targets ?? 0} />
-          <StatCard label="송장 출력" value={dashboard?.stats.invoice_ready ?? 0} />
+          <StatCard label="연동 API" value={dashboard?.stats.connected_apis ?? 0} />
         </section>
-
-        {tab === "dashboard" && (
-          <section className="section active">
-            <div className="section-head">
-              <div>
-                <h2>운영 현황</h2>
-                <p>현재 백엔드 API, SQLite 저장소, 관리자 로그인, 작업 로그까지 연결되어 있습니다.</p>
-              </div>
-              <button className="btn primary" onClick={runSearch}>빠른 수집 실행</button>
-            </div>
-            <div className="split">
-              <div className="box">
-                <strong>최근 검색</strong>
-                <p>{searchPayload.run ? `${searchPayload.run.query} · ${searchPayload.summary.collected_count}건 수집` : "아직 검색 기록이 없습니다."}</p>
-              </div>
-              <div className="box">
-                <strong>복구 진행도</strong>
-                <p>1단계: 실제 백엔드 연결 완료. 다음 단계는 네이버 쇼핑 API 실제 호출과 DB 가격 이력 고도화입니다.</p>
-              </div>
-            </div>
-          </section>
-        )}
 
         {tab === "search" && (
           <section className="section active">
             <div className="section-head">
               <div>
-                <h2>상품검색/가격비교</h2>
-                <p>검색 결과는 백엔드에 저장되고, 기준가 선택/제외 처리도 API로 반영됩니다.</p>
+                <h2>상품검색</h2>
+                <p>API 등을 통해 해당 상품의 가격을 검색하고, 최저가 기준 선택/제외 처리까지 반영합니다.</p>
               </div>
               <span className={collecting ? "pill orange" : "pill green"}>{collecting ? "수집 중" : "대기/완료"}</span>
             </div>
@@ -385,7 +441,7 @@ export default function App() {
           <section className="section active">
             <div className="section-head">
               <div>
-                <h2>API 등록 모드</h2>
+                <h2>쇼핑몰셋업</h2>
                 <p>플랫폼별 API 키를 저장하고 백엔드에서 연결 상태를 테스트합니다.</p>
               </div>
               <span className="pill blue">{dashboard?.stats.connected_apis ?? 0} connected</span>
@@ -408,7 +464,7 @@ export default function App() {
           </section>
         )}
 
-        {tab === "publish" && (
+        {settings.features.publish && tab === "publish" && (
           <section className="section active">
             <div className="section-head">
               <div>
@@ -428,7 +484,7 @@ export default function App() {
           </section>
         )}
 
-        {tab === "pricing" && (
+        {settings.features.pricing && tab === "pricing" && (
           <section className="section active">
             <div className="section-head">
               <div>
@@ -444,7 +500,7 @@ export default function App() {
           </section>
         )}
 
-        {tab === "invoice" && (
+        {settings.features.invoice && tab === "invoice" && (
           <section className="section active">
             <div className="section-head">
               <div>
@@ -474,20 +530,53 @@ export default function App() {
           </section>
         )}
 
-        {tab === "tenant" && (
+        {settings.features.tenant && tab === "tenant" && (
           <section className="section active">
             <div className="section-head"><div><h2>회원/권한</h2><p>초기 30명 셀러 운영 기준으로 테넌트 분리를 준비합니다.</p></div></div>
             <div className="box">현재 복구 단계에서는 관리자 단일 계정입니다. 다음 단계에서 셀러별 워크스페이스, API 키 분리, 과금 상태를 DB 모델로 추가합니다.</div>
           </section>
         )}
 
-        {tab === "logs" && (
+        {tab === "settings" && (
           <section className="section active">
-            <div className="section-head"><div><h2>작업 로그</h2><p>백엔드에 기록되는 실제 작업 로그입니다.</p></div></div>
-            <div className="log">
-              {logs.map((item) => (
+            <div className="section-head">
+              <div>
+                <h2>관리자설정</h2>
+                <p>좌측 메뉴와 확장 기능 노출 여부를 관리합니다. 기본값은 핵심 기능만 켜진 상태입니다.</p>
+              </div>
+              <button className="btn" onClick={refreshLogs}>로그 새로고침</button>
+            </div>
+            <div className="settings-grid">
+              <div className="box settings-box">
+                <strong>메뉴 표시</strong>
+                <label className="toggle-row">
+                  <input type="checkbox" checked={settings.showSidebar} onChange={toggleSidebar} />
+                  <span>좌측 메뉴 임시 표시</span>
+                  <em>{settings.showSidebar ? "켜짐" : "꺼짐"}</em>
+                </label>
+                <p>기본 메뉴는 상단 메뉴입니다. 좌측 메뉴는 필요할 때만 임시로 표시합니다.</p>
+              </div>
+              <div className="box settings-box">
+                <strong>확장 기능 사용 여부</strong>
+                {optionalTabs.map((item) => (
+                  <label className="toggle-row" key={item.key}>
+                    <input type="checkbox" checked={settings.features[item.key]} onChange={() => toggleFeature(item.key)} />
+                    <span>{item.label}</span>
+                    <em>{settings.features[item.key] ? "사용" : "숨김"}</em>
+                  </label>
+                ))}
+                <p>꺼진 기능은 상단 메뉴와 좌측 메뉴에서 모두 숨깁니다.</p>
+              </div>
+            </div>
+            <div className="box mt">
+              <strong>현재 집중 기능</strong>
+              <p>상품검색과 쇼핑몰셋업만 기본 노출합니다. 쇼핑몰 자동등록, 통합가격 조정, 송장 출력, 회원권한은 체크를 켜야 메뉴에 나타납니다.</p>
+            </div>
+            <div className="log compact-log">
+              {logs.slice(0, 8).map((item) => (
                 <div className="log-item" key={item.id}><span>{item.message}</span><span>{item.created_at}</span></div>
               ))}
+              {logs.length === 0 && <div className="log-item"><span>작업 로그가 없습니다.</span><span>-</span></div>}
             </div>
           </section>
         )}

@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import os
 import re
+import html
+import json
 import sqlite3
+import urllib.error
+import urllib.parse
+import urllib.request
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +24,8 @@ DATA_DIR = Path(os.getenv("DATA_DIR", BASE_DIR / "data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DATABASE_PATH = Path(os.getenv("DATABASE_PATH", DATA_DIR / "pricescan.db"))
 ADMIN_TOKEN = "pricescan-admin-token"
+HTTP_TIMEOUT_SECONDS = 8
+CRAWLER_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 
 
 app = FastAPI(title="PriceScan API", version="0.1.0")
@@ -72,6 +79,39 @@ def new_id(prefix: str) -> str:
 
 def normalize_title(value: str) -> str:
     return re.sub(r"\s+", "", value.lower())
+
+
+def clean_text(value: str) -> str:
+    without_tags = re.sub(r"<[^>]+>", " ", value)
+    return re.sub(r"\s+", " ", html.unescape(without_tags)).strip()
+
+
+def parse_price(value: str | int | None) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, int):
+        return value
+    digits = re.sub(r"[^\d]", "", value)
+    return int(digits) if digits else 0
+
+
+def read_url(url: str, headers: dict[str, str] | None = None) -> tuple[int, str]:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": CRAWLER_USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+            "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.7,en;q=0.6",
+            **(headers or {}),
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
+            charset = response.headers.get_content_charset() or "utf-8"
+            return response.status, response.read().decode(charset, errors="replace")
+    except urllib.error.HTTPError as error:
+        body = error.read().decode("utf-8", errors="replace")
+        return error.code, body
 
 
 def init_db() -> None:
@@ -133,10 +173,10 @@ def init_db() -> None:
         )
 
         platforms = [
-            ("naver", "네이버 검색 API"),
+            ("naver", "네이버 쇼핑 검색 API"),
             ("naver_datalab", "네이버 데이터랩"),
             ("coupang", "쿠팡"),
-            ("danawa", "다나와"),
+            ("danawa", "다나와 크롤러"),
             ("enuri", "에누리"),
         ]
         for platform, label in platforms:
@@ -147,6 +187,7 @@ def init_db() -> None:
                 """,
                 (platform, label),
             )
+            db.execute("UPDATE api_keys SET label = ? WHERE platform = ?", (label, platform))
 
         order_count = db.execute("SELECT COUNT(*) AS count FROM orders").fetchone()["count"]
         if order_count == 0:
@@ -196,6 +237,157 @@ class PriceSearchRequest(BaseModel):
 
 class InvoicePrintRequest(BaseModel):
     order_ids: list[str]
+
+
+def naver_sort(sort_mode: str) -> str:
+    if sort_mode == "recent":
+        return "date"
+    if sort_mode in {"lowest", "margin"}:
+        return "asc"
+    return "sim"
+
+
+def fetch_naver_products(query: str, sort_mode: str, client_id: str, client_secret: str, display: int = 30) -> list[dict[str, Any]]:
+    params = urllib.parse.urlencode(
+        {
+            "query": query,
+            "display": min(max(display, 1), 100),
+            "start": 1,
+            "sort": naver_sort(sort_mode),
+        }
+    )
+    status, body = read_url(
+        f"https://openapi.naver.com/v1/search/shop.json?{params}",
+        {
+            "Accept": "application/json",
+            "X-Naver-Client-Id": client_id,
+            "X-Naver-Client-Secret": client_secret,
+        },
+    )
+    if status != 200:
+        raise RuntimeError(f"네이버 쇼핑 API 오류: HTTP {status}")
+
+    data = json.loads(body)
+    products: list[dict[str, Any]] = []
+    for item in data.get("items", []):
+        price = parse_price(item.get("lprice"))
+        if price <= 0:
+            continue
+        products.append(
+            {
+                "source": "naver",
+                "mall": clean_text(item.get("mallName") or "네이버"),
+                "name": clean_text(item.get("title") or ""),
+                "price": price,
+                "shipping": 0,
+                "total": price,
+                "url": html.unescape(item.get("link") or "https://shopping.naver.com/"),
+            }
+        )
+    return products
+
+
+def parse_danawa_products(document: str, limit: int = 30) -> list[dict[str, Any]]:
+    starts = [match.start() for match in re.finditer(r"<li\s+id=[\"']productItem\d+[\"']", document, flags=re.IGNORECASE)]
+    blocks = [document[start : starts[index + 1] if index + 1 < len(starts) else len(document)] for index, start in enumerate(starts)]
+    products: list[dict[str, Any]] = []
+    for block in blocks:
+        name_match = re.search(
+            r"class=[\"'][^\"']*prod_name[^\"']*[\"'][^>]*>.*?<a[^>]+href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>",
+            block,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        price_match = re.search(r"id=[\"']min_price_\d+[\"']\s+value=[\"']([\d,]+)[\"']", block, flags=re.IGNORECASE)
+        if not price_match:
+            price_match = re.search(
+                r"class=[\"'][^\"']*price_sect[^\"']*[\"'][^>]*>.*?<strong[^>]*>(.*?)</strong>",
+                block,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+        if not price_match:
+            price_match = re.search(r"data-[^=]*price=[\"']([\d,]+)[\"']", block, flags=re.IGNORECASE)
+        if not name_match or not price_match:
+            continue
+
+        name = clean_text(name_match.group(2))
+        price = parse_price(price_match.group(1))
+        if not name or price <= 0:
+            continue
+
+        products.append(
+            {
+                "source": "danawa",
+                "mall": "다나와",
+                "name": name,
+                "price": price,
+                "shipping": 0,
+                "total": price,
+                "url": urllib.parse.urljoin("https://search.danawa.com/", html.unescape(name_match.group(1))),
+            }
+        )
+        if len(products) >= limit:
+            break
+    return products
+
+
+def fetch_danawa_products(query: str, display: int = 30) -> list[dict[str, Any]]:
+    params = urllib.parse.urlencode(
+        {
+            "query": query,
+            "originalQuery": query,
+            "volumeType": "allvs",
+            "page": 1,
+            "limit": min(max(display, 1), 100),
+        }
+    )
+    status, body = read_url(f"https://search.danawa.com/dsearch.php?{params}")
+    if status != 200:
+        raise RuntimeError(f"다나와 검색 페이지 수집 오류: HTTP {status}")
+    products = parse_danawa_products(body, limit=display)
+    if not products:
+        raise RuntimeError("다나와 검색 결과 파싱 실패 또는 결과 없음")
+    return products
+
+
+def dedupe_products(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    unique_items: list[dict[str, Any]] = []
+    for item in items:
+        total = parse_price(item.get("total"))
+        key = f"{item.get('source')}:{item.get('mall')}:{normalize_title(str(item.get('name', '')))}:{total}"
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized = dict(item)
+        normalized["price"] = parse_price(normalized.get("price"))
+        normalized["shipping"] = parse_price(normalized.get("shipping"))
+        normalized["total"] = normalized["price"] + normalized["shipping"]
+        unique_items.append(normalized)
+    return unique_items
+
+
+def collect_price_products(db: sqlite3.Connection, query: str, sort_mode: str) -> tuple[list[dict[str, Any]], list[str]]:
+    warnings: list[str] = []
+    products: list[dict[str, Any]] = []
+
+    naver_key = db.execute("SELECT * FROM api_keys WHERE platform = 'naver'").fetchone()
+    if naver_key and naver_key["client_id"] and naver_key["client_secret"]:
+        try:
+            products.extend(fetch_naver_products(query, sort_mode, naver_key["client_id"], naver_key["client_secret"]))
+        except Exception as error:
+            warnings.append(str(error))
+    else:
+        warnings.append("네이버 쇼핑 API 키가 없어 네이버 수집을 건너뜀")
+
+    try:
+        products.extend(fetch_danawa_products(query))
+    except Exception as error:
+        warnings.append(str(error))
+
+    unique_products = dedupe_products(products)
+    if sort_mode == "recent":
+        return list(reversed(unique_products)), warnings
+    return sorted(unique_products, key=lambda item: item["total"]), warnings
 
 
 def sample_products(query: str) -> list[dict[str, Any]]:
@@ -357,7 +549,28 @@ def test_api_key(platform: str) -> dict[str, Any]:
         key = db.execute("SELECT * FROM api_keys WHERE platform = ?", (platform,)).fetchone()
         if not key:
             raise HTTPException(status_code=404, detail="Unknown platform")
-        connected = bool(key["client_id"] and key["client_secret"])
+        connected = False
+        message = "Client ID/Secret 입력 필요"
+        if platform == "naver":
+            if key["client_id"] and key["client_secret"]:
+                try:
+                    fetch_naver_products("노트북", "lowest", key["client_id"], key["client_secret"], display=1)
+                    connected = True
+                    message = "네이버 쇼핑 검색 API 실제 호출 성공"
+                except Exception as error:
+                    message = str(error)
+            else:
+                message = "네이버 Client ID/Secret 입력 필요"
+        elif platform == "danawa":
+            try:
+                fetch_danawa_products("노트북", display=1)
+                connected = True
+                message = "다나와 검색 페이지 수집/파싱 성공"
+            except Exception as error:
+                message = str(error)
+        else:
+            connected = bool(key["client_id"] and key["client_secret"])
+            message = "API 키 형식 확인 완료" if connected else "Client ID/Secret 입력 필요"
         status = "connected" if connected else "warning"
         db.execute(
             "UPDATE api_keys SET status = ?, last_tested_at = ? WHERE platform = ?",
@@ -367,18 +580,16 @@ def test_api_key(platform: str) -> dict[str, Any]:
     return {
         "platform": platform,
         "status": status,
-        "message": "API 키 형식 확인 완료" if connected else "Client ID/Secret 입력 필요",
+        "message": message,
     }
 
 
 @app.post("/price-search", dependencies=[Depends(require_admin)])
 def price_search(payload: PriceSearchRequest) -> dict[str, Any]:
     run_id = new_id("run")
-    items = sample_products(payload.query)
-    if payload.sort_mode == "recent":
-        items = list(reversed(items))
-    else:
-        items = sorted(items, key=lambda item: item["total"])
+    with connect() as db:
+        items, warnings = collect_price_products(db, payload.query, payload.sort_mode)
+
     average = sum(item["total"] for item in items) / len(items) if items else 0
     baseline_item = next(
         (
@@ -422,8 +633,14 @@ def price_search(payload: PriceSearchRequest) -> dict[str, Any]:
                     now(),
                 ),
             )
+        for warning in warnings:
+            db.execute(
+                "INSERT INTO logs (id, message, level, created_at) VALUES (?, ?, ?, ?)",
+                (new_id("log"), warning, "warning", now()),
+            )
         payload_out = get_run_payload(db, run_id)
-    log_event(f"price search completed: {payload.query}")
+    log_level = "warning" if warnings else "info"
+    log_event(f"price search completed: {payload.query} · {len(items)} items", log_level)
     return payload_out
 
 
