@@ -234,7 +234,8 @@ export default function App() {
     setOrders(orderData);
     setChannels(channelData);
     setLogs(logData);
-    const selected = keyData.find((item) => item.platform === apiPlatform) || keyData[0];
+    const visibleKeyData = keyData.filter((item) => item.platform !== "naver_datalab");
+    const selected = visibleKeyData.find((item) => item.platform === apiPlatform) || visibleKeyData.find((item) => item.platform === "naver") || visibleKeyData[0];
     if (selected) {
       setApiPlatform(selected.platform);
       setApiClientId(selected.client_id || "");
@@ -302,16 +303,30 @@ export default function App() {
   };
 
   const saveApiKey = async () => {
+    const clientId = apiClientId.trim();
+    const clientSecret = apiClientSecret.trim();
     await request(`/api-keys/${apiPlatform}`, token, {
       method: "PUT",
-      body: JSON.stringify({ client_id: apiClientId, client_secret: apiClientSecret }),
+      body: JSON.stringify({ client_id: clientId, client_secret: clientSecret }),
     });
     setApiKeys(await request<ApiKey[]>("/api-keys", token));
+    setApiClientId(clientId);
+    setApiClientSecret(clientSecret);
     setNotice("API 키 저장 완료");
     await refreshLogs();
   };
 
   const testApiKey = async () => {
+    const clientId = apiClientId.trim();
+    const clientSecret = apiClientSecret.trim();
+    if (clientId || clientSecret) {
+      await request(`/api-keys/${apiPlatform}`, token, {
+        method: "PUT",
+        body: JSON.stringify({ client_id: clientId, client_secret: clientSecret }),
+      });
+      setApiClientId(clientId);
+      setApiClientSecret(clientSecret);
+    }
     const result = await request<{ status: string; message: string }>(`/api-keys/${apiPlatform}/test`, token, { method: "POST" });
     setApiKeys(await request<ApiKey[]>("/api-keys", token));
     setNotice(result.message);
@@ -350,6 +365,7 @@ export default function App() {
 
   const enabledOptionalTabs = optionalTabs.filter((item) => settings.features[item.key]);
   const visibleTabs = [...primaryTabs, ...enabledOptionalTabs];
+  const visibleApiKeys = apiKeys.filter((item) => item.platform !== "naver_datalab");
 
   return (
     <div className={`app ${settings.showSidebar ? "with-sidebar" : ""}`}>
@@ -447,7 +463,7 @@ export default function App() {
               <span className="pill blue">{dashboard?.stats.connected_apis ?? 0} connected</span>
             </div>
             <div className="grid api-grid">
-              {apiKeys.map((item) => (
+              {visibleApiKeys.map((item) => (
                 <button key={item.platform} className={`api-card ${apiPlatform === item.platform ? "selected" : ""}`} onClick={() => selectApiPlatform(item.platform)}>
                   <strong>{item.label}</strong>
                   <span className={pillClass(item.status)}>{statusLabel(item.status)}</span>
@@ -459,7 +475,7 @@ export default function App() {
               <input className="input" placeholder="Client ID" value={apiClientId} onChange={(event) => setApiClientId(event.target.value)} />
               <input className="input" placeholder="Client Secret" value={apiClientSecret} onChange={(event) => setApiClientSecret(event.target.value)} />
               <button className="btn primary" onClick={saveApiKey}>저장</button>
-              <button className="btn orange" onClick={testApiKey}>연동 테스트</button>
+              <button className="btn orange" onClick={testApiKey}>저장 후 연동 테스트</button>
             </div>
           </section>
         )}

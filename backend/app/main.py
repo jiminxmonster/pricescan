@@ -189,6 +189,24 @@ def init_db() -> None:
             )
             db.execute("UPDATE api_keys SET label = ? WHERE platform = ?", (label, platform))
 
+        naver = db.execute("SELECT client_id, client_secret FROM api_keys WHERE platform = 'naver'").fetchone()
+        legacy_naver = db.execute("SELECT client_id, client_secret FROM api_keys WHERE platform = 'naver_datalab'").fetchone()
+        if (
+            naver
+            and legacy_naver
+            and not naver["client_id"]
+            and legacy_naver["client_id"]
+            and legacy_naver["client_secret"]
+        ):
+            db.execute(
+                """
+                UPDATE api_keys
+                SET client_id = ?, client_secret = ?, status = 'configured'
+                WHERE platform = 'naver'
+                """,
+                (legacy_naver["client_id"], legacy_naver["client_secret"]),
+            )
+
         order_count = db.execute("SELECT COUNT(*) AS count FROM orders").fetchone()["count"]
         if order_count == 0:
             seed_orders = [
@@ -265,7 +283,8 @@ def fetch_naver_products(query: str, sort_mode: str, client_id: str, client_secr
         },
     )
     if status != 200:
-        raise RuntimeError(f"네이버 쇼핑 API 오류: HTTP {status}")
+        detail = clean_text(body)[:160]
+        raise RuntimeError(f"네이버 쇼핑 API 오류: HTTP {status} · {detail}")
 
     data = json.loads(body)
     products: list[dict[str, Any]] = []
