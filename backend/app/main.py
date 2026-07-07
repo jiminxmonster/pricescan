@@ -738,6 +738,7 @@ def price_search(payload: PriceSearchRequest) -> dict[str, Any]:
                 (new_id("log"), warning, "warning", now()),
             )
         payload_out = get_run_payload(db, run_id)
+        payload_out["warnings"] = warnings
     log_level = "warning" if warnings else "info"
     log_event(f"price search completed: {payload.query} · {len(items)} items", log_level)
     return payload_out

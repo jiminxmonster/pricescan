@@ -392,6 +392,20 @@ td { font-size: 14px; }
   color: var(--brand);
   font-weight: 800;
 }
+.source-warning {
+  display: grid;
+  gap: 6px;
+  border: 1px solid #f4c7c3;
+  border-radius: 4px;
+  background: #fff7f6;
+  padding: 11px 13px;
+  margin-bottom: 14px;
+  color: #a4342a;
+  font-weight: 800;
+}
+.source-warning span {
+  display: block;
+}
 .mt { margin-top: 14px; }
 .settings-grid {
   display: grid;

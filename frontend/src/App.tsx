@@ -65,6 +65,7 @@ type Dashboard = {
 type SearchPayload = {
   run: { id: string; query: string; status: string; created_at: string } | null;
   items: PriceItem[];
+  warnings?: string[];
   summary: {
     collected_count: number;
     lowest_count: number;
@@ -434,6 +435,11 @@ export default function App() {
               <button className="btn primary" onClick={runSearch} disabled={collecting}>돋보기 검색</button>
               <button className="btn danger" onClick={stopSearch} disabled={!collecting}>수집 중지</button>
             </div>
+            {Boolean(searchPayload.warnings?.length) && (
+              <div className="source-warning">
+                {searchPayload.warnings?.map((warning) => <span key={warning}>{warning}</span>)}
+              </div>
+            )}
             <div className="box compact">
               <strong>상세검색 필드</strong>
               <label><input type="checkbox" defaultChecked /> 브랜드</label>
