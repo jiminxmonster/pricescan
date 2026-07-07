@@ -194,6 +194,13 @@ def init_db() -> None:
                 (platform, label),
             )
             db.execute("UPDATE api_keys SET label = ? WHERE platform = ?", (label, platform))
+        db.execute(
+            """
+            UPDATE api_keys
+            SET status = 'ready'
+            WHERE platform = 'danawa' AND status = 'not_configured'
+            """
+        )
 
         naver = db.execute("SELECT client_id, client_secret FROM api_keys WHERE platform = 'naver'").fetchone()
         legacy_naver = db.execute("SELECT client_id, client_secret FROM api_keys WHERE platform = 'naver_datalab'").fetchone()
@@ -609,7 +616,7 @@ def dashboard() -> dict[str, Any]:
         latest = db.execute("SELECT id FROM search_runs ORDER BY created_at DESC LIMIT 1").fetchone()
         item_count = db.execute("SELECT COUNT(*) AS count FROM price_items").fetchone()["count"]
         orders_ready = db.execute("SELECT COUNT(*) AS count FROM orders WHERE status = 'ready'").fetchone()["count"]
-        api_ready = db.execute("SELECT COUNT(*) AS count FROM api_keys WHERE status = 'connected'").fetchone()["count"]
+        api_ready = db.execute("SELECT COUNT(*) AS count FROM api_keys WHERE status IN ('connected', 'ready')").fetchone()["count"]
         latest_payload = get_run_payload(db, latest["id"]) if latest else None
     return {
         "stats": {
@@ -636,7 +643,10 @@ def save_api_key(platform: str, payload: ApiKeyPayload) -> dict[str, Any]:
         row = db.execute("SELECT platform FROM api_keys WHERE platform = ?", (platform,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Unknown platform")
-        status = "configured" if payload.client_id and payload.client_secret else "not_configured"
+        if platform == "danawa":
+            status = "ready"
+        else:
+            status = "configured" if payload.client_id and payload.client_secret else "not_configured"
         db.execute(
             """
             UPDATE api_keys

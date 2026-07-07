@@ -210,6 +210,16 @@ function statusLabel(status: string): string {
   return labels[status] || status;
 }
 
+function apiStatusLabel(status: string): string {
+  if (status === "ready") return "설정 필요 없음";
+  return statusLabel(status);
+}
+
+function apiStatusDetail(item: ApiKey): string {
+  if (item.status === "ready") return "크롤러 사용 가능";
+  return item.last_tested_at || "테스트 전";
+}
+
 function pillClass(status: string): string {
   if (["baseline", "ready", "connected", "printed"].includes(status)) return "pill green";
   if (["abnormal", "warning", "address_check"].includes(status)) return "pill orange";
@@ -889,8 +899,8 @@ export default function App() {
               {visibleApiKeys.map((item) => (
                 <button key={item.platform} className={`api-card ${apiPlatform === item.platform ? "selected" : ""}`} onClick={() => selectApiPlatform(item.platform)}>
                   <strong>{item.label}</strong>
-                  <span className={pillClass(item.status)}>{statusLabel(item.status)}</span>
-                  <p>{item.last_tested_at || "테스트 전"}</p>
+                  <span className={pillClass(item.status)}>{apiStatusLabel(item.status)}</span>
+                  <p>{apiStatusDetail(item)}</p>
                 </button>
               ))}
             </div>
