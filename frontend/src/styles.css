@@ -310,6 +310,70 @@ select {
   align-items: center;
   margin-bottom: 14px;
 }
+.detail-filter-panel {
+  display: grid;
+  gap: 13px;
+  margin-bottom: 14px;
+}
+.detail-filter-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+}
+.detail-filter-head strong {
+  color: var(--text);
+  font-size: 15px;
+}
+.detail-filter-head span {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+.detail-filter-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.detail-filter-group {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #fff;
+  padding: 11px;
+}
+.detail-filter-group > strong {
+  color: var(--brand);
+  font-size: 13px;
+}
+.detail-filter-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.detail-filter-options label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #f8fafc;
+  padding: 6px 9px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 900;
+  cursor: pointer;
+}
+.detail-filter-options input {
+  width: 14px;
+  height: 14px;
+}
+.detail-filter-options em {
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+}
 .table-wrap { overflow-x: auto; }
 table {
   width: 100%;
@@ -474,7 +538,8 @@ td { font-size: 14px; }
   .stats,
   .channels,
   .api-grid,
-  .settings-grid {
+  .settings-grid,
+  .detail-filter-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .top-shell {
@@ -511,6 +576,7 @@ td { font-size: 14px; }
   .api-grid,
   .form-grid,
   .settings-grid,
+  .detail-filter-grid,
   .focused-stats { grid-template-columns: 1fr; }
   .top-nav button {
     min-width: 178px;

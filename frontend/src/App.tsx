@@ -89,6 +89,20 @@ type PriceItem = {
   collected_at: string;
 };
 
+type DetailFilterOption = {
+  value: string;
+  label: string;
+  count: number;
+};
+
+type DetailFilter = {
+  key: string;
+  label: string;
+  options: DetailFilterOption[];
+};
+
+type SelectedDetailFilters = Record<string, string[]>;
+
 type ApiKey = {
   platform: string;
   label: string;
@@ -165,6 +179,231 @@ function pillClass(status: string): string {
   return "pill blue";
 }
 
+function normalize(value: string): string {
+  return value.toLowerCase().replace(/\s+/g, "");
+}
+
+function itemText(item: PriceItem): string {
+  return `${item.name} ${item.mall}`.toLowerCase();
+}
+
+function unique(values: string[]): string[] {
+  return [...new Set(values.filter(Boolean))];
+}
+
+function extractBrand(item: PriceItem): string[] {
+  const text = itemText(item);
+  const brands = [
+    [/삼성|samsung|갤럭시북|galaxybook/i, "삼성"],
+    [/lg전자|(^|[^a-z])lg([^a-z]|$)|그램|울트라pc/i, "LG"],
+    [/apple|맥북|macbook/i, "Apple"],
+    [/asus|에이수스|비보북|vivobook|tuf/i, "ASUS"],
+    [/(^|[^a-z])hp([^a-z]|$)/i, "HP"],
+    [/msi|소드|스텔스|프레스티지/i, "MSI"],
+    [/lenovo|레노버|thinkpad|씽크패드|ideapad/i, "Lenovo"],
+    [/dell|델|xps|inspiron/i, "Dell"],
+    [/acer|에이서|swift|aspire/i, "Acer"],
+    [/한성|tfg/i, "한성"],
+    [/gigabyte|기가바이트|aorus/i, "Gigabyte"],
+    [/microsoft|서피스|surface/i, "Microsoft"],
+  ] as Array<[RegExp, string]>;
+  return brands.filter(([pattern]) => pattern.test(text)).map(([, label]) => label);
+}
+
+function extractScreen(item: PriceItem): string[] {
+  const values: string[] = [];
+  const text = item.name;
+  for (const match of text.matchAll(/(\d{2}(?:\.\d)?)\s?(?:형|인치|inch|")/gi)) {
+    values.push(`${match[1]}형`);
+  }
+  for (const match of text.matchAll(/(?:그램|gram|비보북|vivobook|갤럭시북|macbook|맥북)\s?(1[3-8])(?:\s|$|-)/gi)) {
+    values.push(`${match[1]}형`);
+  }
+  return unique(values);
+}
+
+function extractCpu(item: PriceItem): string[] {
+  const text = item.name;
+  const values: string[] = [];
+  for (const match of text.matchAll(/\b(i[3579]|ryzen\s?[3579]|라이젠\s?[3579]|m[1-5])\b/gi)) {
+    values.push(match[1].replace(/\s+/g, " ").toUpperCase());
+  }
+  return unique(values);
+}
+
+function extractMemory(item: PriceItem): string[] {
+  const values: string[] = [];
+  for (const match of item.name.matchAll(/(\d{1,3})\s?GB/gi)) {
+    const after = item.name.slice(match.index || 0, (match.index || 0) + 16).toLowerCase();
+    if (/(ssd|nvme|hdd)/i.test(after)) continue;
+    const amount = Number(match[1]);
+    if (amount >= 4 && amount <= 128) values.push(`${amount}GB`);
+  }
+  return unique(values);
+}
+
+function extractStorage(item: PriceItem): string[] {
+  const values: string[] = [];
+  for (const match of item.name.matchAll(/(\d+(?:\.\d+)?)\s?(GB|TB)\s?(SSD|NVMe|HDD)/gi)) {
+    values.push(`${match[1]}${match[2].toUpperCase()}`);
+  }
+  return unique(values);
+}
+
+function extractOs(item: PriceItem): string[] {
+  const text = itemText(item);
+  const values: string[] = [];
+  if (/win\s?11|windows\s?11|윈도우\s?11/i.test(text)) values.push("Windows 11");
+  if (/win\s?10|windows\s?10|윈도우\s?10/i.test(text)) values.push("Windows 10");
+  if (/freedos|free dos|프리도스/i.test(text)) values.push("FreeDOS");
+  if (/macos|맥os/i.test(text)) values.push("macOS");
+  return values;
+}
+
+function extractConnector(item: PriceItem): string[] {
+  const text = itemText(item);
+  const values: string[] = [];
+  if (/usb\s?c|c타입|type\s?c/i.test(text)) values.push("USB-C");
+  if (/usb\s?a|a타입|type\s?a/i.test(text)) values.push("USB-A");
+  if (/hdmi/i.test(text)) values.push("HDMI");
+  if (/lightning|라이트닝/i.test(text)) values.push("Lightning");
+  if (/dp|displayport|디스플레이포트/i.test(text)) values.push("DisplayPort");
+  return values;
+}
+
+function extractLength(item: PriceItem): string[] {
+  const values: string[] = [];
+  for (const match of item.name.matchAll(/(\d+(?:\.\d+)?)\s?(m|cm)\b/gi)) {
+    values.push(`${match[1]}${match[2].toLowerCase()}`);
+  }
+  return unique(values);
+}
+
+function extractWatt(item: PriceItem): string[] {
+  const values: string[] = [];
+  for (const match of item.name.matchAll(/(\d{2,3})\s?W\b/gi)) {
+    values.push(`${match[1]}W`);
+  }
+  return unique(values);
+}
+
+function extractColor(item: PriceItem): string[] {
+  const text = itemText(item);
+  const colors = ["블랙", "화이트", "실버", "그레이", "그린", "블루", "레드", "핑크", "베이지"];
+  return colors.filter((color) => text.includes(color.toLowerCase()));
+}
+
+function extractCapacity(item: PriceItem): string[] {
+  const values: string[] = [];
+  for (const match of item.name.matchAll(/(\d+(?:\.\d+)?)\s?(ml|l|리터|kg|g)\b/gi)) {
+    values.push(`${match[1]}${match[2].toUpperCase()}`);
+  }
+  return unique(values);
+}
+
+function extractShipping(item: PriceItem): string[] {
+  return [item.shipping === 0 ? "무료배송" : "유료배송"];
+}
+
+function extractPriceBand(item: PriceItem): string[] {
+  if (item.total < 100000) return ["10만원 미만"];
+  if (item.total < 500000) return ["10만-50만원"];
+  if (item.total < 1000000) return ["50만-100만원"];
+  if (item.total < 2000000) return ["100만-200만원"];
+  return ["200만원 이상"];
+}
+
+const filterExtractors: Record<string, (item: PriceItem) => string[]> = {
+  brand: extractBrand,
+  screen: extractScreen,
+  cpu: extractCpu,
+  memory: extractMemory,
+  storage: extractStorage,
+  os: extractOs,
+  connector: extractConnector,
+  length: extractLength,
+  watt: extractWatt,
+  color: extractColor,
+  capacity: extractCapacity,
+  shipping: extractShipping,
+  mall: (item) => [item.mall],
+  source: (item) => [item.source],
+  priceBand: extractPriceBand,
+};
+
+function filterDefinitions(keyword: string): Array<{ key: string; label: string }> {
+  const text = normalize(keyword);
+  if (/노트북|랩탑|laptop|맥북|그램|갤럭시북/.test(text)) {
+    return [
+      { key: "brand", label: "브랜드" },
+      { key: "screen", label: "화면크기" },
+      { key: "cpu", label: "CPU" },
+      { key: "memory", label: "메모리" },
+      { key: "storage", label: "저장장치" },
+      { key: "os", label: "OS" },
+      { key: "priceBand", label: "가격대" },
+      { key: "shipping", label: "배송" },
+    ];
+  }
+  if (/케이블|충전기|어댑터|usb|hdmi|c타입|typec/.test(text)) {
+    return [
+      { key: "brand", label: "브랜드" },
+      { key: "connector", label: "단자" },
+      { key: "length", label: "길이" },
+      { key: "watt", label: "출력" },
+      { key: "color", label: "색상" },
+      { key: "priceBand", label: "가격대" },
+      { key: "shipping", label: "배송" },
+    ];
+  }
+  return [
+    { key: "brand", label: "브랜드" },
+    { key: "capacity", label: "용량/규격" },
+    { key: "color", label: "색상" },
+    { key: "priceBand", label: "가격대" },
+    { key: "shipping", label: "배송" },
+    { key: "mall", label: "판매처" },
+  ];
+}
+
+function buildDetailFilters(keyword: string, items: PriceItem[]): DetailFilter[] {
+  return filterDefinitions(keyword)
+    .map((definition) => {
+      const counts = new Map<string, number>();
+      const extractor = filterExtractors[definition.key];
+      items.forEach((item) => {
+        unique(extractor(item)).forEach((value) => counts.set(value, (counts.get(value) || 0) + 1));
+      });
+      const options = [...counts.entries()]
+        .map(([value, count]) => ({ value, label: value, count }))
+        .filter((option) => option.count > 0)
+        .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label, "ko"));
+      return { ...definition, options };
+    })
+    .filter((filter) => filter.options.length > 1)
+    .slice(0, 7);
+}
+
+function sanitizeSelectedFilters(selected: SelectedDetailFilters, filters: DetailFilter[]): SelectedDetailFilters {
+  const valid = new Map(filters.map((filter) => [filter.key, new Set(filter.options.map((option) => option.value))]));
+  return Object.fromEntries(
+    Object.entries(selected)
+      .map(([key, values]) => [key, values.filter((value) => valid.get(key)?.has(value))])
+      .filter(([, values]) => values.length > 0),
+  );
+}
+
+function filterPriceItems(items: PriceItem[], selected: SelectedDetailFilters): PriceItem[] {
+  const activeFilters = Object.entries(selected).filter(([, values]) => values.length > 0);
+  if (activeFilters.length === 0) return items;
+  return items.filter((item) =>
+    activeFilters.every(([key, values]) => {
+      const itemValues = filterExtractors[key]?.(item) || [];
+      return values.some((value) => itemValues.includes(value));
+    }),
+  );
+}
+
 function LoginScreen({ onLogin }: { onLogin: (token: string) => void }) {
   const [username, setUsername] = useState("admin");
   const [password, setPassword] = useState("admin");
@@ -218,6 +457,7 @@ export default function App() {
   const [apiClientSecret, setApiClientSecret] = useState("");
   const [notice, setNotice] = useState("");
   const [selectedOrders, setSelectedOrders] = useState<string[]>([]);
+  const [selectedDetailFilters, setSelectedDetailFilters] = useState<SelectedDetailFilters>({});
 
   const loadAll = async () => {
     if (!token) return;
@@ -263,6 +503,7 @@ export default function App() {
 
   const runSearch = async () => {
     setCollecting(true);
+    setSelectedDetailFilters({});
     setNotice("상품 가격 수집 중...");
     try {
       const data = await request<SearchPayload>("/price-search", token, {
@@ -357,6 +598,18 @@ export default function App() {
     setSettings((current) => ({ ...current, showSidebar: !current.showSidebar }));
   };
 
+  const toggleDetailFilter = (filterKey: string, value: string) => {
+    setSelectedDetailFilters((current) => {
+      const currentValues = current[filterKey] || [];
+      const nextValues = currentValues.includes(value)
+        ? currentValues.filter((item) => item !== value)
+        : [...currentValues, value];
+      const next = { ...current, [filterKey]: nextValues };
+      if (nextValues.length === 0) delete next[filterKey];
+      return next;
+    });
+  };
+
   const logout = () => {
     localStorage.removeItem(TOKEN_KEY);
     setToken("");
@@ -367,6 +620,13 @@ export default function App() {
   const enabledOptionalTabs = optionalTabs.filter((item) => settings.features[item.key]);
   const visibleTabs = [...primaryTabs, ...enabledOptionalTabs];
   const visibleApiKeys = apiKeys.filter((item) => item.platform !== "naver_datalab");
+  const filterKeyword = searchPayload.run?.query || keyword;
+  const detailFilters = buildDetailFilters(filterKeyword, searchPayload.items);
+  const activeDetailFilters = sanitizeSelectedFilters(selectedDetailFilters, detailFilters);
+  const filteredSearchPayload = {
+    ...searchPayload,
+    items: filterPriceItems(searchPayload.items, activeDetailFilters),
+  };
 
   return (
     <div className={`app ${settings.showSidebar ? "with-sidebar" : ""}`}>
@@ -440,14 +700,15 @@ export default function App() {
                 {searchPayload.warnings?.map((warning) => <span key={warning}>{warning}</span>)}
               </div>
             )}
-            <div className="box compact">
-              <strong>상세검색 필드</strong>
-              <label><input type="checkbox" defaultChecked /> 브랜드</label>
-              <label><input type="checkbox" defaultChecked /> 용량/메모리</label>
-              <label><input type="checkbox" /> 색상</label>
-              <label><input type="checkbox" /> 무료배송</label>
-            </div>
-            <PriceTable payload={searchPayload} onBaseline={selectBaseline} onExclude={toggleExclude} />
+            <DetailFilterPanel
+              filters={detailFilters}
+              selected={activeDetailFilters}
+              totalCount={searchPayload.items.length}
+              visibleCount={filteredSearchPayload.items.length}
+              onToggle={toggleDetailFilter}
+              onClear={() => setSelectedDetailFilters({})}
+            />
+            <PriceTable payload={filteredSearchPayload} onBaseline={selectBaseline} onExclude={toggleExclude} />
           </section>
         )}
 
@@ -510,7 +771,7 @@ export default function App() {
               <div className="box"><strong>현재 기준가</strong><p>{money(searchPayload.summary.baseline_total || 0)}</p></div>
               <div className="box"><strong>제외 항목</strong><p>{searchPayload.summary.excluded_count}건</p></div>
             </div>
-            <PriceTable payload={searchPayload} onBaseline={selectBaseline} onExclude={toggleExclude} />
+            <PriceTable payload={filteredSearchPayload} onBaseline={selectBaseline} onExclude={toggleExclude} />
           </section>
         )}
 
@@ -604,6 +865,76 @@ function StatCard({ label, value }: { label: string; value: number }) {
     <div className="card">
       <span>{label}</span>
       <strong>{value}</strong>
+    </div>
+  );
+}
+
+function DetailFilterPanel({
+  filters,
+  selected,
+  totalCount,
+  visibleCount,
+  onToggle,
+  onClear,
+}: {
+  filters: DetailFilter[];
+  selected: SelectedDetailFilters;
+  totalCount: number;
+  visibleCount: number;
+  onToggle: (filterKey: string, value: string) => void;
+  onClear: () => void;
+}) {
+  const activeCount = Object.values(selected).reduce((sum, values) => sum + values.length, 0);
+
+  if (totalCount === 0) {
+    return (
+      <div className="box detail-filter-panel">
+        <div className="detail-filter-head">
+          <strong>상세검색 필드</strong>
+          <span>검색 후 상품명/가격/배송 정보를 분석해 조건을 자동 생성합니다.</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (filters.length === 0) {
+    return (
+      <div className="box detail-filter-panel">
+        <div className="detail-filter-head">
+          <strong>상세검색 필드</strong>
+          <span>현재 결과에서 공통 상세조건을 찾지 못했습니다.</span>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="box detail-filter-panel">
+      <div className="detail-filter-head">
+        <strong>상세검색 필드</strong>
+        <span>검색 결과 기반 · {visibleCount}/{totalCount}개 표시</span>
+        {activeCount > 0 && <button className="btn small" onClick={onClear}>필터 초기화</button>}
+      </div>
+      <div className="detail-filter-grid">
+        {filters.map((filter) => (
+          <div className="detail-filter-group" key={filter.key}>
+            <strong>{filter.label}</strong>
+            <div className="detail-filter-options">
+              {filter.options.map((option) => (
+                <label key={option.value}>
+                  <input
+                    type="checkbox"
+                    checked={selected[filter.key]?.includes(option.value) || false}
+                    onChange={() => onToggle(filter.key, option.value)}
+                  />
+                  <span>{option.label}</span>
+                  <em>{option.count}</em>
+                </label>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
