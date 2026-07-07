@@ -36,6 +36,44 @@ const optionalTabs: Array<{ key: FeatureKey; label: string; description: string 
   { key: "tenant", label: "회원권한", description: "셀러별 권한/워크스페이스" },
 ];
 
+type SearchSourceOption = {
+  key: string;
+  label: string;
+  description: string;
+  enabled: boolean;
+  badge: string;
+};
+
+type SearchSourceGroup = {
+  title: string;
+  options: SearchSourceOption[];
+};
+
+const searchSourceGroups: SearchSourceGroup[] = [
+  {
+    title: "검색엔진 / 검색 API",
+    options: [
+      { key: "naver", label: "네이버 쇼핑검색", description: "공식 쇼핑 검색 API", enabled: true, badge: "사용 가능" },
+      { key: "google_search", label: "구글 검색 크롤링", description: "검색결과 파싱 미구현", enabled: false, badge: "준비 중" },
+      { key: "naver_search", label: "네이버 일반검색 크롤링", description: "일반검색 파싱 미구현", enabled: false, badge: "준비 중" },
+    ],
+  },
+  {
+    title: "쇼핑몰 / 가격비교",
+    options: [
+      { key: "smartstore", label: "스마트스토어", description: "커머스API 키 입력 가능, 검색수집 미연동", enabled: false, badge: "API 설정 가능" },
+      { key: "danawa", label: "다나와", description: "검색 페이지 크롤러", enabled: true, badge: "사용 가능" },
+      { key: "enuri", label: "에누리", description: "서버 요청 오류로 임시 비활성", enabled: false, badge: "점검 중" },
+      { key: "elevenst", label: "11번가", description: "수집기 미구현", enabled: false, badge: "준비 중" },
+      { key: "gmarket", label: "G마켓", description: "수집기 미구현", enabled: false, badge: "준비 중" },
+      { key: "auction", label: "옥션", description: "수집기 미구현", enabled: false, badge: "준비 중" },
+    ],
+  },
+];
+
+const readySourceKeys = new Set(searchSourceGroups.flatMap((group) => group.options.filter((option) => option.enabled).map((option) => option.key)));
+const apiPlatformOrder = ["naver", "smartstore", "danawa", "enuri", "elevenst", "gmarket", "auction", "google_search", "naver_search", "coupang"];
+
 function readSettings(): AdminSettings {
   try {
     const saved = localStorage.getItem(SETTINGS_KEY);
@@ -513,6 +551,7 @@ export default function App() {
   const [selectedOrders, setSelectedOrders] = useState<string[]>([]);
   const [selectedDetailFilters, setSelectedDetailFilters] = useState<SelectedDetailFilters>({});
   const [showDetailScan, setShowDetailScan] = useState(false);
+  const [selectedSources, setSelectedSources] = useState<string[]>(["naver", "danawa"]);
 
   const loadAll = async () => {
     if (!token) return;
@@ -562,16 +601,24 @@ export default function App() {
       setNotice("검색어를 입력하세요.");
       return;
     }
+    const sources = selectedSources.filter((source) => readySourceKeys.has(source));
+    if (sources.length === 0) {
+      setNotice("사용 가능한 검색 소스를 최소 1개 선택하세요.");
+      return;
+    }
     const templateFilters = templateDetailFilters(keywordValue);
     const detailSelection = mode === "detail" ? sanitizeSelectedFilters(selectedDetailFilters, templateFilters) : {};
     const query = mode === "detail" ? buildDetailSearchQuery(keywordValue, detailSelection) : keywordValue;
     setCollecting(true);
-    if (mode === "simple") setSelectedDetailFilters({});
+    if (mode === "simple") {
+      setSelectedDetailFilters({});
+      setShowDetailScan(false);
+    }
     setNotice(mode === "detail" ? "상세조건으로 상품 가격 수집 중..." : "상품 가격 수집 중...");
     try {
       const data = await request<SearchPayload>("/price-search", token, {
         method: "POST",
-        body: JSON.stringify({ query, sort_mode: sortMode, filters: Object.keys(detailSelection) }),
+        body: JSON.stringify({ query, sort_mode: sortMode, filters: Object.keys(detailSelection), sources }),
       });
       setSearchPayload(data);
       if (mode === "detail") setSelectedDetailFilters(detailSelection);
@@ -683,6 +730,21 @@ export default function App() {
     });
   };
 
+  const toggleSearchSource = (source: string) => {
+    if (!readySourceKeys.has(source)) return;
+    setSelectedSources((current) => {
+      if (current.includes(source)) {
+        const next = current.filter((item) => item !== source);
+        if (next.length === 0) {
+          setNotice("사용 가능한 검색 소스를 최소 1개는 선택해야 합니다.");
+          return current;
+        }
+        return next;
+      }
+      return [...current, source];
+    });
+  };
+
   const changeSortMode = (value: string) => {
     setSortMode(value);
     if (searchPayload.items.length > 0) {
@@ -700,7 +762,13 @@ export default function App() {
 
   const enabledOptionalTabs = optionalTabs.filter((item) => settings.features[item.key]);
   const visibleTabs = [...primaryTabs, ...enabledOptionalTabs];
-  const visibleApiKeys = apiKeys.filter((item) => item.platform !== "naver_datalab");
+  const visibleApiKeys = apiKeys
+    .filter((item) => item.platform !== "naver_datalab")
+    .sort((a, b) => {
+      const aIndex = apiPlatformOrder.indexOf(a.platform);
+      const bIndex = apiPlatformOrder.indexOf(b.platform);
+      return (aIndex === -1 ? 999 : aIndex) - (bIndex === -1 ? 999 : bIndex) || a.label.localeCompare(b.label, "ko");
+    });
   const filterKeyword = searchPayload.run?.query || keyword;
   const detailFilters = buildDetailFilters(filterKeyword, searchPayload.items);
   const scanTemplateFilters = templateDetailFilters(keyword);
@@ -779,6 +847,7 @@ export default function App() {
               <button className="btn primary" onClick={() => runSearch("simple")} disabled={collecting}>스캔</button>
               <button className="btn danger" onClick={stopSearch} disabled={!collecting}>수집 중지</button>
             </div>
+            <SourceSelector groups={searchSourceGroups} selected={selectedSources} onToggle={toggleSearchSource} />
             {showDetailScan && (
               <DetailScanBuilder
                 filters={scanTemplateFilters}
@@ -960,6 +1029,49 @@ function StatCard({ label, value }: { label: string; value: number }) {
     <div className="card">
       <span>{label}</span>
       <strong>{value}</strong>
+    </div>
+  );
+}
+
+function SourceSelector({
+  groups,
+  selected,
+  onToggle,
+}: {
+  groups: SearchSourceGroup[];
+  selected: string[];
+  onToggle: (source: string) => void;
+}) {
+  return (
+    <div className="box source-selector">
+      <div className="source-selector-head">
+        <strong>검색 소스 선택</strong>
+        <span>사용 가능한 소스만 체크할 수 있습니다.</span>
+      </div>
+      <div className="source-group-grid">
+        {groups.map((group) => (
+          <div className="source-group" key={group.title}>
+            <strong>{group.title}</strong>
+            <div className="source-options">
+              {group.options.map((option) => (
+                <label className={`source-option ${option.enabled ? "" : "disabled"}`} key={option.key}>
+                  <input
+                    type="checkbox"
+                    checked={selected.includes(option.key)}
+                    disabled={!option.enabled}
+                    onChange={() => onToggle(option.key)}
+                  />
+                  <span>
+                    <b>{option.label}</b>
+                    <em>{option.description}</em>
+                  </span>
+                  <small>{option.badge}</small>
+                </label>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

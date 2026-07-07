@@ -174,10 +174,16 @@ def init_db() -> None:
 
         platforms = [
             ("naver", "네이버 쇼핑 검색 API"),
+            ("smartstore", "네이버 스마트스토어 커머스API"),
             ("naver_datalab", "네이버 데이터랩"),
             ("coupang", "쿠팡"),
             ("danawa", "다나와 크롤러"),
             ("enuri", "에누리 크롤러"),
+            ("elevenst", "11번가"),
+            ("gmarket", "G마켓"),
+            ("auction", "옥션"),
+            ("google_search", "구글 검색 크롤러"),
+            ("naver_search", "네이버 일반검색 크롤러"),
         ]
         for platform, label in platforms:
             db.execute(
@@ -251,6 +257,7 @@ class PriceSearchRequest(BaseModel):
     query: str = Field(min_length=1)
     sort_mode: str = "lowest"
     filters: list[str] = []
+    sources: list[str] = []
 
 
 class InvoicePrintRequest(BaseModel):
@@ -454,28 +461,34 @@ def dedupe_products(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return unique_items
 
 
-def collect_price_products(db: sqlite3.Connection, query: str, sort_mode: str) -> tuple[list[dict[str, Any]], list[str]]:
+READY_SEARCH_SOURCES = {"naver", "danawa"}
+
+
+def normalize_sources(sources: list[str]) -> list[str]:
+    selected = [source for source in sources if source in READY_SEARCH_SOURCES]
+    return selected or ["naver", "danawa"]
+
+
+def collect_price_products(db: sqlite3.Connection, query: str, sort_mode: str, sources: list[str]) -> tuple[list[dict[str, Any]], list[str]]:
     warnings: list[str] = []
     products: list[dict[str, Any]] = []
+    selected_sources = normalize_sources(sources)
 
-    naver_key = db.execute("SELECT * FROM api_keys WHERE platform = 'naver'").fetchone()
-    if naver_key and naver_key["client_id"] and naver_key["client_secret"]:
+    if "naver" in selected_sources:
+        naver_key = db.execute("SELECT * FROM api_keys WHERE platform = 'naver'").fetchone()
+        if naver_key and naver_key["client_id"] and naver_key["client_secret"]:
+            try:
+                products.extend(fetch_naver_products(query, sort_mode, naver_key["client_id"], naver_key["client_secret"]))
+            except Exception as error:
+                warnings.append(str(error))
+        else:
+            warnings.append("네이버 쇼핑 API 키가 없어 네이버 수집을 건너뜀")
+
+    if "danawa" in selected_sources:
         try:
-            products.extend(fetch_naver_products(query, sort_mode, naver_key["client_id"], naver_key["client_secret"]))
+            products.extend(fetch_danawa_products(query))
         except Exception as error:
             warnings.append(str(error))
-    else:
-        warnings.append("네이버 쇼핑 API 키가 없어 네이버 수집을 건너뜀")
-
-    try:
-        products.extend(fetch_danawa_products(query))
-    except Exception as error:
-        warnings.append(str(error))
-
-    try:
-        products.extend(fetch_enuri_products(query))
-    except Exception as error:
-        warnings.append(str(error))
 
     unique_products = dedupe_products(products)
     if sort_mode == "recent":
@@ -654,6 +667,9 @@ def test_api_key(platform: str) -> dict[str, Any]:
                     message = str(error)
             else:
                 message = "네이버 Client ID/Secret 입력 필요"
+        elif platform == "smartstore":
+            connected = bool(key["client_id"] and key["client_secret"])
+            message = "스마트스토어 커머스API 키 저장 완료 · OAuth/상품조회 연동은 다음 단계에서 연결" if connected else "스마트스토어 Application ID/Secret 입력 필요"
         elif platform == "danawa":
             try:
                 fetch_danawa_products("노트북", display=1)
@@ -687,8 +703,9 @@ def test_api_key(platform: str) -> dict[str, Any]:
 @app.post("/price-search", dependencies=[Depends(require_admin)])
 def price_search(payload: PriceSearchRequest) -> dict[str, Any]:
     run_id = new_id("run")
+    selected_sources = normalize_sources(payload.sources)
     with connect() as db:
-        items, warnings = collect_price_products(db, payload.query, payload.sort_mode)
+        items, warnings = collect_price_products(db, payload.query, payload.sort_mode, selected_sources)
 
     average = sum(item["total"] for item in items) / len(items) if items else 0
     baseline_item = next(
@@ -707,7 +724,14 @@ def price_search(payload: PriceSearchRequest) -> dict[str, Any]:
             INSERT INTO search_runs (id, query, sort_mode, status, filters_json, created_at)
             VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (run_id, payload.query, payload.sort_mode, "completed", str(payload.filters), now()),
+            (
+                run_id,
+                payload.query,
+                payload.sort_mode,
+                "completed",
+                json.dumps({"filters": payload.filters, "sources": selected_sources}, ensure_ascii=False),
+                now(),
+            ),
         )
         for item in items:
             total = item["total"]

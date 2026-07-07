@@ -310,6 +310,93 @@ select {
   align-items: center;
   margin-bottom: 14px;
 }
+.source-selector {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.source-selector-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+}
+.source-selector-head strong {
+  color: var(--text);
+  font-size: 15px;
+}
+.source-selector-head span {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+.source-group-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.source-group {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #fff;
+  padding: 11px;
+}
+.source-group > strong {
+  color: var(--brand);
+  font-size: 13px;
+}
+.source-options {
+  display: grid;
+  gap: 7px;
+}
+.source-option {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 8px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #f8fafc;
+  padding: 9px;
+  cursor: pointer;
+}
+.source-option input {
+  width: 15px;
+  height: 15px;
+}
+.source-option span {
+  display: grid;
+  gap: 2px;
+}
+.source-option b {
+  color: var(--text);
+  font-size: 13px;
+}
+.source-option em {
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+  line-height: 1.35;
+}
+.source-option small {
+  border-radius: 999px;
+  background: var(--green-soft);
+  color: #09613f;
+  padding: 4px 7px;
+  font-size: 11px;
+  font-weight: 900;
+  white-space: nowrap;
+}
+.source-option.disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+.source-option.disabled small {
+  background: #eef1f5;
+  color: var(--muted);
+}
 .detail-filter-panel {
   display: grid;
   gap: 13px;
@@ -557,6 +644,7 @@ td { font-size: 14px; }
   .channels,
   .api-grid,
   .settings-grid,
+  .source-group-grid,
   .detail-filter-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -594,6 +682,7 @@ td { font-size: 14px; }
   .api-grid,
   .form-grid,
   .settings-grid,
+  .source-group-grid,
   .detail-filter-grid,
   .focused-stats { grid-template-columns: 1fr; }
   .top-nav button {
