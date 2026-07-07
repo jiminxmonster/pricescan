@@ -404,6 +404,17 @@ function filterPriceItems(items: PriceItem[], selected: SelectedDetailFilters): 
   );
 }
 
+function sortedPriceItems(items: PriceItem[], sortMode: string): PriceItem[] {
+  const sorted = [...items];
+  if (sortMode === "margin") {
+    return sorted.sort((a, b) => b.margin - a.margin || a.total - b.total);
+  }
+  if (sortMode === "recent") {
+    return sorted.sort((a, b) => b.collected_at.localeCompare(a.collected_at) || a.total - b.total);
+  }
+  return sorted.sort((a, b) => a.total - b.total || a.price - b.price);
+}
+
 function LoginScreen({ onLogin }: { onLogin: (token: string) => void }) {
   const [username, setUsername] = useState("admin");
   const [password, setPassword] = useState("admin");
@@ -625,7 +636,7 @@ export default function App() {
   const activeDetailFilters = sanitizeSelectedFilters(selectedDetailFilters, detailFilters);
   const filteredSearchPayload = {
     ...searchPayload,
-    items: filterPriceItems(searchPayload.items, activeDetailFilters),
+    items: sortedPriceItems(filterPriceItems(searchPayload.items, activeDetailFilters), sortMode),
   };
 
   return (
@@ -692,7 +703,7 @@ export default function App() {
                 <option value="margin">마진높은순</option>
                 <option value="recent">최근수집순</option>
               </select>
-              <button className="btn primary" onClick={runSearch} disabled={collecting}>돋보기 검색</button>
+              <button className="btn primary" onClick={runSearch} disabled={collecting}>스캔</button>
               <button className="btn danger" onClick={stopSearch} disabled={!collecting}>수집 중지</button>
             </div>
             {Boolean(searchPayload.warnings?.length) && (
