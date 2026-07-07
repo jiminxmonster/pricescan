@@ -216,6 +216,12 @@ function money(value: number): string {
   return `${value.toLocaleString("ko-KR")}원`;
 }
 
+function percent(value: number): string {
+  if (!Number.isFinite(value)) return "0.0%";
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${value.toFixed(1)}%`;
+}
+
 function statusLabel(status: string): string {
   const labels: Record<string, string> = {
     baseline: "최저가 기준",
@@ -589,6 +595,7 @@ export default function App() {
   const [smartstorePayload, setSmartstorePayload] = useState<SmartstorePayload>({ items: [], count: 0, page: 1, size: 50 });
   const [smartstoreLoading, setSmartstoreLoading] = useState(false);
   const [smartstoreError, setSmartstoreError] = useState("");
+  const [showSourcePanel, setShowSourcePanel] = useState(false);
 
   const loadAll = async () => {
     if (!token) return;
@@ -890,6 +897,18 @@ export default function App() {
             ))}
           </nav>
           <div className="top-actions">
+            {tab === "search" && (
+              <div className="source-popover-wrap">
+                <button className={`btn small icon-btn ${showSourcePanel ? "active" : ""}`} onClick={() => setShowSourcePanel((current) => !current)}>
+                  소스
+                </button>
+                {showSourcePanel && (
+                  <div className="source-popover">
+                    <SourceSelector groups={searchSourceGroups} selected={selectedSources} onToggle={toggleSearchSource} />
+                  </div>
+                )}
+              </div>
+            )}
             <span className="pill blue">FastAPI 연결됨</span>
             <button className="btn small" onClick={logout}>로그아웃</button>
           </div>
@@ -897,7 +916,7 @@ export default function App() {
 
         {notice && <div className="notice">{notice}</div>}
 
-        <section className="grid stats focused-stats">
+        <section className="grid stats focused-stats compact-stats">
           <StatCard label="누적 수집 상품" value={dashboard?.stats.collected_products ?? 0} />
           <StatCard label="최저가 후보" value={dashboard?.stats.lowest_candidates ?? 0} />
           <StatCard label="연동 API" value={dashboard?.stats.connected_apis ?? 0} />
@@ -922,15 +941,6 @@ export default function App() {
               <button className="btn primary" onClick={() => runSearch("simple")} disabled={collecting}>스캔</button>
               <button className="btn danger" onClick={stopSearch} disabled={!collecting}>수집 중지</button>
             </div>
-            <SourceSelector groups={searchSourceGroups} selected={selectedSources} onToggle={toggleSearchSource} />
-            {selectedSources.includes("smartstore") && (
-              <SmartstoreProductPanel
-                payload={smartstorePayload}
-                loading={smartstoreLoading}
-                error={smartstoreError}
-                onRefresh={() => loadSmartstoreProducts(keyword.trim())}
-              />
-            )}
             {showDetailScan && (
               <DetailScanBuilder
                 filters={scanTemplateFilters}
@@ -955,7 +965,16 @@ export default function App() {
               onToggle={toggleDetailFilter}
               onClear={() => setSelectedDetailFilters({})}
             />
-            <PriceTable payload={filteredSearchPayload} onBaseline={selectBaseline} onExclude={toggleExclude} />
+            <SearchResultList
+              payload={filteredSearchPayload}
+              keyword={filterKeyword}
+              smartstorePayload={smartstorePayload}
+              includeSmartstore={selectedSources.includes("smartstore")}
+              smartstoreLoading={smartstoreLoading}
+              smartstoreError={smartstoreError}
+              onBaseline={selectBaseline}
+              onExclude={toggleExclude}
+            />
           </section>
         )}
 
@@ -1018,7 +1037,16 @@ export default function App() {
               <div className="box"><strong>현재 기준가</strong><p>{money(searchPayload.summary.baseline_total || 0)}</p></div>
               <div className="box"><strong>제외 항목</strong><p>{searchPayload.summary.excluded_count}건</p></div>
             </div>
-            <PriceTable payload={filteredSearchPayload} onBaseline={selectBaseline} onExclude={toggleExclude} />
+            <SearchResultList
+              payload={filteredSearchPayload}
+              keyword={filterKeyword}
+              smartstorePayload={{ items: [], count: 0, page: 1, size: 0 }}
+              includeSmartstore={false}
+              smartstoreLoading={false}
+              smartstoreError=""
+              onBaseline={selectBaseline}
+              onExclude={toggleExclude}
+            />
           </section>
         )}
 
@@ -1236,25 +1264,11 @@ function DetailFilterPanel({
   const activeCount = Object.values(selected).reduce((sum, values) => sum + values.length, 0);
 
   if (totalCount === 0) {
-    return (
-      <div className="box detail-filter-panel">
-        <div className="detail-filter-head">
-          <strong>상세검색 필드</strong>
-          <span>검색 후 상품명/가격/배송 정보를 분석해 조건을 자동 생성합니다.</span>
-        </div>
-      </div>
-    );
+    return null;
   }
 
   if (filters.length === 0) {
-    return (
-      <div className="box detail-filter-panel">
-        <div className="detail-filter-head">
-          <strong>상세검색 필드</strong>
-          <span>현재 결과에서 공통 상세조건을 찾지 못했습니다.</span>
-        </div>
-      </div>
-    );
+    return null;
   }
 
   return (
@@ -1288,101 +1302,99 @@ function DetailFilterPanel({
   );
 }
 
-function smartstoreStatusLabel(status: string): string {
-  const labels: Record<string, string> = {
-    SALE: "판매중",
-    SUSPENSION: "판매중지",
-    WAIT: "대기",
-    OUTOFSTOCK: "품절",
-    DELETE: "삭제",
-  };
-  return labels[status] || status || "-";
-}
+type SearchResultRow = {
+  id: string;
+  name: string;
+  mall: string;
+  salePrice: number;
+  displayPrice: number;
+  url: string;
+  source: "price" | "smartstore";
+  status?: PriceItem["status"];
+  isExcluded?: number;
+};
 
-function SmartstoreProductPanel({
+function SearchResultList({
   payload,
-  loading,
-  error,
-  onRefresh,
+  keyword,
+  smartstorePayload,
+  includeSmartstore,
+  smartstoreLoading,
+  smartstoreError,
+  onBaseline,
+  onExclude,
 }: {
-  payload: SmartstorePayload;
-  loading: boolean;
-  error: string;
-  onRefresh: () => void;
+  payload: SearchPayload;
+  keyword: string;
+  smartstorePayload: SmartstorePayload;
+  includeSmartstore: boolean;
+  smartstoreLoading: boolean;
+  smartstoreError: string;
+  onBaseline: (id: string) => void;
+  onExclude: (id: string) => void;
 }) {
-  return (
-    <div className="box smartstore-panel">
-      <div className="smartstore-head">
-        <div>
-          <strong>네이버 스마트스토어 상품정보</strong>
-          <span>커머스API로 내 스토어에 등록된 상품을 조회합니다.</span>
-        </div>
-        <button className="btn small primary" onClick={onRefresh} disabled={loading}>{loading ? "조회 중" : "상품정보 불러오기"}</button>
-      </div>
-      {error && <div className="source-warning"><span>{error}</span></div>}
-      <div className="table-wrap">
-        <table className="smartstore-table">
-          <thead>
-            <tr>
-              <th>채널상품번호</th><th>원상품번호</th><th>상품명</th><th>상태</th><th>판매가</th><th>할인가</th><th>재고</th><th>배송비</th><th>관리코드</th><th>링크</th>
-            </tr>
-          </thead>
-          <tbody>
-            {payload.items.map((item) => (
-              <tr key={`${item.channel_product_no}-${item.name}`}>
-                <td>{item.channel_product_no || "-"}</td>
-                <td>{item.origin_product_no || "-"}</td>
-                <td>{item.name}</td>
-                <td><span className="pill blue">{smartstoreStatusLabel(item.status)}</span></td>
-                <td>{money(item.sale_price)}</td>
-                <td>{money(item.discounted_price || item.sale_price)}</td>
-                <td>{item.stock_quantity.toLocaleString("ko-KR")}</td>
-                <td>{money(item.delivery_fee)}</td>
-                <td>{item.seller_management_code || "-"}</td>
-                <td><a className="btn small" href={item.url} target="_blank" rel="noreferrer">이동</a></td>
-              </tr>
-            ))}
-            {payload.items.length === 0 && (
-              <tr><td colSpan={10}>{loading ? "스마트스토어 상품정보를 조회 중입니다." : "아직 불러온 스마트스토어 상품이 없습니다."}</td></tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
+  const priceRows: SearchResultRow[] = payload.items.map((item) => ({
+    id: item.id,
+    name: item.name,
+    mall: item.mall,
+    salePrice: item.price,
+    displayPrice: item.total,
+    url: item.url,
+    source: "price",
+    status: item.status,
+    isExcluded: item.is_excluded,
+  }));
+  const storeRows: SearchResultRow[] = includeSmartstore
+    ? smartstorePayload.items.map((item) => {
+        const exposedPrice = (item.discounted_price || item.sale_price) + item.delivery_fee;
+        return {
+          id: `smartstore-${item.channel_product_no || item.id}`,
+          name: item.name,
+          mall: "네이버 스마트스토어",
+          salePrice: item.sale_price,
+          displayPrice: exposedPrice,
+          url: item.url,
+          source: "smartstore" as const,
+        };
+      })
+    : [];
+  const rows = [...priceRows, ...storeRows];
+  const positivePrices = rows.map((row) => row.displayPrice).filter((value) => value > 0);
+  const fallbackBaseline = positivePrices.length ? Math.min(...positivePrices) : 0;
+  const baselineTotal = payload.summary.baseline_total || fallbackBaseline;
 
-function PriceTable({ payload, onBaseline, onExclude }: { payload: SearchPayload; onBaseline: (id: string) => void; onExclude: (id: string) => void }) {
   return (
-    <div className="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>수집시각</th><th>소스</th><th>판매처</th><th>상품명</th><th>가격</th><th>배송비</th><th>총액</th><th>예상마진</th><th>상태</th><th>액션</th><th>링크</th>
-          </tr>
-        </thead>
-        <tbody>
-          {payload.items.map((item) => (
-            <tr key={item.id}>
-              <td>{item.collected_at}</td>
-              <td>{item.source}</td>
-              <td>{item.mall}</td>
-              <td><a className="product-link" href={item.url} target="_blank" rel="noreferrer">{item.name}</a></td>
-              <td>{money(item.price)}</td>
-              <td>{money(item.shipping)}</td>
-              <td>{money(item.total)}</td>
-              <td>{item.status === "baseline" ? "기준가" : money(item.margin)}</td>
-              <td><span className={pillClass(item.status)}>{statusLabel(item.status)}</span></td>
-              <td className="actions">
-                <button className="btn small" onClick={() => onBaseline(item.id)}>기준</button>
-                <button className="btn small danger" onClick={() => onExclude(item.id)}>{item.is_excluded ? "복구" : "제외"}</button>
-              </td>
-              <td><a className="btn small" href={item.url} target="_blank" rel="noreferrer">이동</a></td>
-            </tr>
-          ))}
-          {payload.items.length === 0 && <tr><td colSpan={11}>검색 결과가 없습니다.</td></tr>}
-        </tbody>
-      </table>
+    <div className="result-list">
+      <div className="result-list-head">
+        <strong>({keyword || "검색 상품"} 모델명)</strong>
+        <span>{rows.length}개 결과</span>
+      </div>
+      {smartstoreError && <div className="source-warning"><span>{smartstoreError}</span></div>}
+      {smartstoreLoading && <div className="result-row muted-row">스마트스토어 상품정보 조회 중...</div>}
+      {rows.map((row) => {
+        const margin = row.displayPrice - baselineTotal;
+        const compareRate = baselineTotal ? (margin / baselineTotal) * 100 : 0;
+        const marginRate = row.displayPrice ? (margin / row.displayPrice) * 100 : 0;
+        return (
+          <div className={`result-row ${row.status === "baseline" ? "baseline-row" : ""}`} key={row.id}>
+            <a className="result-model" href={row.url} target="_blank" rel="noreferrer">{row.name}</a>
+            <span className="result-colon">:</span>
+            <span>{row.mall}</span>
+            <span>/ 판매가 {money(row.salePrice)}</span>
+            <span>/ 노출가 {money(row.displayPrice)}</span>
+            <span>/ 비교율 {percent(compareRate)}</span>
+            <span>/ 마진율 {percent(marginRate)}</span>
+            {row.source === "price" && row.status && <span className={pillClass(row.status)}>{statusLabel(row.status)}</span>}
+            {row.source === "price" && (
+              <span className="result-actions">
+                <button className="btn small" onClick={() => onBaseline(row.id)}>기준</button>
+                <button className="btn small danger" onClick={() => onExclude(row.id)}>{row.isExcluded ? "복구" : "제외"}</button>
+              </span>
+            )}
+          </div>
+        );
+      })}
+      {rows.length === 0 && !smartstoreLoading && <div className="result-row muted-row">검색 결과가 없습니다.</div>}
     </div>
   );
 }
