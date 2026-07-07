@@ -416,9 +416,20 @@ def parse_enuri_products(document: str, limit: int = 30) -> list[dict[str, Any]]
 
 def fetch_enuri_products(query: str, display: int = 30) -> list[dict[str, Any]]:
     params = urllib.parse.urlencode({"keyword": query})
-    status, body = read_url(f"https://www.enuri.com/search.jsp?{params}")
+    status, body = read_url(
+        f"https://www.enuri.com/search.jsp?{params}",
+        {
+            "Referer": "https://www.enuri.com/",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "same-origin",
+            "Upgrade-Insecure-Requests": "1",
+        },
+    )
     if status != 200:
         raise RuntimeError(f"에누리 검색 페이지 수집 오류: HTTP {status}")
+    if "페이지를 표시할 수 없습니다" in body:
+        raise RuntimeError("에누리가 현재 서버 요청에 오류 페이지를 반환함")
     products = parse_enuri_products(body, limit=display)
     if not products:
         raise RuntimeError("에누리 검색 결과 파싱 실패 또는 결과 없음")
