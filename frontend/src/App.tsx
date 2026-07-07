@@ -61,7 +61,7 @@ const searchSourceGroups: SearchSourceGroup[] = [
   {
     title: "쇼핑몰 / 가격비교",
     options: [
-      { key: "smartstore", label: "스마트스토어", description: "커머스API 키 입력 가능, 검색수집 미연동", enabled: false, badge: "API 설정 가능" },
+      { key: "smartstore", label: "네이버 스마트스토어", description: "내 스토어 등록상품 조회", enabled: true, badge: "상품정보" },
       { key: "danawa", label: "다나와", description: "검색 페이지 크롤러", enabled: true, badge: "사용 가능" },
       { key: "enuri", label: "에누리", description: "서버 요청 오류로 임시 비활성", enabled: false, badge: "점검 중" },
       { key: "elevenst", label: "11번가", description: "수집기 미구현", enabled: false, badge: "준비 중" },
@@ -72,6 +72,7 @@ const searchSourceGroups: SearchSourceGroup[] = [
 ];
 
 const readySourceKeys = new Set(searchSourceGroups.flatMap((group) => group.options.filter((option) => option.enabled).map((option) => option.key)));
+const priceReadySourceKeys = new Set(["naver", "danawa"]);
 const apiPlatformOrder = ["naver", "smartstore", "danawa", "enuri", "elevenst", "gmarket", "auction", "google_search", "naver_search", "coupang"];
 
 function readSettings(): AdminSettings {
@@ -125,6 +126,29 @@ type PriceItem = {
   status: "baseline" | "candidate" | "abnormal" | "excluded";
   is_excluded: number;
   collected_at: string;
+};
+
+type SmartstoreProduct = {
+  id: string;
+  origin_product_no: string;
+  channel_product_no: string;
+  name: string;
+  seller_management_code: string;
+  status: string;
+  sale_price: number;
+  discounted_price: number;
+  stock_quantity: number;
+  delivery_fee: number;
+  category_id: string;
+  channel_service_type: string;
+  url: string;
+};
+
+type SmartstorePayload = {
+  items: SmartstoreProduct[];
+  count: number;
+  page: number;
+  size: number;
 };
 
 type DetailFilterOption = {
@@ -561,7 +585,10 @@ export default function App() {
   const [selectedOrders, setSelectedOrders] = useState<string[]>([]);
   const [selectedDetailFilters, setSelectedDetailFilters] = useState<SelectedDetailFilters>({});
   const [showDetailScan, setShowDetailScan] = useState(false);
-  const [selectedSources, setSelectedSources] = useState<string[]>(["naver", "danawa"]);
+  const [selectedSources, setSelectedSources] = useState<string[]>(["smartstore", "naver", "danawa"]);
+  const [smartstorePayload, setSmartstorePayload] = useState<SmartstorePayload>({ items: [], count: 0, page: 1, size: 50 });
+  const [smartstoreLoading, setSmartstoreLoading] = useState(false);
+  const [smartstoreError, setSmartstoreError] = useState("");
 
   const loadAll = async () => {
     if (!token) return;
@@ -605,6 +632,26 @@ export default function App() {
     setLogs(await request<LogItem[]>("/logs", token));
   };
 
+  const loadSmartstoreProducts = async (searchKeyword = keyword.trim()) => {
+    setSmartstoreLoading(true);
+    setSmartstoreError("");
+    try {
+      const params = new URLSearchParams({
+        q: searchKeyword,
+        size: "50",
+      });
+      const data = await request<SmartstorePayload>(`/smartstore/products?${params.toString()}`, token);
+      setSmartstorePayload(data);
+      return { data, error: "" };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "스마트스토어 상품정보 조회 실패";
+      setSmartstoreError(message);
+      return { data: null, error: message };
+    } finally {
+      setSmartstoreLoading(false);
+    }
+  };
+
   const runSearch = async (mode: "simple" | "detail" = "simple") => {
     const keywordValue = keyword.trim();
     if (!keywordValue) {
@@ -612,7 +659,9 @@ export default function App() {
       return;
     }
     const sources = selectedSources.filter((source) => readySourceKeys.has(source));
-    if (sources.length === 0) {
+    const priceSources = sources.filter((source) => priceReadySourceKeys.has(source));
+    const includeSmartstore = sources.includes("smartstore");
+    if (priceSources.length === 0 && !includeSmartstore) {
       setNotice("사용 가능한 검색 소스를 최소 1개 선택하세요.");
       return;
     }
@@ -624,17 +673,33 @@ export default function App() {
       setSelectedDetailFilters({});
       setShowDetailScan(false);
     }
-    setNotice(mode === "detail" ? "상세조건으로 상품 가격 수집 중..." : "상품 가격 수집 중...");
+    setNotice(mode === "detail" ? "상세조건으로 상품 정보 수집 중..." : "상품 정보 수집 중...");
     try {
-      const data = await request<SearchPayload>("/price-search", token, {
-        method: "POST",
-        body: JSON.stringify({ query, sort_mode: sortMode, filters: Object.keys(detailSelection), sources }),
-      });
-      setSearchPayload(data);
+      let priceCount = 0;
+      let storeCount = 0;
+      let storeError = "";
+      if (priceSources.length > 0) {
+        const data = await request<SearchPayload>("/price-search", token, {
+          method: "POST",
+          body: JSON.stringify({ query, sort_mode: sortMode, filters: Object.keys(detailSelection), sources: priceSources }),
+        });
+        priceCount = data.items.length;
+        setSearchPayload(data);
+      } else {
+        setSearchPayload({ run: null, items: [], summary: { collected_count: 0, lowest_count: 0, excluded_count: 0 } });
+      }
+      if (includeSmartstore) {
+        const storeResult = await loadSmartstoreProducts(keywordValue);
+        storeCount = storeResult.data?.items.length || 0;
+        storeError = storeResult.error;
+      }
       if (mode === "detail") setSelectedDetailFilters(detailSelection);
       setDashboard(await request<Dashboard>("/dashboard", token));
       await refreshLogs();
-      setNotice(mode === "detail" ? "상세스캔 완료" : "가격 수집 완료");
+      const parts = [];
+      if (priceSources.length > 0) parts.push(`가격비교 ${priceCount}건`);
+      if (includeSmartstore) parts.push(`스마트스토어 ${storeCount}건`);
+      setNotice(storeError ? `${parts.join(" · ")} · 스마트스토어 오류 확인 필요` : `${mode === "detail" ? "상세스캔" : "스캔"} 완료 · ${parts.join(" · ")}`);
       setTab("search");
     } finally {
       setCollecting(false);
@@ -858,6 +923,14 @@ export default function App() {
               <button className="btn danger" onClick={stopSearch} disabled={!collecting}>수집 중지</button>
             </div>
             <SourceSelector groups={searchSourceGroups} selected={selectedSources} onToggle={toggleSearchSource} />
+            {selectedSources.includes("smartstore") && (
+              <SmartstoreProductPanel
+                payload={smartstorePayload}
+                loading={smartstoreLoading}
+                error={smartstoreError}
+                onRefresh={() => loadSmartstoreProducts(keyword.trim())}
+              />
+            )}
             {showDetailScan && (
               <DetailScanBuilder
                 filters={scanTemplateFilters}
@@ -1210,6 +1283,70 @@ function DetailFilterPanel({
             </div>
           </div>
         ))}
+      </div>
+    </div>
+  );
+}
+
+function smartstoreStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    SALE: "판매중",
+    SUSPENSION: "판매중지",
+    WAIT: "대기",
+    OUTOFSTOCK: "품절",
+    DELETE: "삭제",
+  };
+  return labels[status] || status || "-";
+}
+
+function SmartstoreProductPanel({
+  payload,
+  loading,
+  error,
+  onRefresh,
+}: {
+  payload: SmartstorePayload;
+  loading: boolean;
+  error: string;
+  onRefresh: () => void;
+}) {
+  return (
+    <div className="box smartstore-panel">
+      <div className="smartstore-head">
+        <div>
+          <strong>네이버 스마트스토어 상품정보</strong>
+          <span>커머스API로 내 스토어에 등록된 상품을 조회합니다.</span>
+        </div>
+        <button className="btn small primary" onClick={onRefresh} disabled={loading}>{loading ? "조회 중" : "상품정보 불러오기"}</button>
+      </div>
+      {error && <div className="source-warning"><span>{error}</span></div>}
+      <div className="table-wrap">
+        <table className="smartstore-table">
+          <thead>
+            <tr>
+              <th>채널상품번호</th><th>원상품번호</th><th>상품명</th><th>상태</th><th>판매가</th><th>할인가</th><th>재고</th><th>배송비</th><th>관리코드</th><th>링크</th>
+            </tr>
+          </thead>
+          <tbody>
+            {payload.items.map((item) => (
+              <tr key={`${item.channel_product_no}-${item.name}`}>
+                <td>{item.channel_product_no || "-"}</td>
+                <td>{item.origin_product_no || "-"}</td>
+                <td>{item.name}</td>
+                <td><span className="pill blue">{smartstoreStatusLabel(item.status)}</span></td>
+                <td>{money(item.sale_price)}</td>
+                <td>{money(item.discounted_price || item.sale_price)}</td>
+                <td>{item.stock_quantity.toLocaleString("ko-KR")}</td>
+                <td>{money(item.delivery_fee)}</td>
+                <td>{item.seller_management_code || "-"}</td>
+                <td><a className="btn small" href={item.url} target="_blank" rel="noreferrer">이동</a></td>
+              </tr>
+            ))}
+            {payload.items.length === 0 && (
+              <tr><td colSpan={10}>{loading ? "스마트스토어 상품정보를 조회 중입니다." : "아직 불러온 스마트스토어 상품이 없습니다."}</td></tr>
+            )}
+          </tbody>
+        </table>
       </div>
     </div>
   );

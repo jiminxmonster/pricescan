@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import base64
 import os
 import re
 import html
 import json
 import sqlite3
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -14,6 +16,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import bcrypt
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -26,6 +29,7 @@ DATABASE_PATH = Path(os.getenv("DATABASE_PATH", DATA_DIR / "pricescan.db"))
 ADMIN_TOKEN = "pricescan-admin-token"
 HTTP_TIMEOUT_SECONDS = 8
 CRAWLER_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+NAVER_COMMERCE_API_BASE = "https://api.commerce.naver.com/external"
 
 
 app = FastAPI(title="PriceScan API", version="0.1.0")
@@ -112,6 +116,42 @@ def read_url(url: str, headers: dict[str, str] | None = None) -> tuple[int, str]
     except urllib.error.HTTPError as error:
         body = error.read().decode("utf-8", errors="replace")
         return error.code, body
+
+
+def post_url(url: str, body: bytes, headers: dict[str, str]) -> tuple[int, str]:
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers={
+            "User-Agent": CRAWLER_USER_AGENT,
+            "Accept": "application/json",
+            **headers,
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
+            charset = response.headers.get_content_charset() or "utf-8"
+            return response.status, response.read().decode(charset, errors="replace")
+    except urllib.error.HTTPError as error:
+        body_text = error.read().decode("utf-8", errors="replace")
+        return error.code, body_text
+
+
+def post_form(url: str, data: dict[str, Any], headers: dict[str, str] | None = None) -> tuple[int, str]:
+    return post_url(
+        url,
+        urllib.parse.urlencode(data).encode("utf-8"),
+        {"Content-Type": "application/x-www-form-urlencoded", **(headers or {})},
+    )
+
+
+def post_json(url: str, payload: dict[str, Any], headers: dict[str, str] | None = None) -> tuple[int, str]:
+    return post_url(
+        url,
+        json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        {"Content-Type": "application/json;charset=UTF-8", **(headers or {})},
+    )
 
 
 def init_db() -> None:
@@ -301,7 +341,10 @@ def fetch_naver_products(query: str, sort_mode: str, client_id: str, client_secr
         detail = clean_text(body)[:160]
         raise RuntimeError(f"네이버 쇼핑 API 오류: HTTP {status} · {detail}")
 
-    data = json.loads(body)
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("스마트스토어 토큰 응답을 JSON으로 해석하지 못했습니다.") from error
     products: list[dict[str, Any]] = []
     for item in data.get("items", []):
         price = parse_price(item.get("lprice"))
@@ -319,6 +362,124 @@ def fetch_naver_products(query: str, sort_mode: str, client_id: str, client_secr
             }
         )
     return products
+
+
+def smartstore_signature(client_id: str, client_secret: str, timestamp: int) -> str:
+    password = f"{client_id}_{timestamp}".encode("utf-8")
+    hashed = bcrypt.hashpw(password, client_secret.encode("utf-8"))
+    return base64.b64encode(hashed).decode("utf-8")
+
+
+def fetch_smartstore_access_token(client_id: str, client_secret: str) -> str:
+    timestamp = int(time.time() * 1000)
+    try:
+        client_secret_sign = smartstore_signature(client_id, client_secret, timestamp)
+    except ValueError as error:
+        raise RuntimeError("스마트스토어 Client Secret 형식이 올바르지 않습니다.") from error
+
+    status, body = post_form(
+        f"{NAVER_COMMERCE_API_BASE}/v1/oauth2/token",
+        {
+            "client_id": client_id,
+            "timestamp": str(timestamp),
+            "client_secret_sign": client_secret_sign,
+            "grant_type": "client_credentials",
+            "type": "SELF",
+        },
+    )
+    if status != 200:
+        detail = clean_text(body)[:220]
+        raise RuntimeError(f"스마트스토어 토큰 발급 오류: HTTP {status} · {detail}")
+
+    data = json.loads(body)
+    access_token = data.get("access_token")
+    if not access_token:
+        raise RuntimeError("스마트스토어 토큰 응답에 access_token이 없습니다.")
+    return str(access_token)
+
+
+def product_list_candidates(data: Any) -> list[dict[str, Any]]:
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    if not isinstance(data, dict):
+        return []
+    for key in ("contents", "content", "items", "products"):
+        value = data.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def first_existing(data: dict[str, Any], keys: tuple[str, ...], fallback: Any = "") -> Any:
+    for key in keys:
+        value = data.get(key)
+        if value not in (None, ""):
+            return value
+    return fallback
+
+
+def normalize_smartstore_products(data: Any, keyword: str = "") -> list[dict[str, Any]]:
+    products: list[dict[str, Any]] = []
+    keyword_text = normalize_title(keyword) if keyword.strip() else ""
+    for content in product_list_candidates(data):
+        origin_product_no = first_existing(content, ("originProductNo", "originNo", "productNo"))
+        origin_name = clean_text(str(first_existing(content, ("name", "productName", "originProductName"))))
+        channel_products = content.get("channelProducts")
+        if not isinstance(channel_products, list):
+            channel_products = [content]
+
+        for channel in [item for item in channel_products if isinstance(item, dict)]:
+            name = clean_text(str(first_existing(channel, ("name", "productName", "channelProductName"), origin_name)))
+            if not name:
+                continue
+            if keyword_text and keyword_text not in normalize_title(name):
+                management_code = normalize_title(str(first_existing(channel, ("sellerManagementCode", "managementCode"))))
+                if keyword_text not in management_code:
+                    continue
+
+            sale_price = parse_price(first_existing(channel, ("salePrice", "price", "basePrice", "discountedPrice"), 0))
+            discounted_price = parse_price(first_existing(channel, ("discountedPrice", "discountPrice"), sale_price))
+            delivery_fee = parse_price(first_existing(channel, ("deliveryFee", "baseFee", "shippingFee"), 0))
+            channel_product_no = first_existing(channel, ("channelProductNo", "productNo", "id"), origin_product_no)
+            product_url = str(first_existing(channel, ("url", "productUrl", "channelProductUrl"), "https://smartstore.naver.com/"))
+
+            products.append(
+                {
+                    "id": str(channel_product_no or origin_product_no or len(products) + 1),
+                    "origin_product_no": str(origin_product_no or ""),
+                    "channel_product_no": str(channel_product_no or ""),
+                    "name": name,
+                    "seller_management_code": str(first_existing(channel, ("sellerManagementCode", "managementCode"))),
+                    "status": str(first_existing(channel, ("statusType", "channelProductDisplayStatusType", "saleStatusType"))),
+                    "sale_price": sale_price,
+                    "discounted_price": discounted_price,
+                    "stock_quantity": parse_price(first_existing(channel, ("stockQuantity", "stock", "quantity"), 0)),
+                    "delivery_fee": delivery_fee,
+                    "category_id": str(first_existing(channel, ("categoryId", "wholeCategoryId"))),
+                    "channel_service_type": str(first_existing(channel, ("channelServiceType",), "STOREFARM")),
+                    "url": product_url,
+                }
+            )
+    return products
+
+
+def fetch_smartstore_products(client_id: str, client_secret: str, keyword: str = "", page: int = 1, size: int = 50) -> list[dict[str, Any]]:
+    access_token = fetch_smartstore_access_token(client_id, client_secret)
+    request_payload = {"page": max(page, 1), "size": min(max(size, 1), 100)}
+    status, body = post_json(
+        f"{NAVER_COMMERCE_API_BASE}/v1/products/search",
+        request_payload,
+        {"Authorization": f"Bearer {access_token}"},
+    )
+    if status != 200:
+        detail = clean_text(body)[:220]
+        raise RuntimeError(f"스마트스토어 상품 목록 조회 오류: HTTP {status} · {detail}")
+
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("스마트스토어 상품 목록 응답을 JSON으로 해석하지 못했습니다.") from error
+    return normalize_smartstore_products(data, keyword)
 
 
 def parse_danawa_products(document: str, limit: int = 30) -> list[dict[str, Any]]:
@@ -678,8 +839,15 @@ def test_api_key(platform: str) -> dict[str, Any]:
             else:
                 message = "네이버 Client ID/Secret 입력 필요"
         elif platform == "smartstore":
-            connected = bool(key["client_id"] and key["client_secret"])
-            message = "스마트스토어 커머스API 키 저장 완료 · OAuth/상품조회 연동은 다음 단계에서 연결" if connected else "스마트스토어 Application ID/Secret 입력 필요"
+            if key["client_id"] and key["client_secret"]:
+                try:
+                    fetch_smartstore_products(key["client_id"], key["client_secret"], size=1)
+                    connected = True
+                    message = "스마트스토어 커머스API OAuth/상품 목록 조회 성공"
+                except Exception as error:
+                    message = str(error)
+            else:
+                message = "스마트스토어 Application ID/Secret 입력 필요"
         elif platform == "danawa":
             try:
                 fetch_danawa_products("노트북", display=1)
@@ -786,6 +954,28 @@ def latest_price_search() -> dict[str, Any]:
         if not latest:
             return {"run": None, "items": [], "summary": {"collected_count": 0, "lowest_count": 0, "excluded_count": 0}}
         return get_run_payload(db, latest["id"])
+
+
+@app.get("/smartstore/products", dependencies=[Depends(require_admin)])
+def smartstore_products(q: str = "", page: int = 1, size: int = 50) -> dict[str, Any]:
+    with connect() as db:
+        key = db.execute("SELECT * FROM api_keys WHERE platform = 'smartstore'").fetchone()
+        if not key or not key["client_id"] or not key["client_secret"]:
+            raise HTTPException(status_code=400, detail="스마트스토어 커머스API 키를 먼저 저장하세요.")
+
+    try:
+        items = fetch_smartstore_products(key["client_id"], key["client_secret"], q, page, size)
+    except Exception as error:
+        log_event(f"smartstore product fetch failed: {error}", "warning")
+        raise HTTPException(status_code=502, detail=str(error)) from error
+
+    log_event(f"smartstore products fetched: {len(items)} items")
+    return {
+        "items": items,
+        "count": len(items),
+        "page": max(page, 1),
+        "size": min(max(size, 1), 100),
+    }
 
 
 @app.post("/price-search/stop", dependencies=[Depends(require_admin)])

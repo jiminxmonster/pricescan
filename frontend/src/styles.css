@@ -575,6 +575,35 @@ td { font-size: 14px; }
 .source-warning span {
   display: block;
 }
+.smartstore-panel {
+  display: grid;
+  gap: 13px;
+  margin-bottom: 14px;
+  background: #fff;
+}
+.smartstore-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  align-items: center;
+  justify-content: space-between;
+}
+.smartstore-head > div {
+  display: grid;
+  gap: 4px;
+}
+.smartstore-head strong {
+  color: var(--text);
+  font-size: 16px;
+}
+.smartstore-head span {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+.smartstore-table {
+  min-width: 1040px;
+}
 .mt { margin-top: 14px; }
 .settings-grid {
   display: grid;
