@@ -86,11 +86,11 @@ def clean_text(value: str) -> str:
     return re.sub(r"\s+", " ", html.unescape(without_tags)).strip()
 
 
-def parse_price(value: str | int | None) -> int:
+def parse_price(value: str | int | float | None) -> int:
     if value is None:
         return 0
-    if isinstance(value, int):
-        return value
+    if isinstance(value, int | float):
+        return int(value)
     digits = re.sub(r"[^\d]", "", value)
     return int(digits) if digits else 0
 
@@ -177,7 +177,7 @@ def init_db() -> None:
             ("naver_datalab", "네이버 데이터랩"),
             ("coupang", "쿠팡"),
             ("danawa", "다나와 크롤러"),
-            ("enuri", "에누리"),
+            ("enuri", "에누리 크롤러"),
         ]
         for platform, label in platforms:
             db.execute(
@@ -368,6 +368,63 @@ def fetch_danawa_products(query: str, display: int = 30) -> list[dict[str, Any]]
     return products
 
 
+def parse_enuri_products(document: str, limit: int = 30) -> list[dict[str, Any]]:
+    scripts = re.finditer(
+        r"<script[^>]+type=[\"']application/ld\+json[\"'][^>]*>(.*?)</script>",
+        document,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    products: list[dict[str, Any]] = []
+    for script in scripts:
+        raw_json = html.unescape(script.group(1).strip())
+        if not raw_json:
+            continue
+        try:
+            data = json.loads(raw_json)
+        except json.JSONDecodeError:
+            continue
+
+        candidates = data if isinstance(data, list) else [data]
+        for candidate in candidates:
+            if not isinstance(candidate, dict) or candidate.get("@type") != "ItemList":
+                continue
+            for entry in candidate.get("itemListElement", []):
+                item = entry.get("item") if isinstance(entry, dict) else None
+                if not isinstance(item, dict):
+                    continue
+                offers = item.get("offers") if isinstance(item.get("offers"), dict) else {}
+                price = parse_price(offers.get("lowPrice"))
+                name = clean_text(str(item.get("name") or ""))
+                url = str(item.get("url") or "https://www.enuri.com/")
+                if not name or price <= 0:
+                    continue
+                products.append(
+                    {
+                        "source": "enuri",
+                        "mall": "에누리",
+                        "name": name,
+                        "price": price,
+                        "shipping": 0,
+                        "total": price,
+                        "url": urllib.parse.urljoin("https://www.enuri.com/", html.unescape(url)),
+                    }
+                )
+                if len(products) >= limit:
+                    return products
+    return products
+
+
+def fetch_enuri_products(query: str, display: int = 30) -> list[dict[str, Any]]:
+    params = urllib.parse.urlencode({"keyword": query})
+    status, body = read_url(f"https://www.enuri.com/search.jsp?{params}")
+    if status != 200:
+        raise RuntimeError(f"에누리 검색 페이지 수집 오류: HTTP {status}")
+    products = parse_enuri_products(body, limit=display)
+    if not products:
+        raise RuntimeError("에누리 검색 결과 파싱 실패 또는 결과 없음")
+    return products
+
+
 def dedupe_products(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     seen: set[str] = set()
     unique_items: list[dict[str, Any]] = []
@@ -400,6 +457,11 @@ def collect_price_products(db: sqlite3.Connection, query: str, sort_mode: str) -
 
     try:
         products.extend(fetch_danawa_products(query))
+    except Exception as error:
+        warnings.append(str(error))
+
+    try:
+        products.extend(fetch_enuri_products(query))
     except Exception as error:
         warnings.append(str(error))
 
@@ -585,6 +647,13 @@ def test_api_key(platform: str) -> dict[str, Any]:
                 fetch_danawa_products("노트북", display=1)
                 connected = True
                 message = "다나와 검색 페이지 수집/파싱 성공"
+            except Exception as error:
+                message = str(error)
+        elif platform == "enuri":
+            try:
+                fetch_enuri_products("노트북", display=1)
+                connected = True
+                message = "에누리 검색 페이지 수집/파싱 성공"
             except Exception as error:
                 message = str(error)
         else:
