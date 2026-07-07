@@ -25,7 +25,7 @@ const defaultSettings: AdminSettings = {
 
 const primaryTabs: Array<{ key: Tab; label: string; description: string }> = [
   { key: "search", label: "상품검색", description: "API 등을 통해 해당상품 가격 검색" },
-  { key: "api", label: "쇼핑몰셋업", description: "쇼핑몰/API 키 등록과 연동 테스트" },
+  { key: "api", label: "검색설정", description: "쇼핑몰/API 키 등록과 연동 테스트" },
   { key: "settings", label: "관리자설정", description: "메뉴와 기능 사용여부 설정" },
 ];
 
@@ -393,13 +393,12 @@ export default function App() {
         <header className="top-shell">
           <div className="top-brand">
             <strong>PriceScan</strong>
-            <span>상품검색 · 쇼핑몰셋업 중심 운영</span>
+            <span>상품검색 · 검색설정 중심 운영</span>
           </div>
           <nav className="top-nav" aria-label="상단 메뉴">
             {visibleTabs.map((item) => (
               <button key={item.key} className={`${tab === item.key ? "active" : ""} ${item.key === "api" ? "orange" : ""}`} onClick={() => setTab(item.key)}>
                 <strong>{item.label}</strong>
-                <span>{item.description}</span>
               </button>
             ))}
           </nav>
@@ -408,12 +407,6 @@ export default function App() {
             <button className="btn small" onClick={logout}>로그아웃</button>
           </div>
         </header>
-
-        <section className="page-title">
-          <div className="eyebrow">focused seller automation</div>
-          <h1>상품검색과 쇼핑몰셋업에 집중</h1>
-          <p className="lead">좌측 메뉴는 기본 숨김 처리했고, 확장 기능은 관리자설정에서 필요할 때만 켤 수 있습니다.</p>
-        </section>
 
         {notice && <div className="notice">{notice}</div>}
 
@@ -428,7 +421,6 @@ export default function App() {
             <div className="section-head">
               <div>
                 <h2>상품검색</h2>
-                <p>API 등을 통해 해당 상품의 가격을 검색하고, 최저가 기준 선택/제외 처리까지 반영합니다.</p>
               </div>
               <span className={collecting ? "pill orange" : "pill green"}>{collecting ? "수집 중" : "대기/완료"}</span>
             </div>
@@ -457,7 +449,7 @@ export default function App() {
           <section className="section active">
             <div className="section-head">
               <div>
-                <h2>쇼핑몰셋업</h2>
+                <h2>검색설정</h2>
                 <p>플랫폼별 API 키를 저장하고 백엔드에서 연결 상태를 테스트합니다.</p>
               </div>
               <span className="pill blue">{dashboard?.stats.connected_apis ?? 0} connected</span>
@@ -586,7 +578,7 @@ export default function App() {
             </div>
             <div className="box mt">
               <strong>현재 집중 기능</strong>
-              <p>상품검색과 쇼핑몰셋업만 기본 노출합니다. 쇼핑몰 자동등록, 통합가격 조정, 송장 출력, 회원권한은 체크를 켜야 메뉴에 나타납니다.</p>
+              <p>상품검색과 검색설정만 기본 노출합니다. 쇼핑몰 자동등록, 통합가격 조정, 송장 출력, 회원권한은 체크를 켜야 메뉴에 나타납니다.</p>
             </div>
             <div className="log compact-log">
               {logs.slice(0, 8).map((item) => (
