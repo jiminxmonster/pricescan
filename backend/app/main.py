@@ -39,7 +39,7 @@ app.add_middleware(
 
 
 def now() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    return datetime.now().isoformat(timespec="microseconds")
 
 
 @contextmanager

@@ -410,7 +410,7 @@ function sortedPriceItems(items: PriceItem[], sortMode: string): PriceItem[] {
     return sorted.sort((a, b) => b.margin - a.margin || a.total - b.total);
   }
   if (sortMode === "recent") {
-    return sorted.sort((a, b) => b.collected_at.localeCompare(a.collected_at) || a.total - b.total);
+    return sorted.sort((a, b) => b.collected_at.localeCompare(a.collected_at) || b.id.localeCompare(a.id));
   }
   return sorted.sort((a, b) => a.total - b.total || a.price - b.price);
 }
@@ -621,6 +621,14 @@ export default function App() {
     });
   };
 
+  const changeSortMode = (value: string) => {
+    setSortMode(value);
+    if (searchPayload.items.length > 0) {
+      const label = value === "margin" ? "마진높은순" : value === "recent" ? "최근검색순" : "최저가순";
+      setNotice(`${label} 정렬 적용`);
+    }
+  };
+
   const logout = () => {
     localStorage.removeItem(TOKEN_KEY);
     setToken("");
@@ -698,10 +706,10 @@ export default function App() {
             </div>
             <div className="toolbar">
               <input className="input" value={keyword} onChange={(event) => setKeyword(event.target.value)} aria-label="상품 검색어" />
-              <select value={sortMode} onChange={(event) => setSortMode(event.target.value)} aria-label="정렬">
+              <select value={sortMode} onChange={(event) => changeSortMode(event.target.value)} aria-label="정렬">
                 <option value="lowest">최저가순</option>
                 <option value="margin">마진높은순</option>
-                <option value="recent">최근수집순</option>
+                <option value="recent">최근검색순</option>
               </select>
               <button className="btn primary" onClick={runSearch} disabled={collecting}>스캔</button>
               <button className="btn danger" onClick={stopSearch} disabled={!collecting}>수집 중지</button>
