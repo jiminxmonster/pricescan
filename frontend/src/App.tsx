@@ -384,6 +384,49 @@ function buildDetailFilters(keyword: string, items: PriceItem[]): DetailFilter[]
     .slice(0, 7);
 }
 
+function templateOptions(values: string[]): DetailFilterOption[] {
+  return values.map((value) => ({ value, label: value, count: 0 }));
+}
+
+function templateDetailFilters(keyword: string): DetailFilter[] {
+  const text = normalize(keyword);
+  if (!text) return [];
+  if (/노트북|랩탑|laptop|맥북|그램|갤럭시북/.test(text)) {
+    return [
+      { key: "brand", label: "브랜드", options: templateOptions(["삼성", "LG", "Apple", "ASUS", "HP", "Lenovo", "Dell", "MSI"]) },
+      { key: "screen", label: "화면크기", options: templateOptions(["13형", "14형", "15형", "16형", "17형"]) },
+      { key: "cpu", label: "CPU", options: templateOptions(["I5", "I7", "I9", "RYZEN 5", "RYZEN 7", "M3", "M4"]) },
+      { key: "memory", label: "메모리", options: templateOptions(["8GB", "16GB", "32GB", "64GB"]) },
+      { key: "storage", label: "저장장치", options: templateOptions(["256GB", "512GB", "1TB", "2TB"]) },
+      { key: "os", label: "OS", options: templateOptions(["Windows 11", "FreeDOS", "macOS"]) },
+      { key: "shipping", label: "배송", options: templateOptions(["무료배송", "유료배송"]) },
+    ];
+  }
+  if (/케이블|충전기|어댑터|usb|hdmi|c타입|typec/.test(text)) {
+    return [
+      { key: "connector", label: "단자", options: templateOptions(["USB-C", "USB-A", "HDMI", "Lightning", "DisplayPort"]) },
+      { key: "length", label: "길이", options: templateOptions(["0.5m", "1m", "1.5m", "2m", "3m"]) },
+      { key: "watt", label: "출력", options: templateOptions(["30W", "45W", "65W", "100W", "140W"]) },
+      { key: "color", label: "색상", options: templateOptions(["블랙", "화이트", "실버", "그레이"]) },
+      { key: "shipping", label: "배송", options: templateOptions(["무료배송", "유료배송"]) },
+    ];
+  }
+  return [
+    { key: "brand", label: "브랜드", options: templateOptions(["삼성", "LG", "Apple", "샤오미", "레노버"]) },
+    { key: "capacity", label: "용량/규격", options: templateOptions(["128GB", "256GB", "512GB", "1TB", "1L", "2L", "1kg"]) },
+    { key: "color", label: "색상", options: templateOptions(["블랙", "화이트", "실버", "그레이", "블루", "핑크"]) },
+    { key: "shipping", label: "배송", options: templateOptions(["무료배송", "유료배송"]) },
+  ];
+}
+
+function buildDetailSearchQuery(keyword: string, selected: SelectedDetailFilters): string {
+  const queryParts = Object.entries(selected)
+    .filter(([key]) => !["shipping", "priceBand"].includes(key))
+    .flatMap(([, values]) => values)
+    .filter(Boolean);
+  return unique([keyword.trim(), ...queryParts]).join(" ").trim();
+}
+
 function sanitizeSelectedFilters(selected: SelectedDetailFilters, filters: DetailFilter[]): SelectedDetailFilters {
   const valid = new Map(filters.map((filter) => [filter.key, new Set(filter.options.map((option) => option.value))]));
   return Object.fromEntries(
@@ -469,6 +512,7 @@ export default function App() {
   const [notice, setNotice] = useState("");
   const [selectedOrders, setSelectedOrders] = useState<string[]>([]);
   const [selectedDetailFilters, setSelectedDetailFilters] = useState<SelectedDetailFilters>({});
+  const [showDetailScan, setShowDetailScan] = useState(false);
 
   const loadAll = async () => {
     if (!token) return;
@@ -512,23 +556,41 @@ export default function App() {
     setLogs(await request<LogItem[]>("/logs", token));
   };
 
-  const runSearch = async () => {
+  const runSearch = async (mode: "simple" | "detail" = "simple") => {
+    const keywordValue = keyword.trim();
+    if (!keywordValue) {
+      setNotice("검색어를 입력하세요.");
+      return;
+    }
+    const templateFilters = templateDetailFilters(keywordValue);
+    const detailSelection = mode === "detail" ? sanitizeSelectedFilters(selectedDetailFilters, templateFilters) : {};
+    const query = mode === "detail" ? buildDetailSearchQuery(keywordValue, detailSelection) : keywordValue;
     setCollecting(true);
-    setSelectedDetailFilters({});
-    setNotice("상품 가격 수집 중...");
+    if (mode === "simple") setSelectedDetailFilters({});
+    setNotice(mode === "detail" ? "상세조건으로 상품 가격 수집 중..." : "상품 가격 수집 중...");
     try {
       const data = await request<SearchPayload>("/price-search", token, {
         method: "POST",
-        body: JSON.stringify({ query: keyword, sort_mode: sortMode, filters: ["brand", "memory"] }),
+        body: JSON.stringify({ query, sort_mode: sortMode, filters: Object.keys(detailSelection) }),
       });
       setSearchPayload(data);
+      if (mode === "detail") setSelectedDetailFilters(detailSelection);
       setDashboard(await request<Dashboard>("/dashboard", token));
       await refreshLogs();
-      setNotice("가격 수집 완료");
+      setNotice(mode === "detail" ? "상세스캔 완료" : "가격 수집 완료");
       setTab("search");
     } finally {
       setCollecting(false);
     }
+  };
+
+  const openDetailScan = () => {
+    if (!keyword.trim()) {
+      setNotice("검색어를 먼저 입력하세요.");
+      return;
+    }
+    setShowDetailScan(true);
+    setNotice("상세조건을 선택한 뒤 조건 적용 스캔을 누르세요.");
   };
 
   const stopSearch = async () => {
@@ -641,6 +703,8 @@ export default function App() {
   const visibleApiKeys = apiKeys.filter((item) => item.platform !== "naver_datalab");
   const filterKeyword = searchPayload.run?.query || keyword;
   const detailFilters = buildDetailFilters(filterKeyword, searchPayload.items);
+  const scanTemplateFilters = templateDetailFilters(keyword);
+  const activeTemplateFilters = sanitizeSelectedFilters(selectedDetailFilters, scanTemplateFilters);
   const activeDetailFilters = sanitizeSelectedFilters(selectedDetailFilters, detailFilters);
   const filteredSearchPayload = {
     ...searchPayload,
@@ -711,9 +775,21 @@ export default function App() {
                 <option value="margin">마진높은순</option>
                 <option value="recent">최근검색순</option>
               </select>
-              <button className="btn primary" onClick={runSearch} disabled={collecting}>스캔</button>
+              <button className="btn orange" onClick={openDetailScan} disabled={collecting}>상세스캔</button>
+              <button className="btn primary" onClick={() => runSearch("simple")} disabled={collecting}>스캔</button>
               <button className="btn danger" onClick={stopSearch} disabled={!collecting}>수집 중지</button>
             </div>
+            {showDetailScan && (
+              <DetailScanBuilder
+                filters={scanTemplateFilters}
+                selected={activeTemplateFilters}
+                onToggle={toggleDetailFilter}
+                onClear={() => setSelectedDetailFilters({})}
+                onClose={() => setShowDetailScan(false)}
+                onScan={() => runSearch("detail")}
+                disabled={collecting}
+              />
+            )}
             {Boolean(searchPayload.warnings?.length) && (
               <div className="source-warning">
                 {searchPayload.warnings?.map((warning) => <span key={warning}>{warning}</span>)}
@@ -888,6 +964,65 @@ function StatCard({ label, value }: { label: string; value: number }) {
   );
 }
 
+function DetailScanBuilder({
+  filters,
+  selected,
+  disabled,
+  onToggle,
+  onClear,
+  onClose,
+  onScan,
+}: {
+  filters: DetailFilter[];
+  selected: SelectedDetailFilters;
+  disabled: boolean;
+  onToggle: (filterKey: string, value: string) => void;
+  onClear: () => void;
+  onClose: () => void;
+  onScan: () => void;
+}) {
+  const activeCount = Object.values(selected).reduce((sum, values) => sum + values.length, 0);
+
+  return (
+    <div className="box detail-filter-panel detail-scan-builder">
+      <div className="detail-filter-head detail-scan-head">
+        <div>
+          <strong>상세스캔 조건</strong>
+          <span>조건을 선택하면 검색어에 반영해 더 좁은 범위로 수집합니다.</span>
+        </div>
+        <div className="detail-scan-actions">
+          {activeCount > 0 && <button className="btn small" onClick={onClear} disabled={disabled}>조건 초기화</button>}
+          <button className="btn small" onClick={onClose} disabled={disabled}>닫기</button>
+          <button className="btn small primary" onClick={onScan} disabled={disabled}>조건 적용 스캔</button>
+        </div>
+      </div>
+      {filters.length === 0 ? (
+        <p className="hint">검색어를 입력하면 상품군별 상세조건이 표시됩니다.</p>
+      ) : (
+        <div className="detail-filter-grid">
+          {filters.map((filter) => (
+            <div className="detail-filter-group" key={filter.key}>
+              <strong>{filter.label}</strong>
+              <div className="detail-filter-options">
+                {filter.options.map((option) => (
+                  <label key={option.value}>
+                    <input
+                      type="checkbox"
+                      checked={selected[filter.key]?.includes(option.value) || false}
+                      onChange={() => onToggle(filter.key, option.value)}
+                    />
+                    <span>{option.label}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DetailFilterPanel({
   filters,
   selected,
@@ -947,7 +1082,7 @@ function DetailFilterPanel({
                     onChange={() => onToggle(filter.key, option.value)}
                   />
                   <span>{option.label}</span>
-                  <em>{option.count}</em>
+                  {option.count > 0 && <em>{option.count}</em>}
                 </label>
               ))}
             </div>

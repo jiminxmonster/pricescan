@@ -261,7 +261,7 @@ h2 {
 }
 .toolbar {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) 160px auto auto;
+  grid-template-columns: minmax(220px, 1fr) 160px auto auto auto;
   gap: 10px;
   margin-bottom: 16px;
 }
@@ -315,11 +315,29 @@ select {
   gap: 13px;
   margin-bottom: 14px;
 }
+.detail-scan-builder {
+  border-color: #ffd1ae;
+  background: #fffaf5;
+}
 .detail-filter-head {
   display: flex;
   flex-wrap: wrap;
   gap: 8px 12px;
   align-items: center;
+}
+.detail-scan-head {
+  justify-content: space-between;
+}
+.detail-scan-head > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+.detail-scan-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
 }
 .detail-filter-head strong {
   color: var(--text);

@@ -272,6 +272,7 @@ def fetch_naver_products(query: str, sort_mode: str, client_id: str, client_secr
             "display": min(max(display, 1), 100),
             "start": 1,
             "sort": naver_sort(sort_mode),
+            "exclude": "used:rental:cbshop",
         }
     )
     status, body = read_url(
