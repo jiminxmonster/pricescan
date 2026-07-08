@@ -649,6 +649,40 @@ td { font-size: 14px; }
   gap: 5px;
   margin-left: auto;
 }
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  background: rgba(10, 22, 40, 0.48);
+  padding: 26px;
+}
+.publish-modal {
+  width: min(980px, calc(100vw - 52px));
+  max-height: calc(100vh - 52px);
+  overflow-y: auto;
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 28px 90px rgba(10, 22, 40, 0.34);
+  animation: modal-in 0.16s ease-out;
+}
+.publish-modal .publish-draft-panel {
+  margin-top: 0;
+  border: 0;
+  box-shadow: none;
+}
+@keyframes modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
 .publish-draft-panel {
   display: grid;
   gap: 14px;
@@ -1067,6 +1101,14 @@ textarea {
   .result-actions {
     width: 100%;
     margin-left: 0;
+  }
+  .modal-backdrop {
+    align-items: stretch;
+    padding: 10px;
+  }
+  .publish-modal {
+    width: 100%;
+    max-height: calc(100vh - 20px);
   }
   .draft-row {
     grid-template-columns: 1fr;

@@ -711,6 +711,20 @@ export default function App() {
     description: "",
   });
 
+  useEffect(() => {
+    if (!draftSourceItem) return undefined;
+    const previousOverflow = document.body.style.overflow;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setDraftSourceItem(null);
+    };
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [draftSourceItem]);
+
   const loadAll = async () => {
     if (!token) return;
     const [dashboardData, latestSearch, keyData, orderData, channelData, logData, draftData] = await Promise.all([
@@ -1222,15 +1236,25 @@ export default function App() {
               onOpenPublish={openPublishDraft}
             />
             {draftSourceItem && (
-              <PublishDraftPanel
-                sourceItem={draftSourceItem}
-                form={draftForm}
-                smartstoreActive={isSmartstoreActive(apiKeys)}
-                onChange={setDraftForm}
-                onTogglePlatform={toggleDraftPlatform}
-                onApprove={approveDraft}
-                onCancel={() => setDraftSourceItem(null)}
-              />
+              <div
+                className="modal-backdrop"
+                role="presentation"
+                onMouseDown={(event) => {
+                  if (event.target === event.currentTarget) setDraftSourceItem(null);
+                }}
+              >
+                <div className="publish-modal" role="dialog" aria-modal="true" aria-label="상품등록 초안">
+                  <PublishDraftPanel
+                    sourceItem={draftSourceItem}
+                    form={draftForm}
+                    smartstoreActive={isSmartstoreActive(apiKeys)}
+                    onChange={setDraftForm}
+                    onTogglePlatform={toggleDraftPlatform}
+                    onApprove={approveDraft}
+                    onCancel={() => setDraftSourceItem(null)}
+                  />
+                </div>
+              </div>
             )}
           </section>
         )}
