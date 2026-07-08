@@ -198,6 +198,41 @@ a { color: inherit; }
 .source-popover .source-selector {
   margin-bottom: 0;
 }
+.publish-status-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  align-items: center;
+  justify-content: center;
+  width: fit-content;
+  max-width: 100%;
+  margin: 10px auto 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 8px 18px rgba(20, 34, 56, 0.06);
+  padding: 7px 12px;
+  font-size: 12px;
+}
+.status-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #c6d0dc;
+}
+.status-dot.on {
+  background: var(--green);
+  box-shadow: 0 0 0 4px rgba(15, 143, 95, 0.12);
+}
+.publish-status-bar strong {
+  color: var(--text);
+}
+.publish-status-bar em,
+.status-empty {
+  color: var(--muted);
+  font-style: normal;
+  font-weight: 900;
+}
 .page-title {
   margin: 22px 0 18px;
 }
@@ -614,6 +649,87 @@ td { font-size: 14px; }
   gap: 5px;
   margin-left: auto;
 }
+.publish-draft-panel {
+  display: grid;
+  gap: 14px;
+  border: 1px solid var(--brand);
+  border-radius: 4px;
+  background: #fff;
+  box-shadow: var(--shadow);
+  margin-top: 14px;
+  padding: 18px;
+}
+.source-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #fbfcfe;
+  padding: 10px 12px;
+}
+.source-summary span {
+  color: var(--muted);
+  font-weight: 900;
+}
+.source-summary a {
+  color: var(--brand);
+  font-weight: 900;
+}
+.publish-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.publish-form-grid label {
+  display: grid;
+  gap: 6px;
+}
+.publish-form-grid label > span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+}
+.publish-form-grid .wide {
+  grid-column: 1 / -1;
+}
+.platform-checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-height: 48px;
+  align-items: center;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: #fff;
+  padding: 10px 12px;
+}
+.platform-checks label {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  font-weight: 900;
+}
+.platform-checks label.disabled {
+  color: var(--muted);
+  opacity: 0.58;
+}
+textarea {
+  min-height: 150px;
+  width: 100%;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  padding: 12px 13px;
+  color: var(--text);
+  resize: vertical;
+}
+.draft-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+  justify-content: flex-end;
+}
 .muted-row {
   color: var(--muted);
   font-weight: 800;
@@ -626,6 +742,68 @@ td { font-size: 14px; }
 .channels,
 .api-grid {
   grid-template-columns: repeat(4, minmax(150px, 1fr));
+}
+.publish-setup {
+  display: grid;
+  gap: 14px;
+}
+.publish-slot {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #fff;
+  padding: 15px;
+}
+.primary-slot {
+  border-color: var(--brand);
+}
+.publish-slot-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.publish-slot-head strong,
+.publish-slot strong {
+  display: block;
+  color: var(--text);
+  font-size: 18px;
+  letter-spacing: -0.03em;
+}
+.publish-slot p {
+  margin-top: 6px;
+}
+.empty-slots {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.empty-slot {
+  background: #fbfcfe;
+  opacity: 0.82;
+}
+.publish-dashboard {
+  background: #fff;
+}
+.draft-list {
+  display: grid;
+  gap: 7px;
+}
+.draft-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.5fr) minmax(120px, 0.8fr) minmax(100px, 0.6fr) auto;
+  gap: 10px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #fbfcfe;
+  padding: 10px 11px;
+  font-size: 13px;
+}
+.draft-row strong {
+  color: var(--text);
+}
+.draft-row span {
+  color: var(--muted);
+  font-weight: 800;
 }
 .channel,
 .api-card {
@@ -785,7 +963,9 @@ td { font-size: 14px; }
   .api-grid,
   .settings-grid,
   .source-group-grid,
-  .detail-filter-grid {
+  .detail-filter-grid,
+  .empty-slots,
+  .publish-form-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .top-shell {
@@ -829,6 +1009,8 @@ td { font-size: 14px; }
   .settings-grid,
   .source-group-grid,
   .detail-filter-grid,
+  .empty-slots,
+  .publish-form-grid,
   .focused-stats { grid-template-columns: 1fr; }
   .top-nav button {
     min-width: 178px;
@@ -847,5 +1029,8 @@ td { font-size: 14px; }
   .result-actions {
     width: 100%;
     margin-left: 0;
+  }
+  .draft-row {
+    grid-template-columns: 1fr;
   }
 }

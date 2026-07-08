@@ -209,6 +209,28 @@ def init_db() -> None:
                 level TEXT NOT NULL DEFAULT 'info',
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS listing_drafts (
+                id TEXT PRIMARY KEY,
+                source_item_id TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT '',
+                mall TEXT NOT NULL DEFAULT '',
+                source_url TEXT NOT NULL DEFAULT '',
+                target_platforms_json TEXT NOT NULL DEFAULT '[]',
+                title TEXT NOT NULL,
+                sale_price INTEGER NOT NULL DEFAULT 0,
+                display_price INTEGER NOT NULL DEFAULT 0,
+                shipping_fee INTEGER NOT NULL DEFAULT 0,
+                category_id TEXT NOT NULL DEFAULT '',
+                stock_quantity INTEGER NOT NULL DEFAULT 0,
+                image_url TEXT NOT NULL DEFAULT '',
+                option_name TEXT NOT NULL DEFAULT '',
+                description TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'draft',
+                platform_status_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             """
         )
 
@@ -309,6 +331,34 @@ class PriceSearchRequest(BaseModel):
 
 class InvoicePrintRequest(BaseModel):
     order_ids: list[str]
+
+
+class ListingDraftPayload(BaseModel):
+    source_item_id: str = ""
+    source: str = ""
+    mall: str = ""
+    source_url: str = ""
+    target_platforms: list[str] = ["smartstore"]
+    title: str = Field(min_length=1)
+    sale_price: int = 0
+    display_price: int = 0
+    shipping_fee: int = 0
+    category_id: str = ""
+    stock_quantity: int = 0
+    image_url: str = ""
+    option_name: str = ""
+    description: str = ""
+
+
+class ListingApprovePayload(BaseModel):
+    target_platforms: list[str] = ["smartstore"]
+
+
+def listing_draft_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    data = row_to_dict(row) or {}
+    data["target_platforms"] = json.loads(data.pop("target_platforms_json") or "[]")
+    data["platform_status"] = json.loads(data.pop("platform_status_json") or "{}")
+    return data
 
 
 def naver_sort(sort_mode: str) -> str:
@@ -778,12 +828,15 @@ def dashboard() -> dict[str, Any]:
         item_count = db.execute("SELECT COUNT(*) AS count FROM price_items").fetchone()["count"]
         orders_ready = db.execute("SELECT COUNT(*) AS count FROM orders WHERE status = 'ready'").fetchone()["count"]
         api_ready = db.execute("SELECT COUNT(*) AS count FROM api_keys WHERE status IN ('connected', 'ready')").fetchone()["count"]
+        pending_publish = db.execute(
+            "SELECT COUNT(*) AS count FROM listing_drafts WHERE status IN ('draft', 'ready_to_publish')"
+        ).fetchone()["count"]
         latest_payload = get_run_payload(db, latest["id"]) if latest else None
     return {
         "stats": {
             "collected_products": item_count,
             "lowest_candidates": latest_payload["summary"]["lowest_count"] if latest_payload else 0,
-            "pending_publish": 42,
+            "pending_publish": pending_publish,
             "pricing_targets": 16,
             "invoice_ready": orders_ready,
             "connected_apis": api_ready,
@@ -1040,12 +1093,98 @@ def print_invoices(payload: InvoicePrintRequest) -> dict[str, Any]:
 
 @app.get("/channels", dependencies=[Depends(require_admin)])
 def channels() -> list[dict[str, Any]]:
+    with connect() as db:
+        smartstore = db.execute("SELECT status, last_tested_at FROM api_keys WHERE platform = 'smartstore'").fetchone()
+    smartstore_status = smartstore["status"] if smartstore else "not_configured"
     return [
-        {"name": "스마트스토어", "status": "ready", "description": "카테고리/옵션/이미지/상세설명"},
-        {"name": "쿠팡", "status": "pending", "description": "승인 필요/불필요 상품 플로우"},
-        {"name": "11번가", "status": "pending", "description": "가격/재고/배송 템플릿"},
-        {"name": "자사몰", "status": "ready", "description": "CSV/API 업로드"},
+        {
+            "name": "네이버 스마트스토어",
+            "status": smartstore_status if smartstore_status in {"connected", "configured"} else "not_configured",
+            "description": "커머스API 기반 상품등록 슬롯",
+        },
+        {"name": "쇼핑몰 추가 슬롯", "status": "pending", "description": "다음 쇼핑몰 연결 대기"},
+        {"name": "쇼핑몰 추가 슬롯", "status": "pending", "description": "다음 쇼핑몰 연결 대기"},
+        {"name": "쇼핑몰 추가 슬롯", "status": "pending", "description": "다음 쇼핑몰 연결 대기"},
     ]
+
+
+@app.get("/listing-drafts", dependencies=[Depends(require_admin)])
+def listing_drafts() -> list[dict[str, Any]]:
+    with connect() as db:
+        rows = db.execute("SELECT * FROM listing_drafts ORDER BY created_at DESC LIMIT 80").fetchall()
+        return [listing_draft_row_to_dict(row) for row in rows]
+
+
+@app.post("/listing-drafts", dependencies=[Depends(require_admin)])
+def create_listing_draft(payload: ListingDraftPayload) -> dict[str, Any]:
+    draft_id = new_id("draft")
+    timestamp = now()
+    target_platforms = [platform for platform in payload.target_platforms if platform == "smartstore"] or ["smartstore"]
+    with connect() as db:
+        db.execute(
+            """
+            INSERT INTO listing_drafts (
+                id, source_item_id, source, mall, source_url, target_platforms_json,
+                title, sale_price, display_price, shipping_fee, category_id, stock_quantity,
+                image_url, option_name, description, status, platform_status_json, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                draft_id,
+                payload.source_item_id,
+                payload.source,
+                payload.mall,
+                payload.source_url,
+                json.dumps(target_platforms, ensure_ascii=False),
+                payload.title,
+                max(payload.sale_price, 0),
+                max(payload.display_price, 0),
+                max(payload.shipping_fee, 0),
+                payload.category_id,
+                max(payload.stock_quantity, 0),
+                payload.image_url,
+                payload.option_name,
+                payload.description,
+                "draft",
+                json.dumps({platform: "draft" for platform in target_platforms}, ensure_ascii=False),
+                timestamp,
+                timestamp,
+            ),
+        )
+        row = db.execute("SELECT * FROM listing_drafts WHERE id = ?", (draft_id,)).fetchone()
+    log_event(f"listing draft created: {payload.title}")
+    return listing_draft_row_to_dict(row)
+
+
+@app.post("/listing-drafts/{draft_id}/approve", dependencies=[Depends(require_admin)])
+def approve_listing_draft(draft_id: str, payload: ListingApprovePayload) -> dict[str, Any]:
+    target_platforms = [platform for platform in payload.target_platforms if platform == "smartstore"] or ["smartstore"]
+    platform_status = {platform: "ready_to_publish" for platform in target_platforms}
+    with connect() as db:
+        row = db.execute("SELECT * FROM listing_drafts WHERE id = ?", (draft_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Listing draft not found")
+        key = db.execute("SELECT * FROM api_keys WHERE platform = 'smartstore'").fetchone()
+        if "smartstore" in target_platforms and (not key or key["status"] not in {"connected", "configured"}):
+            raise HTTPException(status_code=400, detail="네이버 스마트스토어 API 연결 후 등록 승인할 수 있습니다.")
+        db.execute(
+            """
+            UPDATE listing_drafts
+            SET status = ?, target_platforms_json = ?, platform_status_json = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                "ready_to_publish",
+                json.dumps(target_platforms, ensure_ascii=False),
+                json.dumps(platform_status, ensure_ascii=False),
+                now(),
+                draft_id,
+            ),
+        )
+        updated = db.execute("SELECT * FROM listing_drafts WHERE id = ?", (draft_id,)).fetchone()
+    log_event(f"listing draft approved for publish: {row['title']}")
+    return listing_draft_row_to_dict(updated)
 
 
 @app.get("/logs", dependencies=[Depends(require_admin)])

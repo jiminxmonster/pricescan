@@ -4,6 +4,8 @@ const basePath = import.meta.env.BASE_URL.replace(/\/$/, "");
 const API_BASE = `${basePath}/api`;
 const TOKEN_KEY = "pricescan_admin_token";
 const SETTINGS_KEY = "pricescan_admin_settings";
+const SETTINGS_VERSION_KEY = "pricescan_admin_settings_version";
+const SETTINGS_VERSION = "publish-slot-v1";
 
 type FeatureKey = "publish" | "pricing" | "invoice" | "tenant";
 type Tab = "search" | "api" | "settings" | FeatureKey;
@@ -16,7 +18,7 @@ type AdminSettings = {
 const defaultSettings: AdminSettings = {
   showSidebar: false,
   features: {
-    publish: false,
+    publish: true,
     pricing: false,
     invoice: false,
     tenant: false,
@@ -79,10 +81,16 @@ function readSettings(): AdminSettings {
   try {
     const saved = localStorage.getItem(SETTINGS_KEY);
     if (!saved) return defaultSettings;
+    const migrated = localStorage.getItem(SETTINGS_VERSION_KEY) === SETTINGS_VERSION;
     const parsed = JSON.parse(saved) as Partial<AdminSettings>;
+    const features = { ...defaultSettings.features, ...(parsed.features || {}) };
+    if (!migrated) {
+      features.publish = true;
+      localStorage.setItem(SETTINGS_VERSION_KEY, SETTINGS_VERSION);
+    }
     return {
       showSidebar: Boolean(parsed.showSidebar),
-      features: { ...defaultSettings.features, ...(parsed.features || {}) },
+      features,
     };
   } catch {
     return defaultSettings;
@@ -196,6 +204,52 @@ type LogItem = {
   created_at: string;
 };
 
+type ListingDraft = {
+  id: string;
+  source_item_id: string;
+  source: string;
+  mall: string;
+  source_url: string;
+  target_platforms: string[];
+  title: string;
+  sale_price: number;
+  display_price: number;
+  shipping_fee: number;
+  category_id: string;
+  stock_quantity: number;
+  image_url: string;
+  option_name: string;
+  description: string;
+  status: string;
+  platform_status: Record<string, string>;
+  created_at: string;
+  updated_at: string;
+};
+
+type DraftSourceItem = {
+  sourceItemId: string;
+  source: string;
+  mall: string;
+  name: string;
+  salePrice: number;
+  displayPrice: number;
+  shippingFee: number;
+  url: string;
+};
+
+type DraftForm = {
+  targetPlatforms: string[];
+  title: string;
+  salePrice: number;
+  displayPrice: number;
+  shippingFee: number;
+  categoryId: string;
+  stockQuantity: number;
+  imageUrl: string;
+  optionName: string;
+  description: string;
+};
+
 async function request<T>(path: string, token: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     ...options,
@@ -248,6 +302,14 @@ function apiStatusLabel(status: string): string {
 function apiStatusDetail(item: ApiKey): string {
   if (item.status === "ready") return "크롤러 사용 가능";
   return item.last_tested_at || "테스트 전";
+}
+
+function smartstoreStatus(apiKeys: ApiKey[]): string {
+  return apiKeys.find((item) => item.platform === "smartstore")?.status || "not_configured";
+}
+
+function isSmartstoreActive(apiKeys: ApiKey[]): boolean {
+  return ["connected", "configured"].includes(smartstoreStatus(apiKeys));
 }
 
 function pillClass(status: string): string {
@@ -581,6 +643,7 @@ export default function App() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [channels, setChannels] = useState<Channel[]>([]);
   const [logs, setLogs] = useState<LogItem[]>([]);
+  const [listingDrafts, setListingDrafts] = useState<ListingDraft[]>([]);
   const [keyword, setKeyword] = useState("노트북");
   const [sortMode, setSortMode] = useState("lowest");
   const [collecting, setCollecting] = useState(false);
@@ -596,16 +659,30 @@ export default function App() {
   const [smartstoreLoading, setSmartstoreLoading] = useState(false);
   const [smartstoreError, setSmartstoreError] = useState("");
   const [showSourcePanel, setShowSourcePanel] = useState(false);
+  const [draftSourceItem, setDraftSourceItem] = useState<DraftSourceItem | null>(null);
+  const [draftForm, setDraftForm] = useState<DraftForm>({
+    targetPlatforms: ["smartstore"],
+    title: "",
+    salePrice: 0,
+    displayPrice: 0,
+    shippingFee: 0,
+    categoryId: "",
+    stockQuantity: 100,
+    imageUrl: "",
+    optionName: "",
+    description: "",
+  });
 
   const loadAll = async () => {
     if (!token) return;
-    const [dashboardData, latestSearch, keyData, orderData, channelData, logData] = await Promise.all([
+    const [dashboardData, latestSearch, keyData, orderData, channelData, logData, draftData] = await Promise.all([
       request<Dashboard>("/dashboard", token),
       request<SearchPayload>("/price-search/latest", token),
       request<ApiKey[]>("/api-keys", token),
       request<Order[]>("/orders", token),
       request<Channel[]>("/channels", token),
       request<LogItem[]>("/logs", token),
+      request<ListingDraft[]>("/listing-drafts", token),
     ]);
     setDashboard(dashboardData);
     setSearchPayload(latestSearch);
@@ -613,6 +690,7 @@ export default function App() {
     setOrders(orderData);
     setChannels(channelData);
     setLogs(logData);
+    setListingDrafts(draftData);
     const visibleKeyData = keyData.filter((item) => item.platform !== "naver_datalab");
     const selected = visibleKeyData.find((item) => item.platform === apiPlatform) || visibleKeyData.find((item) => item.platform === "naver") || visibleKeyData[0];
     if (selected) {
@@ -637,6 +715,19 @@ export default function App() {
 
   const refreshLogs = async () => {
     setLogs(await request<LogItem[]>("/logs", token));
+  };
+
+  const refreshPublishData = async () => {
+    const [keyData, channelData, draftData, dashboardData] = await Promise.all([
+      request<ApiKey[]>("/api-keys", token),
+      request<Channel[]>("/channels", token),
+      request<ListingDraft[]>("/listing-drafts", token),
+      request<Dashboard>("/dashboard", token),
+    ]);
+    setApiKeys(keyData);
+    setChannels(channelData);
+    setListingDrafts(draftData);
+    setDashboard(dashboardData);
   };
 
   const loadSmartstoreProducts = async (searchKeyword = keyword.trim()) => {
@@ -777,6 +868,94 @@ export default function App() {
     await refreshLogs();
   };
 
+  const saveSmartstorePublishKey = async (clientId: string, clientSecret: string) => {
+    await request("/api-keys/smartstore", token, {
+      method: "PUT",
+      body: JSON.stringify({ client_id: clientId.trim(), client_secret: clientSecret.trim() }),
+    });
+    await refreshPublishData();
+    setNotice("네이버 스마트스토어 API 저장완료");
+    await refreshLogs();
+  };
+
+  const testSmartstorePublishKey = async (clientId: string, clientSecret: string) => {
+    if (clientId.trim() || clientSecret.trim()) {
+      await request("/api-keys/smartstore", token, {
+        method: "PUT",
+        body: JSON.stringify({ client_id: clientId.trim(), client_secret: clientSecret.trim() }),
+      });
+    }
+    const result = await request<{ status: string; message: string }>("/api-keys/smartstore/test", token, { method: "POST" });
+    await refreshPublishData();
+    setNotice(result.message);
+    await refreshLogs();
+  };
+
+  const openPublishDraft = (item: DraftSourceItem) => {
+    if (!isSmartstoreActive(apiKeys)) {
+      setTab("publish");
+      setNotice("네이버 스마트스토어 API 슬롯을 먼저 저장/연결하세요.");
+      return;
+    }
+    setDraftSourceItem(item);
+    setDraftForm({
+      targetPlatforms: ["smartstore"],
+      title: item.name,
+      salePrice: item.salePrice,
+      displayPrice: item.displayPrice,
+      shippingFee: item.shippingFee,
+      categoryId: "",
+      stockQuantity: 100,
+      imageUrl: "",
+      optionName: "",
+      description: `${item.name}\n\n원본 소스: ${item.mall}\n기준 판매가: ${money(item.salePrice)}\n노출가: ${money(item.displayPrice)}\n\n상세설명과 이미지는 권리 확인 후 교체하세요.`,
+    });
+    setNotice("상품등록 초안을 확인하고 승인 등록을 진행하세요.");
+  };
+
+  const toggleDraftPlatform = (platform: string) => {
+    setDraftForm((current) => {
+      const exists = current.targetPlatforms.includes(platform);
+      const next = exists ? current.targetPlatforms.filter((item) => item !== platform) : [...current.targetPlatforms, platform];
+      return { ...current, targetPlatforms: next.length ? next : current.targetPlatforms };
+    });
+  };
+
+  const approveDraft = async () => {
+    if (!draftSourceItem) {
+      setNotice("등록할 상품을 먼저 선택하세요.");
+      return;
+    }
+    const created = await request<ListingDraft>("/listing-drafts", token, {
+      method: "POST",
+      body: JSON.stringify({
+        source_item_id: draftSourceItem.sourceItemId,
+        source: draftSourceItem.source,
+        mall: draftSourceItem.mall,
+        source_url: draftSourceItem.url,
+        target_platforms: draftForm.targetPlatforms,
+        title: draftForm.title.trim(),
+        sale_price: Number(draftForm.salePrice) || 0,
+        display_price: Number(draftForm.displayPrice) || 0,
+        shipping_fee: Number(draftForm.shippingFee) || 0,
+        category_id: draftForm.categoryId.trim(),
+        stock_quantity: Number(draftForm.stockQuantity) || 0,
+        image_url: draftForm.imageUrl.trim(),
+        option_name: draftForm.optionName.trim(),
+        description: draftForm.description.trim(),
+      }),
+    });
+    const approved = await request<ListingDraft>(`/listing-drafts/${created.id}/approve`, token, {
+      method: "POST",
+      body: JSON.stringify({ target_platforms: draftForm.targetPlatforms }),
+    });
+    setListingDrafts((current) => [approved, ...current.filter((item) => item.id !== approved.id)]);
+    setDraftSourceItem(null);
+    setNotice("상품등록 초안 승인 완료 · 네이버 실등록 API 연결 대기 상태로 저장했습니다.");
+    await refreshPublishData();
+    await refreshLogs();
+  };
+
   const printInvoices = async () => {
     const ids = selectedOrders.length ? selectedOrders : orders.filter((order) => order.status === "ready").map((order) => order.id);
     await request("/invoices/print", token, { method: "POST", body: JSON.stringify({ order_ids: ids }) });
@@ -914,6 +1093,8 @@ export default function App() {
           </div>
         </header>
 
+        {settings.features.publish && <PublishStatusBar apiKeys={apiKeys} />}
+
         {notice && <div className="notice">{notice}</div>}
 
         <section className="grid stats focused-stats compact-stats">
@@ -974,7 +1155,19 @@ export default function App() {
               smartstoreError={smartstoreError}
               onBaseline={selectBaseline}
               onExclude={toggleExclude}
+              onOpenPublish={openPublishDraft}
             />
+            {draftSourceItem && (
+              <PublishDraftPanel
+                sourceItem={draftSourceItem}
+                form={draftForm}
+                smartstoreActive={isSmartstoreActive(apiKeys)}
+                onChange={setDraftForm}
+                onTogglePlatform={toggleDraftPlatform}
+                onApprove={approveDraft}
+                onCancel={() => setDraftSourceItem(null)}
+              />
+            )}
           </section>
         )}
 
@@ -1010,18 +1203,17 @@ export default function App() {
             <div className="section-head">
               <div>
                 <h2>쇼핑몰 자동등록</h2>
-                <p>현재는 채널별 등록 상태를 백엔드에서 가져옵니다. 실제 등록 API는 다음 단계에서 연결합니다.</p>
+                <p>API 기반 상품등록 슬롯입니다. 우선 네이버 스마트스토어부터 연결하고, 나머지는 쇼핑몰별로 슬롯을 추가합니다.</p>
               </div>
+              <span className={isSmartstoreActive(apiKeys) ? "pill green" : "pill red"}>{isSmartstoreActive(apiKeys) ? "네이버 활성화" : "API 연결 필요"}</span>
             </div>
-            <div className="grid channels">
-              {channels.map((channel) => (
-                <div className="channel" key={channel.name}>
-                  <strong>{channel.name}</strong>
-                  <p>{channel.description}</p>
-                  <span className={pillClass(channel.status)}>{statusLabel(channel.status)}</span>
-                </div>
-              ))}
-            </div>
+            <PublishSetup
+              apiKeys={apiKeys}
+              channels={channels}
+              drafts={listingDrafts}
+              onSaveSmartstore={saveSmartstorePublishKey}
+              onTestSmartstore={testSmartstorePublishKey}
+            />
           </section>
         )}
 
@@ -1046,6 +1238,7 @@ export default function App() {
               smartstoreError=""
               onBaseline={selectBaseline}
               onExclude={toggleExclude}
+              onOpenPublish={openPublishDraft}
             />
           </section>
         )}
@@ -1140,6 +1333,18 @@ function StatCard({ label, value }: { label: string; value: number }) {
     <div className="card">
       <span>{label}</span>
       <strong>{value}</strong>
+    </div>
+  );
+}
+
+function PublishStatusBar({ apiKeys }: { apiKeys: ApiKey[] }) {
+  const active = isSmartstoreActive(apiKeys);
+  return (
+    <div className="publish-status-bar" aria-label="쇼핑몰 자동등록 연결 상태">
+      <span className={`status-dot ${active ? "on" : ""}`} />
+      <strong>네이버스마트({active ? "o" : "-"})</strong>
+      <em>{active ? "활성화" : "미연결"}</em>
+      <span className="status-empty">+ 쇼핑몰 추가 대기</span>
     </div>
   );
 }
@@ -1302,12 +1507,197 @@ function DetailFilterPanel({
   );
 }
 
+function PublishSetup({
+  apiKeys,
+  channels,
+  drafts,
+  onSaveSmartstore,
+  onTestSmartstore,
+}: {
+  apiKeys: ApiKey[];
+  channels: Channel[];
+  drafts: ListingDraft[];
+  onSaveSmartstore: (clientId: string, clientSecret: string) => void;
+  onTestSmartstore: (clientId: string, clientSecret: string) => void;
+}) {
+  const smartstore = apiKeys.find((item) => item.platform === "smartstore");
+  const emptyChannels = channels.length > 1 ? channels.slice(1, 4) : [
+    { name: "쇼핑몰 추가 슬롯", status: "pending", description: "다음 쇼핑몰 연결 대기" },
+    { name: "쇼핑몰 추가 슬롯", status: "pending", description: "다음 쇼핑몰 연결 대기" },
+    { name: "쇼핑몰 추가 슬롯", status: "pending", description: "다음 쇼핑몰 연결 대기" },
+  ];
+  const [clientId, setClientId] = useState(smartstore?.client_id || "");
+  const [clientSecret, setClientSecret] = useState(smartstore?.client_secret || "");
+
+  useEffect(() => {
+    setClientId(smartstore?.client_id || "");
+    setClientSecret(smartstore?.client_secret || "");
+  }, [smartstore?.client_id, smartstore?.client_secret]);
+
+  return (
+    <div className="publish-setup">
+      <div className="publish-slot primary-slot">
+        <div className="publish-slot-head">
+          <div>
+            <span className="eyebrow">1번 슬롯</span>
+            <strong>네이버 스마트스토어</strong>
+            <p>커머스API 키를 저장하면 스캔 상품을 네이버 등록 초안으로 보낼 수 있습니다.</p>
+          </div>
+          <span className={pillClass(smartstore?.status || "not_configured")}>{apiStatusLabel(smartstore?.status || "not_configured")}</span>
+        </div>
+        <div className="form-grid">
+          <input className="input" placeholder="Commerce API Client ID" value={clientId} onChange={(event) => setClientId(event.target.value)} />
+          <input className="input" placeholder="Commerce API Client Secret" value={clientSecret} onChange={(event) => setClientSecret(event.target.value)} />
+          <button className="btn primary" onClick={() => onSaveSmartstore(clientId, clientSecret)}>저장</button>
+          <button className="btn orange" onClick={() => onTestSmartstore(clientId, clientSecret)}>저장 후 연결 테스트</button>
+        </div>
+      </div>
+
+      <div className="grid empty-slots">
+        {emptyChannels.map((channel, index) => (
+          <div className="publish-slot empty-slot" key={`${channel.name}-${index}`}>
+            <span className="eyebrow">{index + 2}번 슬롯</span>
+            <strong>쇼핑몰 추가</strong>
+            <p>{channel.description}</p>
+            <button className="btn small" disabled>추가 대기</button>
+          </div>
+        ))}
+      </div>
+
+      <div className="box publish-dashboard">
+        <div className="section-head">
+          <div>
+            <h2>등록 대시보드</h2>
+            <p>승인된 상품 초안과 쇼핑몰별 등록 상태를 한눈에 확인합니다.</p>
+          </div>
+          <span className="pill blue">{drafts.length}건</span>
+        </div>
+        <div className="draft-list">
+          {drafts.map((draft) => (
+            <div className="draft-row" key={draft.id}>
+              <strong>{draft.title}</strong>
+              <span>{draft.target_platforms.includes("smartstore") ? "네이버 스마트스토어" : draft.target_platforms.join(", ")}</span>
+              <span>{money(draft.display_price || draft.sale_price)}</span>
+              <span className={pillClass(draft.status === "ready_to_publish" ? "connected" : "pending")}>{draft.status === "ready_to_publish" ? "등록대기" : "초안"}</span>
+            </div>
+          ))}
+          {drafts.length === 0 && <div className="draft-row muted-row">아직 등록 초안이 없습니다.</div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PublishDraftPanel({
+  sourceItem,
+  form,
+  smartstoreActive,
+  onChange,
+  onTogglePlatform,
+  onApprove,
+  onCancel,
+}: {
+  sourceItem: DraftSourceItem;
+  form: DraftForm;
+  smartstoreActive: boolean;
+  onChange: (form: DraftForm) => void;
+  onTogglePlatform: (platform: string) => void;
+  onApprove: () => void;
+  onCancel: () => void;
+}) {
+  const update = <K extends keyof DraftForm>(key: K, value: DraftForm[K]) => {
+    onChange({ ...form, [key]: value });
+  };
+
+  return (
+    <div className="publish-draft-panel">
+      <div className="section-head">
+        <div>
+          <span className="eyebrow">네이버 스마트스토어 등록폼</span>
+          <h2>상품등록 초안</h2>
+          <p>스캔된 상품 정보를 등록폼에 자동 채움했습니다. 이미지/상세설명 권리 확인 후 승인하세요.</p>
+        </div>
+        <button className="btn small" onClick={onCancel}>닫기</button>
+      </div>
+
+      <div className="source-summary">
+        <strong>원본 상품</strong>
+        <span>{sourceItem.mall}</span>
+        <a href={sourceItem.url} target="_blank" rel="noreferrer">원본 링크</a>
+      </div>
+
+      <div className="publish-form-grid">
+        <label>
+          <span>등록 쇼핑몰</span>
+          <div className="platform-checks">
+            <label className={smartstoreActive ? "" : "disabled"}>
+              <input
+                type="checkbox"
+                checked={form.targetPlatforms.includes("smartstore")}
+                disabled={!smartstoreActive}
+                onChange={() => onTogglePlatform("smartstore")}
+              />
+              네이버 스마트스토어
+            </label>
+          </div>
+        </label>
+        <label>
+          <span>상품명</span>
+          <input className="input" value={form.title} onChange={(event) => update("title", event.target.value)} />
+        </label>
+        <label>
+          <span>판매가</span>
+          <input className="input" type="number" value={form.salePrice} onChange={(event) => update("salePrice", Number(event.target.value))} />
+        </label>
+        <label>
+          <span>노출가</span>
+          <input className="input" type="number" value={form.displayPrice} onChange={(event) => update("displayPrice", Number(event.target.value))} />
+        </label>
+        <label>
+          <span>배송비</span>
+          <input className="input" type="number" value={form.shippingFee} onChange={(event) => update("shippingFee", Number(event.target.value))} />
+        </label>
+        <label>
+          <span>재고</span>
+          <input className="input" type="number" value={form.stockQuantity} onChange={(event) => update("stockQuantity", Number(event.target.value))} />
+        </label>
+        <label>
+          <span>카테고리 ID</span>
+          <input className="input" value={form.categoryId} onChange={(event) => update("categoryId", event.target.value)} placeholder="네이버 카테고리 ID" />
+        </label>
+        <label>
+          <span>옵션명</span>
+          <input className="input" value={form.optionName} onChange={(event) => update("optionName", event.target.value)} placeholder="예: 기본옵션" />
+        </label>
+        <label className="wide">
+          <span>대표 이미지 URL</span>
+          <input className="input" value={form.imageUrl} onChange={(event) => update("imageUrl", event.target.value)} placeholder="권리 확보된 이미지 URL" />
+        </label>
+        <label className="wide">
+          <span>상세설명</span>
+          <textarea value={form.description} onChange={(event) => update("description", event.target.value)} />
+        </label>
+      </div>
+
+      <div className="draft-actions">
+        <button className="btn" onClick={onCancel}>취소</button>
+        <button className="btn primary" onClick={onApprove} disabled={!smartstoreActive || !form.title.trim()}>
+          승인 등록
+        </button>
+      </div>
+    </div>
+  );
+}
+
 type SearchResultRow = {
   id: string;
+  sourceItemId: string;
+  collectionSource: string;
   name: string;
   mall: string;
   salePrice: number;
   displayPrice: number;
+  shippingFee: number;
   url: string;
   source: "price" | "smartstore";
   status?: PriceItem["status"];
@@ -1323,6 +1713,7 @@ function SearchResultList({
   smartstoreError,
   onBaseline,
   onExclude,
+  onOpenPublish,
 }: {
   payload: SearchPayload;
   keyword: string;
@@ -1332,13 +1723,17 @@ function SearchResultList({
   smartstoreError: string;
   onBaseline: (id: string) => void;
   onExclude: (id: string) => void;
+  onOpenPublish: (item: DraftSourceItem) => void;
 }) {
   const priceRows: SearchResultRow[] = payload.items.map((item) => ({
     id: item.id,
+    sourceItemId: item.id,
+    collectionSource: item.source,
     name: item.name,
     mall: item.mall,
     salePrice: item.price,
     displayPrice: item.total,
+    shippingFee: item.shipping,
     url: item.url,
     source: "price",
     status: item.status,
@@ -1349,10 +1744,13 @@ function SearchResultList({
         const exposedPrice = (item.discounted_price || item.sale_price) + item.delivery_fee;
         return {
           id: `smartstore-${item.channel_product_no || item.id}`,
+          sourceItemId: item.channel_product_no || item.id,
+          collectionSource: "smartstore",
           name: item.name,
           mall: "네이버 스마트스토어",
           salePrice: item.sale_price,
           displayPrice: exposedPrice,
+          shippingFee: item.delivery_fee,
           url: item.url,
           source: "smartstore" as const,
         };
@@ -1389,6 +1787,30 @@ function SearchResultList({
               <span className="result-actions">
                 <button className="btn small" onClick={() => onBaseline(row.id)}>기준</button>
                 <button className="btn small danger" onClick={() => onExclude(row.id)}>{row.isExcluded ? "복구" : "제외"}</button>
+                <button className="btn small orange" onClick={() => onOpenPublish({
+                  sourceItemId: row.sourceItemId,
+                  source: row.collectionSource,
+                  mall: row.mall,
+                  name: row.name,
+                  salePrice: row.salePrice,
+                  displayPrice: row.displayPrice,
+                  shippingFee: row.shippingFee,
+                  url: row.url,
+                })}>상품등록</button>
+              </span>
+            )}
+            {row.source === "smartstore" && (
+              <span className="result-actions">
+                <button className="btn small orange" onClick={() => onOpenPublish({
+                  sourceItemId: row.sourceItemId,
+                  source: row.collectionSource,
+                  mall: row.mall,
+                  name: row.name,
+                  salePrice: row.salePrice,
+                  displayPrice: row.displayPrice,
+                  shippingFee: row.shippingFee,
+                  url: row.url,
+                })}>상품등록</button>
               </span>
             )}
           </div>
