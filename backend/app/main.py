@@ -234,6 +234,23 @@ def init_db() -> None:
             """
         )
 
+        listing_columns = {
+            row["name"] for row in db.execute("PRAGMA table_info(listing_drafts)").fetchall()
+        }
+        listing_column_migrations = [
+            ("validation_json", "ALTER TABLE listing_drafts ADD COLUMN validation_json TEXT NOT NULL DEFAULT '{}'"),
+            ("publish_request_json", "ALTER TABLE listing_drafts ADD COLUMN publish_request_json TEXT NOT NULL DEFAULT '{}'"),
+            ("publish_mode", "ALTER TABLE listing_drafts ADD COLUMN publish_mode TEXT NOT NULL DEFAULT 'protected'"),
+            ("external_product_no", "ALTER TABLE listing_drafts ADD COLUMN external_product_no TEXT NOT NULL DEFAULT ''"),
+            ("external_channel_product_no", "ALTER TABLE listing_drafts ADD COLUMN external_channel_product_no TEXT NOT NULL DEFAULT ''"),
+            ("external_url", "ALTER TABLE listing_drafts ADD COLUMN external_url TEXT NOT NULL DEFAULT ''"),
+            ("last_publish_attempt_at", "ALTER TABLE listing_drafts ADD COLUMN last_publish_attempt_at TEXT"),
+            ("publish_error", "ALTER TABLE listing_drafts ADD COLUMN publish_error TEXT NOT NULL DEFAULT ''"),
+        ]
+        for column, statement in listing_column_migrations:
+            if column not in listing_columns:
+                db.execute(statement)
+
         platforms = [
             ("naver", "네이버 쇼핑 검색 API"),
             ("smartstore", "네이버 스마트스토어 커머스API"),
@@ -354,11 +371,99 @@ class ListingApprovePayload(BaseModel):
     target_platforms: list[str] = ["smartstore"]
 
 
+def parse_json_text(value: str | None, fallback: Any) -> Any:
+    if not value:
+        return fallback
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return fallback
+
+
 def listing_draft_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     data = row_to_dict(row) or {}
-    data["target_platforms"] = json.loads(data.pop("target_platforms_json") or "[]")
-    data["platform_status"] = json.loads(data.pop("platform_status_json") or "{}")
+    data["target_platforms"] = parse_json_text(data.pop("target_platforms_json", "[]"), [])
+    data["platform_status"] = parse_json_text(data.pop("platform_status_json", "{}"), {})
+    data["validation"] = parse_json_text(data.pop("validation_json", "{}"), {})
+    data["publish_request"] = parse_json_text(data.pop("publish_request_json", "{}"), {})
     return data
+
+
+def validate_listing_draft_data(draft: dict[str, Any]) -> dict[str, Any]:
+    missing: list[dict[str, str]] = []
+    warnings: list[str] = []
+
+    def require_text(field: str, label: str) -> None:
+        if not str(draft.get(field) or "").strip():
+            missing.append({"field": field, "label": label})
+
+    require_text("title", "상품명")
+    require_text("category_id", "네이버 카테고리 ID")
+    require_text("image_url", "대표 이미지 URL")
+    require_text("description", "상세설명")
+
+    sale_price = parse_price(draft.get("sale_price"))
+    stock_quantity = parse_price(draft.get("stock_quantity"))
+    shipping_fee = parse_price(draft.get("shipping_fee"))
+
+    if sale_price <= 0:
+        missing.append({"field": "sale_price", "label": "판매가"})
+    if stock_quantity <= 0:
+        missing.append({"field": "stock_quantity", "label": "재고"})
+    if shipping_fee < 0:
+        missing.append({"field": "shipping_fee", "label": "배송비"})
+
+    title = str(draft.get("title") or "").strip()
+    description = str(draft.get("description") or "").strip()
+    image_url = str(draft.get("image_url") or "").strip()
+    if title and len(title) > 100:
+        warnings.append("상품명이 길어 네이버 등록 시 거절될 수 있습니다.")
+    if description and len(description) < 30:
+        warnings.append("상세설명이 너무 짧습니다. 실제 판매용 상세설명 보강이 필요합니다.")
+    if image_url and not image_url.startswith(("http://", "https://")):
+        warnings.append("대표 이미지 URL은 http/https 주소여야 합니다.")
+    if not str(draft.get("source_url") or "").strip():
+        warnings.append("원본 상품 링크가 없어 추적이 어렵습니다.")
+
+    return {
+        "ready": len(missing) == 0,
+        "missing": missing,
+        "warnings": warnings,
+        "checked_at": now(),
+    }
+
+
+def build_smartstore_publish_request(draft: dict[str, Any], validation: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "platform": "smartstore",
+        "mode": "protected",
+        "draft_id": draft.get("id"),
+        "source": {
+            "item_id": draft.get("source_item_id", ""),
+            "source": draft.get("source", ""),
+            "mall": draft.get("mall", ""),
+            "url": draft.get("source_url", ""),
+        },
+        "product": {
+            "name": draft.get("title", ""),
+            "category_id": draft.get("category_id", ""),
+            "sale_price": parse_price(draft.get("sale_price")),
+            "display_price": parse_price(draft.get("display_price")),
+            "stock_quantity": parse_price(draft.get("stock_quantity")),
+            "representative_image_url": draft.get("image_url", ""),
+            "option_name": draft.get("option_name", ""),
+            "detail_content": draft.get("description", ""),
+            "delivery_fee": parse_price(draft.get("shipping_fee")),
+        },
+        "validation": validation,
+        "required_before_live_publish": [
+            "네이버 상품정보제공고시 유형/항목",
+            "배송/반품 템플릿 또는 배송정책",
+            "원산지/제조사/브랜드 등 카테고리별 필수 속성",
+            "권리 확보된 대표/상세 이미지 업로드",
+        ],
+        "prepared_at": now(),
+    }
 
 
 def naver_sort(sort_mode: str) -> str:
@@ -829,7 +934,11 @@ def dashboard() -> dict[str, Any]:
         orders_ready = db.execute("SELECT COUNT(*) AS count FROM orders WHERE status = 'ready'").fetchone()["count"]
         api_ready = db.execute("SELECT COUNT(*) AS count FROM api_keys WHERE status IN ('connected', 'ready')").fetchone()["count"]
         pending_publish = db.execute(
-            "SELECT COUNT(*) AS count FROM listing_drafts WHERE status IN ('draft', 'ready_to_publish')"
+            """
+            SELECT COUNT(*) AS count
+            FROM listing_drafts
+            WHERE status IN ('draft', 'ready_to_publish', 'validated', 'validation_failed', 'publish_ready')
+            """
         ).fetchone()["count"]
         latest_payload = get_run_payload(db, latest["id"]) if latest else None
     return {
@@ -1184,6 +1293,96 @@ def approve_listing_draft(draft_id: str, payload: ListingApprovePayload) -> dict
         )
         updated = db.execute("SELECT * FROM listing_drafts WHERE id = ?", (draft_id,)).fetchone()
     log_event(f"listing draft approved for publish: {row['title']}")
+    return listing_draft_row_to_dict(updated)
+
+
+@app.post("/listing-drafts/{draft_id}/validate", dependencies=[Depends(require_admin)])
+def validate_listing_draft(draft_id: str) -> dict[str, Any]:
+    with connect() as db:
+        row = db.execute("SELECT * FROM listing_drafts WHERE id = ?", (draft_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Listing draft not found")
+
+        validation = validate_listing_draft_data(row_to_dict(row) or {})
+        next_status = "validated" if validation["ready"] else "validation_failed"
+        platform_status = {"smartstore": next_status}
+        db.execute(
+            """
+            UPDATE listing_drafts
+            SET status = ?, validation_json = ?, platform_status_json = ?, publish_error = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                next_status,
+                json.dumps(validation, ensure_ascii=False),
+                json.dumps(platform_status, ensure_ascii=False),
+                "" if validation["ready"] else "필수값 부족",
+                now(),
+                draft_id,
+            ),
+        )
+        updated = db.execute("SELECT * FROM listing_drafts WHERE id = ?", (draft_id,)).fetchone()
+    log_event(f"listing draft validation: {row['title']} · {next_status}", "info" if validation["ready"] else "warning")
+    return listing_draft_row_to_dict(updated)
+
+
+@app.post("/listing-drafts/{draft_id}/publish", dependencies=[Depends(require_admin)])
+def prepare_listing_publish(draft_id: str) -> dict[str, Any]:
+    with connect() as db:
+        row = db.execute("SELECT * FROM listing_drafts WHERE id = ?", (draft_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Listing draft not found")
+        key = db.execute("SELECT * FROM api_keys WHERE platform = 'smartstore'").fetchone()
+        if not key or key["status"] not in {"connected", "configured"}:
+            raise HTTPException(status_code=400, detail="네이버 스마트스토어 API 연결 후 등록 실행할 수 있습니다.")
+
+        draft_data = row_to_dict(row) or {}
+        validation = validate_listing_draft_data(draft_data)
+        if not validation["ready"]:
+            platform_status = {"smartstore": "validation_failed"}
+            db.execute(
+                """
+                UPDATE listing_drafts
+                SET status = ?, validation_json = ?, platform_status_json = ?, publish_error = ?, last_publish_attempt_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    "validation_failed",
+                    json.dumps(validation, ensure_ascii=False),
+                    json.dumps(platform_status, ensure_ascii=False),
+                    "필수값 부족",
+                    now(),
+                    now(),
+                    draft_id,
+                ),
+            )
+            updated = db.execute("SELECT * FROM listing_drafts WHERE id = ?", (draft_id,)).fetchone()
+            log_event(f"listing publish blocked by validation: {row['title']}", "warning")
+            return listing_draft_row_to_dict(updated)
+
+        publish_request = build_smartstore_publish_request(draft_data, validation)
+        platform_status = {"smartstore": "protected_ready"}
+        db.execute(
+            """
+            UPDATE listing_drafts
+            SET status = ?, validation_json = ?, publish_request_json = ?, publish_mode = ?,
+                platform_status_json = ?, publish_error = ?, last_publish_attempt_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                "publish_ready",
+                json.dumps(validation, ensure_ascii=False),
+                json.dumps(publish_request, ensure_ascii=False),
+                "protected",
+                json.dumps(platform_status, ensure_ascii=False),
+                "",
+                now(),
+                now(),
+                draft_id,
+            ),
+        )
+        updated = db.execute("SELECT * FROM listing_drafts WHERE id = ?", (draft_id,)).fetchone()
+    log_event(f"listing publish request prepared: {row['title']}")
     return listing_draft_row_to_dict(updated)
 
 

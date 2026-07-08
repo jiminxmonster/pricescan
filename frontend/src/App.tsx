@@ -204,6 +204,13 @@ type LogItem = {
   created_at: string;
 };
 
+type DraftValidation = {
+  ready?: boolean;
+  missing?: { field: string; label: string }[];
+  warnings?: string[];
+  checked_at?: string;
+};
+
 type ListingDraft = {
   id: string;
   source_item_id: string;
@@ -222,6 +229,14 @@ type ListingDraft = {
   description: string;
   status: string;
   platform_status: Record<string, string>;
+  validation: DraftValidation;
+  publish_request: Record<string, unknown>;
+  publish_mode: string;
+  external_product_no: string;
+  external_channel_product_no: string;
+  external_url: string;
+  last_publish_attempt_at?: string;
+  publish_error: string;
   created_at: string;
   updated_at: string;
 };
@@ -290,6 +305,13 @@ function statusLabel(status: string): string {
     warning: "warning",
     not_configured: "not configured",
     pending: "pending",
+    draft: "초안",
+    ready_to_publish: "등록대기",
+    validated: "검증완료",
+    validation_failed: "필수값 부족",
+    publish_ready: "등록준비",
+    protected_ready: "보호모드 준비",
+    published: "등록완료",
   };
   return labels[status] || status;
 }
@@ -313,10 +335,26 @@ function isSmartstoreActive(apiKeys: ApiKey[]): boolean {
 }
 
 function pillClass(status: string): string {
-  if (["baseline", "ready", "connected", "printed"].includes(status)) return "pill green";
+  if (["baseline", "ready", "connected", "printed", "validated", "publish_ready", "published", "protected_ready"].includes(status)) return "pill green";
   if (["abnormal", "warning", "address_check"].includes(status)) return "pill orange";
-  if (["excluded", "not_configured"].includes(status)) return "pill red";
+  if (["excluded", "not_configured", "validation_failed"].includes(status)) return "pill red";
   return "pill blue";
+}
+
+function draftMissingLabels(draft: ListingDraft): string {
+  const missing = draft.validation?.missing || [];
+  return missing.map((item) => item.label).join(", ");
+}
+
+function draftFormValidation(form: DraftForm): DraftValidation {
+  const missing: { field: string; label: string }[] = [];
+  if (!form.title.trim()) missing.push({ field: "title", label: "상품명" });
+  if ((Number(form.salePrice) || 0) <= 0) missing.push({ field: "sale_price", label: "판매가" });
+  if ((Number(form.stockQuantity) || 0) <= 0) missing.push({ field: "stock_quantity", label: "재고" });
+  if (!form.categoryId.trim()) missing.push({ field: "category_id", label: "네이버 카테고리 ID" });
+  if (!form.imageUrl.trim()) missing.push({ field: "image_url", label: "대표 이미지 URL" });
+  if (!form.description.trim()) missing.push({ field: "description", label: "상세설명" });
+  return { ready: missing.length === 0, missing, warnings: [] };
 }
 
 function normalize(value: string): string {
@@ -910,7 +948,7 @@ export default function App() {
       optionName: "",
       description: `${item.name}\n\n원본 소스: ${item.mall}\n기준 판매가: ${money(item.salePrice)}\n노출가: ${money(item.displayPrice)}\n\n상세설명과 이미지는 권리 확인 후 교체하세요.`,
     });
-    setNotice("상품등록 초안을 확인하고 승인 등록을 진행하세요.");
+    setNotice("상품등록 초안을 확인하고 초안 승인을 진행하세요.");
   };
 
   const toggleDraftPlatform = (platform: string) => {
@@ -951,7 +989,33 @@ export default function App() {
     });
     setListingDrafts((current) => [approved, ...current.filter((item) => item.id !== approved.id)]);
     setDraftSourceItem(null);
-    setNotice("상품등록 초안 승인 완료 · 네이버 실등록 API 연결 대기 상태로 저장했습니다.");
+    setNotice("상품등록 초안 승인 완료 · 등록 대시보드에서 검사 후 등록실행을 진행하세요.");
+    await refreshPublishData();
+    await refreshLogs();
+  };
+
+  const updateDraftState = (draft: ListingDraft) => {
+    setListingDrafts((current) => [draft, ...current.filter((item) => item.id !== draft.id)]);
+  };
+
+  const validateDraft = async (draftId: string) => {
+    const draft = await request<ListingDraft>(`/listing-drafts/${draftId}/validate`, token, { method: "POST" });
+    updateDraftState(draft);
+    const missing = draftMissingLabels(draft);
+    setNotice(draft.validation?.ready ? "등록 필수값 검사 완료" : `필수값 부족: ${missing || "확인 필요"}`);
+    await refreshPublishData();
+    await refreshLogs();
+  };
+
+  const preparePublish = async (draftId: string) => {
+    const draft = await request<ListingDraft>(`/listing-drafts/${draftId}/publish`, token, { method: "POST" });
+    updateDraftState(draft);
+    const missing = draftMissingLabels(draft);
+    if (draft.status === "publish_ready") {
+      setNotice("등록실행 준비 완료 · 보호모드로 요청값을 저장했습니다.");
+    } else {
+      setNotice(`등록실행 전 필수값 보완 필요: ${missing || "확인 필요"}`);
+    }
     await refreshPublishData();
     await refreshLogs();
   };
@@ -1213,6 +1277,8 @@ export default function App() {
               drafts={listingDrafts}
               onSaveSmartstore={saveSmartstorePublishKey}
               onTestSmartstore={testSmartstorePublishKey}
+              onValidateDraft={validateDraft}
+              onPreparePublish={preparePublish}
             />
           </section>
         )}
@@ -1513,12 +1579,16 @@ function PublishSetup({
   drafts,
   onSaveSmartstore,
   onTestSmartstore,
+  onValidateDraft,
+  onPreparePublish,
 }: {
   apiKeys: ApiKey[];
   channels: Channel[];
   drafts: ListingDraft[];
   onSaveSmartstore: (clientId: string, clientSecret: string) => void;
   onTestSmartstore: (clientId: string, clientSecret: string) => void;
+  onValidateDraft: (draftId: string) => void;
+  onPreparePublish: (draftId: string) => void;
 }) {
   const smartstore = apiKeys.find((item) => item.platform === "smartstore");
   const emptyChannels = channels.length > 1 ? channels.slice(1, 4) : [
@@ -1575,10 +1645,19 @@ function PublishSetup({
         <div className="draft-list">
           {drafts.map((draft) => (
             <div className="draft-row" key={draft.id}>
-              <strong>{draft.title}</strong>
+              <div className="draft-main">
+                <strong>{draft.title}</strong>
+                <small>{draftMissingLabels(draft) ? `누락: ${draftMissingLabels(draft)}` : "필수값 상태 확인 가능"}</small>
+              </div>
               <span>{draft.target_platforms.includes("smartstore") ? "네이버 스마트스토어" : draft.target_platforms.join(", ")}</span>
               <span>{money(draft.display_price || draft.sale_price)}</span>
-              <span className={pillClass(draft.status === "ready_to_publish" ? "connected" : "pending")}>{draft.status === "ready_to_publish" ? "등록대기" : "초안"}</span>
+              <span className={pillClass(draft.status)}>{statusLabel(draft.status)}</span>
+              <div className="draft-row-actions">
+                <button className="btn small" onClick={() => onValidateDraft(draft.id)}>검사</button>
+                <button className="btn small primary" onClick={() => onPreparePublish(draft.id)} disabled={draft.status === "published"}>
+                  등록실행
+                </button>
+              </div>
             </div>
           ))}
           {drafts.length === 0 && <div className="draft-row muted-row">아직 등록 초안이 없습니다.</div>}
@@ -1608,6 +1687,8 @@ function PublishDraftPanel({
   const update = <K extends keyof DraftForm>(key: K, value: DraftForm[K]) => {
     onChange({ ...form, [key]: value });
   };
+  const validation = draftFormValidation(form);
+  const missingLabels = validation.missing?.map((item) => item.label) || [];
 
   return (
     <div className="publish-draft-panel">
@@ -1624,6 +1705,15 @@ function PublishDraftPanel({
         <strong>원본 상품</strong>
         <span>{sourceItem.mall}</span>
         <a href={sourceItem.url} target="_blank" rel="noreferrer">원본 링크</a>
+      </div>
+
+      <div className={`preflight-box ${validation.ready ? "ready" : "warning"}`}>
+        <strong>{validation.ready ? "등록 필수값 입력 완료" : "실등록 전 보완 필요"}</strong>
+        <span>
+          {validation.ready
+            ? "대시보드에서 등록실행을 누르면 보호모드로 등록 요청값이 생성됩니다."
+            : `누락 항목: ${missingLabels.join(", ")}`}
+        </span>
       </div>
 
       <div className="publish-form-grid">
@@ -1682,7 +1772,7 @@ function PublishDraftPanel({
       <div className="draft-actions">
         <button className="btn" onClick={onCancel}>취소</button>
         <button className="btn primary" onClick={onApprove} disabled={!smartstoreActive || !form.title.trim()}>
-          승인 등록
+          초안 승인
         </button>
       </div>
     </div>

@@ -677,6 +677,29 @@ td { font-size: 14px; }
   color: var(--brand);
   font-weight: 900;
 }
+.preflight-box {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 11px 12px;
+}
+.preflight-box strong {
+  color: var(--text);
+}
+.preflight-box span {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+.preflight-box.ready {
+  border-color: #b7e8ca;
+  background: #f1fbf6;
+}
+.preflight-box.warning {
+  border-color: #ffd4a8;
+  background: #fff7ed;
+}
 .publish-form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -789,7 +812,7 @@ textarea {
 }
 .draft-row {
   display: grid;
-  grid-template-columns: minmax(180px, 1.5fr) minmax(120px, 0.8fr) minmax(100px, 0.6fr) auto;
+  grid-template-columns: minmax(220px, 1.6fr) minmax(120px, 0.8fr) minmax(100px, 0.6fr) auto auto;
   gap: 10px;
   align-items: center;
   border: 1px solid var(--line);
@@ -801,9 +824,24 @@ textarea {
 .draft-row strong {
   color: var(--text);
 }
+.draft-main {
+  display: grid;
+  gap: 3px;
+}
+.draft-main small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
 .draft-row span {
   color: var(--muted);
   font-weight: 800;
+}
+.draft-row-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
 }
 .channel,
 .api-card {
