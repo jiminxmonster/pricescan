@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import mimetypes
 import os
 import re
 import html
@@ -17,19 +18,29 @@ from typing import Any
 from uuid import uuid4
 
 import bcrypt
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = Path(os.getenv("DATA_DIR", BASE_DIR / "data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+UPLOAD_DIR = DATA_DIR / "uploads"
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 DATABASE_PATH = Path(os.getenv("DATABASE_PATH", DATA_DIR / "pricescan.db"))
 ADMIN_TOKEN = "pricescan-admin-token"
 HTTP_TIMEOUT_SECONDS = 8
 CRAWLER_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 NAVER_COMMERCE_API_BASE = "https://api.commerce.naver.com/external"
+MAX_IMAGE_UPLOAD_BYTES = 8 * 1024 * 1024
+ALLOWED_IMAGE_TYPES = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+}
 
 
 app = FastAPI(title="PriceScan API", version="0.1.0")
@@ -464,6 +475,11 @@ def build_smartstore_publish_request(draft: dict[str, Any], validation: dict[str
         ],
         "prepared_at": now(),
     }
+
+
+def safe_upload_filename(filename: str) -> str:
+    name = Path(filename or "image").name
+    return re.sub(r"[^A-Za-z0-9._-]", "_", name)[:80] or "image"
 
 
 def naver_sort(sort_mode: str) -> str:
@@ -1384,6 +1400,49 @@ def prepare_listing_publish(draft_id: str) -> dict[str, Any]:
         updated = db.execute("SELECT * FROM listing_drafts WHERE id = ?", (draft_id,)).fetchone()
     log_event(f"listing publish request prepared: {row['title']}")
     return listing_draft_row_to_dict(updated)
+
+
+@app.post("/uploads/product-image", dependencies=[Depends(require_admin)])
+async def upload_product_image(file: UploadFile = File(...)) -> dict[str, Any]:
+    content_type = (file.content_type or "").lower()
+    if content_type not in ALLOWED_IMAGE_TYPES:
+        raise HTTPException(status_code=400, detail="jpg, png, webp, gif 이미지만 업로드할 수 있습니다.")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="빈 파일은 업로드할 수 없습니다.")
+    if len(content) > MAX_IMAGE_UPLOAD_BYTES:
+        raise HTTPException(status_code=400, detail="이미지는 8MB 이하만 업로드할 수 있습니다.")
+
+    original_name = safe_upload_filename(file.filename or "image")
+    original_suffix = Path(original_name).suffix.lower()
+    extension = original_suffix if original_suffix in {".jpg", ".jpeg", ".png", ".webp", ".gif"} else ALLOWED_IMAGE_TYPES[content_type]
+    if extension == ".jpeg":
+        extension = ".jpg"
+    saved_name = f"product_{uuid4().hex[:16]}{extension}"
+    target_path = UPLOAD_DIR / saved_name
+    target_path.write_bytes(content)
+
+    log_event(f"product image uploaded: {original_name}")
+    return {
+        "filename": saved_name,
+        "original_filename": original_name,
+        "content_type": content_type,
+        "size": len(content),
+        "url": f"/uploaded-images/{saved_name}",
+    }
+
+
+@app.get("/uploaded-images/{filename}")
+def uploaded_image(filename: str) -> FileResponse:
+    safe_name = safe_upload_filename(filename)
+    if safe_name != filename:
+        raise HTTPException(status_code=404, detail="Image not found")
+    image_path = UPLOAD_DIR / safe_name
+    if not image_path.exists() or not image_path.is_file():
+        raise HTTPException(status_code=404, detail="Image not found")
+    media_type = mimetypes.guess_type(str(image_path))[0] or "application/octet-stream"
+    return FileResponse(image_path, media_type=media_type)
 
 
 @app.get("/logs", dependencies=[Depends(require_admin)])

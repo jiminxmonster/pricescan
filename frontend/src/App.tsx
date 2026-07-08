@@ -265,6 +265,14 @@ type DraftForm = {
   description: string;
 };
 
+type ImageUploadResult = {
+  filename: string;
+  original_filename: string;
+  content_type: string;
+  size: number;
+  url: string;
+};
+
 async function request<T>(path: string, token: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     ...options,
@@ -279,6 +287,12 @@ async function request<T>(path: string, token: string, options: RequestInit = {}
     throw new Error(detail || `Request failed: ${response.status}`);
   }
   return response.json() as Promise<T>;
+}
+
+function apiAssetUrl(path: string): string {
+  if (path.startsWith("http://") || path.startsWith("https://")) return path;
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  return `${window.location.origin}${API_BASE}${normalizedPath}`;
 }
 
 function money(value: number): string {
@@ -1034,6 +1048,24 @@ export default function App() {
     await refreshLogs();
   };
 
+  const uploadDraftImage = async (file: File): Promise<string> => {
+    const formData = new FormData();
+    formData.append("file", file);
+    const response = await fetch(`${API_BASE}/uploads/product-image`, {
+      method: "POST",
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: formData,
+    });
+    if (!response.ok) {
+      const detail = await response.text();
+      throw new Error(detail || "이미지 업로드 실패");
+    }
+    const result = (await response.json()) as ImageUploadResult;
+    const imageUrl = apiAssetUrl(result.url);
+    setNotice("대표 이미지 업로드 완료");
+    return imageUrl;
+  };
+
   const printInvoices = async () => {
     const ids = selectedOrders.length ? selectedOrders : orders.filter((order) => order.status === "ready").map((order) => order.id);
     await request("/invoices/print", token, { method: "POST", body: JSON.stringify({ order_ids: ids }) });
@@ -1251,6 +1283,7 @@ export default function App() {
                     onChange={setDraftForm}
                     onTogglePlatform={toggleDraftPlatform}
                     onApprove={approveDraft}
+                    onUploadImage={uploadDraftImage}
                     onCancel={() => setDraftSourceItem(null)}
                   />
                 </div>
@@ -1698,6 +1731,7 @@ function PublishDraftPanel({
   onChange,
   onTogglePlatform,
   onApprove,
+  onUploadImage,
   onCancel,
 }: {
   sourceItem: DraftSourceItem;
@@ -1706,13 +1740,29 @@ function PublishDraftPanel({
   onChange: (form: DraftForm) => void;
   onTogglePlatform: (platform: string) => void;
   onApprove: () => void;
+  onUploadImage: (file: File) => Promise<string>;
   onCancel: () => void;
 }) {
+  const [imageUploading, setImageUploading] = useState(false);
+  const [imageUploadError, setImageUploadError] = useState("");
   const update = <K extends keyof DraftForm>(key: K, value: DraftForm[K]) => {
     onChange({ ...form, [key]: value });
   };
   const validation = draftFormValidation(form);
   const missingLabels = validation.missing?.map((item) => item.label) || [];
+  const handleImageUpload = async (file: File | undefined) => {
+    if (!file) return;
+    setImageUploading(true);
+    setImageUploadError("");
+    try {
+      const uploadedUrl = await onUploadImage(file);
+      update("imageUrl", uploadedUrl);
+    } catch (error) {
+      setImageUploadError(error instanceof Error ? error.message : "이미지 업로드 실패");
+    } finally {
+      setImageUploading(false);
+    }
+  };
 
   return (
     <div className="publish-draft-panel">
@@ -1783,10 +1833,31 @@ function PublishDraftPanel({
           <span>옵션명</span>
           <input className="input" value={form.optionName} onChange={(event) => update("optionName", event.target.value)} placeholder="예: 기본옵션" />
         </label>
-        <label className="wide">
+        <div className="wide form-field">
           <span>대표 이미지 URL</span>
-          <input className="input" value={form.imageUrl} onChange={(event) => update("imageUrl", event.target.value)} placeholder="권리 확보된 이미지 URL" />
-        </label>
+          <div className="image-input-row">
+            <input className="input" value={form.imageUrl} onChange={(event) => update("imageUrl", event.target.value)} placeholder="권리 확보된 이미지 URL 또는 업로드 결과 URL" />
+            <label className={`btn small upload-button ${imageUploading ? "disabled" : ""}`}>
+              {imageUploading ? "업로드 중" : "PC 이미지 업로드"}
+              <input
+                type="file"
+                accept="image/png,image/jpeg,image/webp,image/gif"
+                disabled={imageUploading}
+                onChange={(event) => {
+                  handleImageUpload(event.target.files?.[0]);
+                  event.currentTarget.value = "";
+                }}
+              />
+            </label>
+          </div>
+          {imageUploadError && <small className="error-text">{imageUploadError}</small>}
+          {form.imageUrl && (
+            <div className="image-preview">
+              <img src={form.imageUrl} alt="대표 이미지 미리보기" />
+              <span>업로드한 이미지는 등록 초안의 대표 이미지로 사용됩니다.</span>
+            </div>
+          )}
+        </div>
         <label className="wide">
           <span>상세설명</span>
           <textarea value={form.description} onChange={(event) => update("description", event.target.value)} />
