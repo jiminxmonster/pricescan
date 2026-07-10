@@ -841,6 +841,104 @@ textarea {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
 }
+.naver-guide {
+  display: grid;
+  gap: 14px;
+  border: 1px solid #b7e8ca;
+  border-radius: 4px;
+  background: linear-gradient(180deg, #f5fff8 0%, #ffffff 100%);
+  box-shadow: 0 18px 50px rgba(15, 118, 70, 0.08);
+  margin-top: 12px;
+  padding: 16px;
+}
+.naver-guide.compact {
+  margin-top: 14px;
+  box-shadow: none;
+}
+.naver-guide-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+.naver-guide-head strong {
+  display: block;
+  color: var(--text);
+  font-size: 18px;
+  letter-spacing: -0.03em;
+}
+.naver-guide-head p {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.55;
+}
+.naver-guide-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(220px, 0.8fr);
+  gap: 12px;
+}
+.guide-steps {
+  display: grid;
+  gap: 8px;
+}
+.guide-step {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 9px;
+  align-items: start;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #fff;
+  padding: 9px 10px;
+}
+.guide-step span {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  background: #dff7e9;
+  color: #11633d;
+  font-size: 12px;
+  font-weight: 900;
+}
+.guide-step p {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 850;
+  line-height: 1.55;
+}
+.guide-checklist {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 7px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #fbfcfe;
+  padding: 10px;
+}
+.guide-checklist strong {
+  width: 100%;
+  color: var(--brand);
+  font-size: 13px;
+}
+.guide-checklist span {
+  border: 1px solid #cfe7d9;
+  border-radius: 999px;
+  background: #f1fbf6;
+  color: #11633d;
+  padding: 5px 8px;
+  font-size: 12px;
+  font-weight: 900;
+}
+.guide-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
 .channels,
 .api-grid {
   grid-template-columns: repeat(4, minmax(150px, 1fr));
@@ -1100,6 +1198,9 @@ textarea {
   .split {
     grid-template-columns: 1fr;
   }
+  .naver-guide-body {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 760px) {
@@ -1157,6 +1258,9 @@ textarea {
   }
   .image-input-row {
     grid-template-columns: 1fr;
+  }
+  .guide-links .btn {
+    width: 100%;
   }
   .draft-row {
     grid-template-columns: 1fr;

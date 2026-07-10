@@ -76,6 +76,61 @@ const searchSourceGroups: SearchSourceGroup[] = [
 const readySourceKeys = new Set(searchSourceGroups.flatMap((group) => group.options.filter((option) => option.enabled).map((option) => option.key)));
 const priceReadySourceKeys = new Set(["naver", "danawa"]);
 const apiPlatformOrder = ["naver", "smartstore", "danawa", "enuri", "elevenst", "gmarket", "auction", "google_search", "naver_search", "coupang"];
+const serviceUrl = "https://www.d2blue.com/pricescan/";
+
+type NaverApiGuide = {
+  title: string;
+  summary: string;
+  steps: string[];
+  checklist: string[];
+  links: Array<{ label: string; url: string }>;
+};
+
+const naverApiGuides: Record<string, NaverApiGuide> = {
+  naver: {
+    title: "네이버 쇼핑검색 API 발급 안내",
+    summary: "가격비교/상품검색 결과를 가져오는 API입니다. 상품 등록은 할 수 없고 검색 결과 수집에만 사용합니다.",
+    steps: [
+      "네이버 Developers에서 애플리케이션을 등록합니다.",
+      "사용 API에서 검색을 선택하고 쇼핑 검색 사용을 설정합니다.",
+      "발급된 Client ID와 Client Secret을 PriceScan 검색설정에 입력합니다.",
+      "저장 후 연동 테스트를 눌러 쇼핑 검색 호출 성공 여부를 확인합니다.",
+    ],
+    checklist: [
+      "애플리케이션 이름은 PriceScan처럼 알아보기 쉽게 입력",
+      "검색 API 권한 선택",
+      "Client ID / Client Secret 복사",
+    ],
+    links: [
+      { label: "네이버 Developers 애플리케이션", url: "https://developers.naver.com/apps/#/register" },
+      { label: "쇼핑 검색 API 문서", url: "https://developers.naver.com/docs/serviceapi/search/shopping/shopping.md" },
+    ],
+  },
+  smartstore: {
+    title: "네이버 스마트스토어 커머스API 발급 안내",
+    summary: "스마트스토어 상품등록/수정/조회에 필요한 판매자 API입니다. 실제 상품 자동등록은 이 키가 있어야 진행됩니다.",
+    steps: [
+      "네이버 커머스API센터에 접속해 커머스API 사용 권한을 준비합니다.",
+      "내 스토어 애플리케이션을 등록하고 사용 API에서 상품 관련 권한을 선택합니다.",
+      `WEB 서비스 URL에는 ${serviceUrl} 를 입력합니다.`,
+      "애플리케이션 ID와 Secret을 복사해 PriceScan의 네이버 스마트스토어 커머스API 칸에 입력합니다.",
+      "저장 후 연결 테스트를 눌러 OAuth 토큰 발급과 상품 조회가 되는지 확인합니다.",
+    ],
+    checklist: [
+      "스마트스토어 주매니저 이상 권한",
+      "커머스API센터 가입 및 애플리케이션 등록",
+      "상품 API 권한",
+      "WEB 서비스 URL 등록",
+      "Client ID / Secret 보관",
+    ],
+    links: [
+      { label: "커머스API센터", url: "https://apicenter.commerce.naver.com/" },
+      { label: "커머스API 소개", url: "https://apicenter.commerce.naver.com/docs/introduction" },
+      { label: "인증 문서", url: "https://apicenter.commerce.naver.com/docs/auth" },
+      { label: "상품 등록 API", url: "https://apicenter.commerce.naver.com/docs/commerce-api/current/create-product-product" },
+    ],
+  },
+};
 
 function readSettings(): AdminSettings {
   try {
@@ -1310,6 +1365,7 @@ export default function App() {
                 </button>
               ))}
             </div>
+            {naverApiGuides[apiPlatform] && <NaverApiGuideCard guide={naverApiGuides[apiPlatform]} compact={false} />}
             <div className="form-grid mt">
               <input className="input" placeholder="Client ID" value={apiClientId} onChange={(event) => setApiClientId(event.target.value)} />
               <input className="input" placeholder="Client Secret" value={apiClientSecret} onChange={(event) => setApiClientSecret(event.target.value)} />
@@ -1515,6 +1571,43 @@ function SourceSelector({
   );
 }
 
+function NaverApiGuideCard({ guide, compact = false }: { guide: NaverApiGuide; compact?: boolean }) {
+  return (
+    <div className={`naver-guide ${compact ? "compact" : ""}`}>
+      <div className="naver-guide-head">
+        <div>
+          <span className="eyebrow">NAVER API GUIDE</span>
+          <strong>{guide.title}</strong>
+          <p>{guide.summary}</p>
+        </div>
+      </div>
+      <div className="naver-guide-body">
+        <div className="guide-steps">
+          {guide.steps.map((step, index) => (
+            <div className="guide-step" key={step}>
+              <span>{index + 1}</span>
+              <p>{step}</p>
+            </div>
+          ))}
+        </div>
+        <div className="guide-checklist">
+          <strong>확인 항목</strong>
+          {guide.checklist.map((item) => (
+            <span key={item}>{item}</span>
+          ))}
+        </div>
+      </div>
+      <div className="guide-links">
+        {guide.links.map((link) => (
+          <a className="btn small" href={link.url} target="_blank" rel="noreferrer" key={link.url}>
+            {link.label}
+          </a>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function DetailScanBuilder({
   filters,
   selected,
@@ -1678,6 +1771,7 @@ function PublishSetup({
           <button className="btn primary" onClick={() => onSaveSmartstore(clientId, clientSecret)}>저장</button>
           <button className="btn orange" onClick={() => onTestSmartstore(clientId, clientSecret)}>저장 후 연결 테스트</button>
         </div>
+        <NaverApiGuideCard guide={naverApiGuides.smartstore} compact />
       </div>
 
       <div className="grid empty-slots">
