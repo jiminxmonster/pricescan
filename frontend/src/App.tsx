@@ -385,6 +385,21 @@ function statusLabel(status: string): string {
   return labels[status] || status;
 }
 
+function sourceLabel(source: string): string {
+  const labels: Record<string, string> = {
+    naver: "네이버 쇼핑검색",
+    smartstore: "네이버 스마트스토어",
+    danawa: "다나와",
+    enuri: "에누리",
+    elevenst: "11번가",
+    gmarket: "G마켓",
+    auction: "옥션",
+    google_search: "구글 검색",
+    naver_search: "네이버 일반검색",
+  };
+  return labels[source] || source;
+}
+
 function apiStatusLabel(status: string): string {
   if (status === "ready") return "설정 필요 없음";
   return statusLabel(status);
@@ -2056,7 +2071,8 @@ function SearchResultList({
           <div className={`result-row ${row.status === "baseline" ? "baseline-row" : ""}`} key={row.id}>
             <a className="result-model" href={row.url} target="_blank" rel="noreferrer">{row.name}</a>
             <span className="result-colon">:</span>
-            <span>{row.mall}</span>
+            <span className="source-chip">수집소스 {sourceLabel(row.collectionSource)}</span>
+            <span>판매처 {row.mall}</span>
             <span>/ 판매가 {money(row.salePrice)}</span>
             <span>/ 노출가 {money(row.displayPrice)}</span>
             <span>/ 비교율 {percent(compareRate)}</span>

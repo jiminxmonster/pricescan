@@ -644,6 +644,15 @@ td { font-size: 14px; }
   color: var(--muted);
   font-weight: 900;
 }
+.source-chip {
+  border: 1px solid #cfe1f8;
+  border-radius: 4px;
+  background: #f3f8ff;
+  color: var(--brand);
+  padding: 2px 7px;
+  font-size: 12px;
+  font-weight: 900;
+}
 .result-actions {
   display: inline-flex;
   gap: 5px;
