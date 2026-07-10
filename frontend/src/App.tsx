@@ -76,7 +76,7 @@ const searchSourceGroups: SearchSourceGroup[] = [
 const readySourceKeys = new Set(searchSourceGroups.flatMap((group) => group.options.filter((option) => option.enabled).map((option) => option.key)));
 const priceReadySourceKeys = new Set(["naver", "danawa"]);
 const apiPlatformOrder = ["naver", "smartstore", "danawa", "enuri", "elevenst", "gmarket", "auction", "google_search", "naver_search", "coupang"];
-const serviceUrl = "https://www.d2blue.com/pricescan/";
+const serviceUrl = "https://pricescan.d2blue.com/";
 
 type NaverApiGuide = {
   title: string;
