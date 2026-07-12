@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 const basePath = import.meta.env.BASE_URL.replace(/\/$/, "");
 const API_BASE = `${basePath}/api`;
@@ -491,6 +491,47 @@ function draftFormValidation(form: DraftForm): DraftValidation {
   return { ready: missing.length === 0, missing, warnings };
 }
 
+function sourceItemFromDraft(draft: ListingDraft): DraftSourceItem {
+  return {
+    sourceItemId: draft.source_item_id,
+    source: draft.source,
+    mall: draft.mall,
+    name: draft.title,
+    salePrice: draft.sale_price,
+    displayPrice: draft.display_price,
+    shippingFee: draft.shipping_fee,
+    url: draft.source_url,
+  };
+}
+
+function formFromDraft(draft: ListingDraft): DraftForm {
+  return {
+    targetPlatforms: draft.target_platforms.length ? draft.target_platforms : ["smartstore"],
+    title: draft.title,
+    salePrice: draft.sale_price,
+    displayPrice: draft.display_price,
+    shippingFee: draft.shipping_fee,
+    categoryId: draft.category_id,
+    stockQuantity: draft.stock_quantity,
+    imageUrl: draft.images?.representative_url || draft.image_url || "",
+    optionName: draft.option_name,
+    description: draft.description,
+    brandName: draft.brand_name,
+    manufacturerName: draft.manufacturer_name,
+    modelName: draft.model_name,
+    originAreaCode: draft.origin_area_code,
+    originAreaName: draft.origin_area_name,
+    productInfoNoticeType: draft.product_info_notice_type || "기타 재화",
+    productInfoNoticeContent: draft.product_info_notice_content || "상세페이지 참조",
+    deliveryMethod: draft.delivery_method || "택배/소포/등기",
+    deliveryCompanyCode: draft.delivery_company_code,
+    returnDeliveryFee: draft.return_delivery_fee,
+    exchangeDeliveryFee: draft.exchange_delivery_fee,
+    asTelephone: draft.as_telephone,
+    asGuideContent: draft.as_guide_content,
+  };
+}
+
 function normalize(value: string): string {
   return value.toLowerCase().replace(/\s+/g, "");
 }
@@ -833,6 +874,8 @@ export default function App() {
   const [smartstoreError, setSmartstoreError] = useState("");
   const [showSourcePanel, setShowSourcePanel] = useState(false);
   const [draftSourceItem, setDraftSourceItem] = useState<DraftSourceItem | null>(null);
+  const [editingDraft, setEditingDraft] = useState<ListingDraft | null>(null);
+  const [editingDraftForm, setEditingDraftForm] = useState<DraftForm | null>(null);
   const [draftImageUploading, setDraftImageUploading] = useState<Record<string, boolean>>({});
   const [draftForm, setDraftForm] = useState<DraftForm>({
     targetPlatforms: ["smartstore"],
@@ -861,10 +904,14 @@ export default function App() {
   });
 
   useEffect(() => {
-    if (!draftSourceItem) return undefined;
+    if (!draftSourceItem && !editingDraft) return undefined;
     const previousOverflow = document.body.style.overflow;
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setDraftSourceItem(null);
+      if (event.key === "Escape") {
+        setDraftSourceItem(null);
+        setEditingDraft(null);
+        setEditingDraftForm(null);
+      }
     };
     document.body.style.overflow = "hidden";
     window.addEventListener("keydown", closeOnEscape);
@@ -872,7 +919,7 @@ export default function App() {
       document.body.style.overflow = previousOverflow;
       window.removeEventListener("keydown", closeOnEscape);
     };
-  }, [draftSourceItem]);
+  }, [draftSourceItem, editingDraft]);
 
   const loadAll = async () => {
     if (!token) return;
@@ -1143,6 +1190,45 @@ export default function App() {
     });
   };
 
+  const toggleEditingDraftPlatform = (platform: string) => {
+    setEditingDraftForm((current) => {
+      if (!current) return current;
+      const exists = current.targetPlatforms.includes(platform);
+      const next = exists ? current.targetPlatforms.filter((item) => item !== platform) : [...current.targetPlatforms, platform];
+      return { ...current, targetPlatforms: next.length ? next : current.targetPlatforms };
+    });
+  };
+
+  const draftPayloadFromForm = (sourceItem: DraftSourceItem, form: DraftForm) => ({
+    source_item_id: sourceItem.sourceItemId,
+    source: sourceItem.source,
+    mall: sourceItem.mall,
+    source_url: sourceItem.url,
+    target_platforms: form.targetPlatforms,
+    title: form.title.trim(),
+    sale_price: Number(form.salePrice) || 0,
+    display_price: Number(form.displayPrice) || 0,
+    shipping_fee: Number(form.shippingFee) || 0,
+    category_id: form.categoryId.trim(),
+    stock_quantity: Number(form.stockQuantity) || 0,
+    image_url: form.imageUrl.trim(),
+    option_name: form.optionName.trim(),
+    description: form.description.trim(),
+    brand_name: form.brandName.trim(),
+    manufacturer_name: form.manufacturerName.trim(),
+    model_name: form.modelName.trim(),
+    origin_area_code: form.originAreaCode.trim(),
+    origin_area_name: form.originAreaName.trim(),
+    product_info_notice_type: form.productInfoNoticeType.trim(),
+    product_info_notice_content: form.productInfoNoticeContent.trim(),
+    delivery_method: form.deliveryMethod.trim(),
+    delivery_company_code: form.deliveryCompanyCode.trim(),
+    return_delivery_fee: Number(form.returnDeliveryFee) || 0,
+    exchange_delivery_fee: Number(form.exchangeDeliveryFee) || 0,
+    as_telephone: form.asTelephone.trim(),
+    as_guide_content: form.asGuideContent.trim(),
+  });
+
   const approveDraft = async () => {
     if (!draftSourceItem) {
       setNotice("등록할 상품을 먼저 선택하세요.");
@@ -1150,35 +1236,7 @@ export default function App() {
     }
     const created = await request<ListingDraft>("/listing-drafts", token, {
       method: "POST",
-      body: JSON.stringify({
-        source_item_id: draftSourceItem.sourceItemId,
-        source: draftSourceItem.source,
-        mall: draftSourceItem.mall,
-        source_url: draftSourceItem.url,
-        target_platforms: draftForm.targetPlatforms,
-        title: draftForm.title.trim(),
-        sale_price: Number(draftForm.salePrice) || 0,
-        display_price: Number(draftForm.displayPrice) || 0,
-        shipping_fee: Number(draftForm.shippingFee) || 0,
-        category_id: draftForm.categoryId.trim(),
-        stock_quantity: Number(draftForm.stockQuantity) || 0,
-        image_url: draftForm.imageUrl.trim(),
-        option_name: draftForm.optionName.trim(),
-        description: draftForm.description.trim(),
-        brand_name: draftForm.brandName.trim(),
-        manufacturer_name: draftForm.manufacturerName.trim(),
-        model_name: draftForm.modelName.trim(),
-        origin_area_code: draftForm.originAreaCode.trim(),
-        origin_area_name: draftForm.originAreaName.trim(),
-        product_info_notice_type: draftForm.productInfoNoticeType.trim(),
-        product_info_notice_content: draftForm.productInfoNoticeContent.trim(),
-        delivery_method: draftForm.deliveryMethod.trim(),
-        delivery_company_code: draftForm.deliveryCompanyCode.trim(),
-        return_delivery_fee: Number(draftForm.returnDeliveryFee) || 0,
-        exchange_delivery_fee: Number(draftForm.exchangeDeliveryFee) || 0,
-        as_telephone: draftForm.asTelephone.trim(),
-        as_guide_content: draftForm.asGuideContent.trim(),
-      }),
+      body: JSON.stringify(draftPayloadFromForm(draftSourceItem, draftForm)),
     });
     const approved = await request<ListingDraft>(`/listing-drafts/${created.id}/approve`, token, {
       method: "POST",
@@ -1193,6 +1251,45 @@ export default function App() {
 
   const updateDraftState = (draft: ListingDraft) => {
     setListingDrafts((current) => [draft, ...current.filter((item) => item.id !== draft.id)]);
+  };
+
+  const openDraftEditor = (draft: ListingDraft) => {
+    setEditingDraft(draft);
+    setEditingDraftForm(formFromDraft(draft));
+    setNotice("네이버 상품등록 화면 기준으로 초안을 보완하세요.");
+  };
+
+  const closeDraftEditor = () => {
+    setEditingDraft(null);
+    setEditingDraftForm(null);
+  };
+
+  const saveEditingDraft = async (): Promise<ListingDraft | null> => {
+    if (!editingDraft || !editingDraftForm) {
+      setNotice("수정할 등록 초안이 없습니다.");
+      return null;
+    }
+    const updated = await request<ListingDraft>(`/listing-drafts/${editingDraft.id}`, token, {
+      method: "PUT",
+      body: JSON.stringify(draftPayloadFromForm(sourceItemFromDraft(editingDraft), editingDraftForm)),
+    });
+    updateDraftState(updated);
+    setEditingDraft(updated);
+    setEditingDraftForm(formFromDraft(updated));
+    setNotice("상품등록 폼 저장 완료");
+    await refreshPublishData();
+    await refreshLogs();
+    return updated;
+  };
+
+  const saveAndValidateEditingDraft = async () => {
+    const saved = await saveEditingDraft();
+    if (saved) await validateDraft(saved.id);
+  };
+
+  const saveAndPrepareEditingDraft = async () => {
+    const saved = await saveEditingDraft();
+    if (saved) await preparePublish(saved.id);
   };
 
   const validateDraft = async (draftId: string) => {
@@ -1563,6 +1660,7 @@ export default function App() {
               onValidateDraft={validateDraft}
               onPreparePublish={preparePublish}
               onDeleteDraft={deleteDraft}
+              onEditDraft={openDraftEditor}
               onUploadDraftImage={uploadApprovedDraftImage}
               onUploadPoolImage={uploadPoolImage}
               onSaveDraftImages={saveDraftImages}
@@ -1676,6 +1774,39 @@ export default function App() {
               {logs.length === 0 && <div className="log-item"><span>작업 로그가 없습니다.</span><span>-</span></div>}
             </div>
           </section>
+        )}
+
+        {editingDraft && editingDraftForm && (
+          <div
+            className="modal-backdrop"
+            role="presentation"
+            onMouseDown={(event) => {
+              if (event.target === event.currentTarget) closeDraftEditor();
+            }}
+          >
+            <div className="publish-modal smartstore-window" role="dialog" aria-modal="true" aria-label="네이버 상품등록 폼">
+              <PublishDraftPanel
+                sourceItem={sourceItemFromDraft(editingDraft)}
+                form={editingDraftForm}
+                smartstoreActive={isSmartstoreActive(apiKeys)}
+                onChange={setEditingDraftForm}
+                onTogglePlatform={toggleEditingDraftPlatform}
+                onApprove={saveEditingDraft}
+                onUploadImage={uploadDraftImage}
+                onCancel={closeDraftEditor}
+                title="네이버 상품등록 폼"
+                description="스마트스토어 상품등록 화면 흐름에 맞춰 초안 필드를 보완합니다."
+                submitLabel="수정 저장"
+                readyMessage="수정값을 저장한 뒤 검사 또는 등록실행을 진행할 수 있습니다."
+                extraActions={(
+                  <>
+                    <button className="btn" onClick={saveAndValidateEditingDraft}>저장 후 검사</button>
+                    <button className="btn primary" onClick={saveAndPrepareEditingDraft}>저장 후 등록실행</button>
+                  </>
+                )}
+              />
+            </div>
+          </div>
         )}
       </main>
     </div>
@@ -1908,6 +2039,7 @@ function PublishSetup({
   onValidateDraft,
   onPreparePublish,
   onDeleteDraft,
+  onEditDraft,
   onUploadDraftImage,
   onUploadPoolImage,
   onSaveDraftImages,
@@ -1922,6 +2054,7 @@ function PublishSetup({
   onValidateDraft: (draftId: string) => void;
   onPreparePublish: (draftId: string) => void;
   onDeleteDraft: (draftId: string) => void;
+  onEditDraft: (draft: ListingDraft) => void;
   onUploadDraftImage: (draftId: string, file: File) => void;
   onUploadPoolImage: (file: File) => void;
   onSaveDraftImages: (draftId: string, images: DraftImages, detailContentHtml?: string) => void;
@@ -2049,6 +2182,7 @@ function PublishSetup({
                     >
                       이미지 관리
                     </button>
+                    <button className="btn small" onClick={() => onEditDraft(draft)}>등록폼 열기</button>
                     <button className="btn small" onClick={() => onValidateDraft(draft.id)}>검사</button>
                     <button className="btn small primary" onClick={() => onPreparePublish(draft.id)} disabled={draft.status === "published"}>
                       등록실행
@@ -2152,6 +2286,11 @@ function PublishDraftPanel({
   onApprove,
   onUploadImage,
   onCancel,
+  title = "상품등록 초안",
+  description = "스캔된 상품 정보를 등록폼에 자동 채움했습니다. 이미지/상세설명 권리 확인 후 승인하세요.",
+  submitLabel = "초안 승인",
+  readyMessage = "대시보드에서 등록실행을 누르면 보호모드로 등록 요청값이 생성됩니다.",
+  extraActions,
 }: {
   sourceItem: DraftSourceItem;
   form: DraftForm;
@@ -2161,6 +2300,11 @@ function PublishDraftPanel({
   onApprove: () => void;
   onUploadImage: (file: File) => Promise<string>;
   onCancel: () => void;
+  title?: string;
+  description?: string;
+  submitLabel?: string;
+  readyMessage?: string;
+  extraActions?: ReactNode;
 }) {
   const [imageUploading, setImageUploading] = useState(false);
   const [imageUploadError, setImageUploadError] = useState("");
@@ -2188,169 +2332,201 @@ function PublishDraftPanel({
       <div className="section-head">
         <div>
           <span className="eyebrow">네이버 스마트스토어 등록폼</span>
-          <h2>상품등록 초안</h2>
-          <p>스캔된 상품 정보를 등록폼에 자동 채움했습니다. 이미지/상세설명 권리 확인 후 승인하세요.</p>
+          <h2>{title}</h2>
+          <p>{description}</p>
         </div>
         <button className="btn small" onClick={onCancel}>닫기</button>
       </div>
 
-      <div className="source-summary">
-        <strong>원본 상품</strong>
-        <span>{sourceItem.mall}</span>
-        <a href={sourceItem.url} target="_blank" rel="noreferrer">원본 링크</a>
-      </div>
+      <div className="smartstore-form-layout">
+        <aside className="smartstore-form-nav" aria-label="네이버 등록폼 섹션">
+          <strong>상품등록</strong>
+          <a href="#section-basic">기본정보</a>
+          <a href="#section-attributes">상품속성</a>
+          <a href="#section-delivery">배송/반품</a>
+          <a href="#section-images">이미지</a>
+          <a href="#section-detail">상세페이지</a>
+          <a href="#section-check">등록검사</a>
+        </aside>
 
-      <div className={`preflight-box ${validation.ready ? "ready" : "warning"}`}>
-        <strong>{validation.ready ? "등록 필수값 입력 완료" : "실등록 전 보완 필요"}</strong>
-        <span>
-          {validation.ready
-            ? "대시보드에서 등록실행을 누르면 보호모드로 등록 요청값이 생성됩니다."
-            : `누락 항목: ${missingLabels.join(", ")}`}
-        </span>
-      </div>
+        <div className="smartstore-form-body">
+          <div className="source-summary">
+            <strong>원본 상품</strong>
+            <span>{sourceItem.mall || "소스 미지정"}</span>
+            {sourceItem.url && <a href={sourceItem.url} target="_blank" rel="noreferrer">원본 링크</a>}
+          </div>
 
-      <div className="publish-form-grid">
-        <label>
-          <span>등록 쇼핑몰</span>
-          <div className="platform-checks">
-            <label className={smartstoreActive ? "" : "disabled"}>
-              <input
-                type="checkbox"
-                checked={form.targetPlatforms.includes("smartstore")}
-                disabled={!smartstoreActive}
-                onChange={() => onTogglePlatform("smartstore")}
-              />
-              네이버 스마트스토어
-            </label>
+          <div className={`preflight-box ${validation.ready ? "ready" : "warning"}`} id="section-check">
+            <strong>{validation.ready ? "등록 필수값 입력 완료" : "실등록 전 보완 필요"}</strong>
+            <span>
+              {validation.ready
+                ? readyMessage
+                : `누락 항목: ${missingLabels.join(", ")}`}
+            </span>
+            {Boolean(validation.warnings?.length) && (
+              <ul>
+                {validation.warnings?.map((warning) => <li key={warning}>{warning}</li>)}
+              </ul>
+            )}
           </div>
-        </label>
-        <label>
-          <span>상품명</span>
-          <input className="input" value={form.title} onChange={(event) => update("title", event.target.value)} />
-        </label>
-        <label>
-          <span>판매가</span>
-          <input className="input" type="number" value={form.salePrice} onChange={(event) => update("salePrice", Number(event.target.value))} />
-        </label>
-        <label>
-          <span>노출가</span>
-          <input className="input" type="number" value={form.displayPrice} onChange={(event) => update("displayPrice", Number(event.target.value))} />
-        </label>
-        <label>
-          <span>배송비</span>
-          <input className="input" type="number" value={form.shippingFee} onChange={(event) => update("shippingFee", Number(event.target.value))} />
-        </label>
-        <label>
-          <span>재고</span>
-          <input className="input" type="number" value={form.stockQuantity} onChange={(event) => update("stockQuantity", Number(event.target.value))} />
-        </label>
-        <label>
-          <span>카테고리 ID</span>
-          <input className="input" value={form.categoryId} onChange={(event) => update("categoryId", event.target.value)} placeholder="네이버 카테고리 ID" />
-        </label>
-        <label>
-          <span>옵션명</span>
-          <input className="input" value={form.optionName} onChange={(event) => update("optionName", event.target.value)} placeholder="예: 기본옵션" />
-        </label>
-        <div className="wide form-section-title">
-          <strong>네이버 상품 속성</strong>
-          <span>카테고리별 필수값은 달라질 수 있어, 우선 공통 등록 필드를 맞춥니다.</span>
-        </div>
-        <label>
-          <span>브랜드</span>
-          <input className="input" value={form.brandName} onChange={(event) => update("brandName", event.target.value)} placeholder="예: LG전자" />
-        </label>
-        <label>
-          <span>제조사</span>
-          <input className="input" value={form.manufacturerName} onChange={(event) => update("manufacturerName", event.target.value)} placeholder="예: LG전자" />
-        </label>
-        <label>
-          <span>모델명</span>
-          <input className="input" value={form.modelName} onChange={(event) => update("modelName", event.target.value)} placeholder="예: 15ZD90RU-GX56K" />
-        </label>
-        <label>
-          <span>원산지</span>
-          <input className="input" value={form.originAreaName} onChange={(event) => update("originAreaName", event.target.value)} placeholder="예: 대한민국, 중국" />
-        </label>
-        <label>
-          <span>원산지 코드</span>
-          <input className="input" value={form.originAreaCode} onChange={(event) => update("originAreaCode", event.target.value)} placeholder="네이버 원산지 코드 확인 후 입력" />
-        </label>
-        <label>
-          <span>상품정보제공고시 유형</span>
-          <select value={form.productInfoNoticeType} onChange={(event) => update("productInfoNoticeType", event.target.value)}>
-            {productInfoNoticeTypes.map((type) => <option key={type} value={type}>{type}</option>)}
-          </select>
-        </label>
-        <label className="wide">
-          <span>상품정보제공고시 내용</span>
-          <textarea value={form.productInfoNoticeContent} onChange={(event) => update("productInfoNoticeContent", event.target.value)} placeholder="예: 품명 및 모델명, 인증/허가 사항, 제조국, 제조자, A/S 책임자 등을 입력" />
-        </label>
-        <div className="wide form-section-title">
-          <strong>배송/반품/A/S</strong>
-          <span>실등록 전 배송 템플릿 또는 배송정책 매핑이 필요합니다.</span>
-        </div>
-        <label>
-          <span>배송방법</span>
-          <select value={form.deliveryMethod} onChange={(event) => update("deliveryMethod", event.target.value)}>
-            {deliveryMethods.map((method) => <option key={method} value={method}>{method}</option>)}
-          </select>
-        </label>
-        <label>
-          <span>택배사 코드</span>
-          <input className="input" value={form.deliveryCompanyCode} onChange={(event) => update("deliveryCompanyCode", event.target.value)} placeholder="예: CJGLS, HANJIN" />
-        </label>
-        <label>
-          <span>반품배송비</span>
-          <input className="input" type="number" value={form.returnDeliveryFee} onChange={(event) => update("returnDeliveryFee", Number(event.target.value))} />
-        </label>
-        <label>
-          <span>교환배송비</span>
-          <input className="input" type="number" value={form.exchangeDeliveryFee} onChange={(event) => update("exchangeDeliveryFee", Number(event.target.value))} />
-        </label>
-        <label>
-          <span>A/S 전화번호</span>
-          <input className="input" value={form.asTelephone} onChange={(event) => update("asTelephone", event.target.value)} placeholder="예: 010-0000-0000" />
-        </label>
-        <label>
-          <span>A/S 안내</span>
-          <input className="input" value={form.asGuideContent} onChange={(event) => update("asGuideContent", event.target.value)} placeholder="예: 구매처 고객센터로 문의" />
-        </label>
-        <div className="wide form-field">
-          <span>대표 이미지 URL</span>
-          <div className="image-input-row">
-            <input className="input" value={form.imageUrl} onChange={(event) => update("imageUrl", event.target.value)} placeholder="권리 확보된 이미지 URL 또는 업로드 결과 URL" />
-            <label className={`btn small upload-button ${imageUploading ? "disabled" : ""}`}>
-              {imageUploading ? "업로드 중" : "PC 이미지 업로드"}
-              <input
-                type="file"
-                accept="image/png,image/jpeg,image/webp,image/gif"
-                disabled={imageUploading}
-                onChange={(event) => {
-                  handleImageUpload(event.target.files?.[0]);
-                  event.currentTarget.value = "";
-                }}
-              />
-            </label>
-          </div>
-          {imageUploadError && <small className="error-text">{imageUploadError}</small>}
-          {form.imageUrl && (
-            <div className="image-preview">
-              <img src={form.imageUrl} alt="대표 이미지 미리보기" />
-              <span>업로드한 이미지는 등록 초안의 대표 이미지로 사용됩니다.</span>
+
+          <div className="publish-form-grid">
+            <div className="wide form-section-title" id="section-basic">
+              <strong>기본정보</strong>
+              <span>스마트스토어 상품등록 첫 영역과 맞춘 공통 필드입니다.</span>
             </div>
-          )}
+            <label>
+              <span>등록 쇼핑몰</span>
+              <div className="platform-checks">
+                <label className={smartstoreActive ? "" : "disabled"}>
+                  <input
+                    type="checkbox"
+                    checked={form.targetPlatforms.includes("smartstore")}
+                    disabled={!smartstoreActive}
+                    onChange={() => onTogglePlatform("smartstore")}
+                  />
+                  네이버 스마트스토어
+                </label>
+              </div>
+            </label>
+            <label>
+              <span>카테고리 ID</span>
+              <input className="input" value={form.categoryId} onChange={(event) => update("categoryId", event.target.value)} placeholder="네이버 카테고리 ID" />
+            </label>
+            <label className="wide">
+              <span>상품명</span>
+              <input className="input" value={form.title} onChange={(event) => update("title", event.target.value)} />
+            </label>
+            <label>
+              <span>판매가</span>
+              <input className="input" type="number" value={form.salePrice} onChange={(event) => update("salePrice", Number(event.target.value))} />
+            </label>
+            <label>
+              <span>노출가</span>
+              <input className="input" type="number" value={form.displayPrice} onChange={(event) => update("displayPrice", Number(event.target.value))} />
+            </label>
+            <label>
+              <span>재고</span>
+              <input className="input" type="number" value={form.stockQuantity} onChange={(event) => update("stockQuantity", Number(event.target.value))} />
+            </label>
+            <label>
+              <span>옵션명</span>
+              <input className="input" value={form.optionName} onChange={(event) => update("optionName", event.target.value)} placeholder="예: 기본옵션" />
+            </label>
+            <div className="wide form-section-title" id="section-attributes">
+              <strong>상품속성</strong>
+              <span>카테고리별 필수값은 달라질 수 있어, 우선 공통 등록 필드를 맞춥니다.</span>
+            </div>
+            <label>
+              <span>브랜드</span>
+              <input className="input" value={form.brandName} onChange={(event) => update("brandName", event.target.value)} placeholder="예: LG전자" />
+            </label>
+            <label>
+              <span>제조사</span>
+              <input className="input" value={form.manufacturerName} onChange={(event) => update("manufacturerName", event.target.value)} placeholder="예: LG전자" />
+            </label>
+            <label>
+              <span>모델명</span>
+              <input className="input" value={form.modelName} onChange={(event) => update("modelName", event.target.value)} placeholder="예: 15ZD90RU-GX56K" />
+            </label>
+            <label>
+              <span>원산지</span>
+              <input className="input" value={form.originAreaName} onChange={(event) => update("originAreaName", event.target.value)} placeholder="예: 대한민국, 중국" />
+            </label>
+            <label>
+              <span>원산지 코드</span>
+              <input className="input" value={form.originAreaCode} onChange={(event) => update("originAreaCode", event.target.value)} placeholder="네이버 원산지 코드 확인 후 입력" />
+            </label>
+            <label>
+              <span>상품정보제공고시 유형</span>
+              <select value={form.productInfoNoticeType} onChange={(event) => update("productInfoNoticeType", event.target.value)}>
+                {productInfoNoticeTypes.map((type) => <option key={type} value={type}>{type}</option>)}
+              </select>
+            </label>
+            <label className="wide">
+              <span>상품정보제공고시 내용</span>
+              <textarea value={form.productInfoNoticeContent} onChange={(event) => update("productInfoNoticeContent", event.target.value)} placeholder="예: 품명 및 모델명, 인증/허가 사항, 제조국, 제조자, A/S 책임자 등을 입력" />
+            </label>
+            <div className="wide form-section-title" id="section-delivery">
+              <strong>배송/반품/A/S</strong>
+              <span>실등록 전 배송 템플릿 또는 배송정책 매핑이 필요합니다.</span>
+            </div>
+            <label>
+              <span>배송방법</span>
+              <select value={form.deliveryMethod} onChange={(event) => update("deliveryMethod", event.target.value)}>
+                {deliveryMethods.map((method) => <option key={method} value={method}>{method}</option>)}
+              </select>
+            </label>
+            <label>
+              <span>배송비</span>
+              <input className="input" type="number" value={form.shippingFee} onChange={(event) => update("shippingFee", Number(event.target.value))} />
+            </label>
+            <label>
+              <span>택배사 코드</span>
+              <input className="input" value={form.deliveryCompanyCode} onChange={(event) => update("deliveryCompanyCode", event.target.value)} placeholder="예: CJGLS, HANJIN" />
+            </label>
+            <label>
+              <span>반품배송비</span>
+              <input className="input" type="number" value={form.returnDeliveryFee} onChange={(event) => update("returnDeliveryFee", Number(event.target.value))} />
+            </label>
+            <label>
+              <span>교환배송비</span>
+              <input className="input" type="number" value={form.exchangeDeliveryFee} onChange={(event) => update("exchangeDeliveryFee", Number(event.target.value))} />
+            </label>
+            <label>
+              <span>A/S 전화번호</span>
+              <input className="input" value={form.asTelephone} onChange={(event) => update("asTelephone", event.target.value)} placeholder="예: 010-0000-0000" />
+            </label>
+            <label className="wide">
+              <span>A/S 안내</span>
+              <input className="input" value={form.asGuideContent} onChange={(event) => update("asGuideContent", event.target.value)} placeholder="예: 구매처 고객센터로 문의" />
+            </label>
+            <div className="wide form-section-title" id="section-images">
+              <strong>이미지</strong>
+              <span>대표 이미지는 1장입니다. 추가/상세 이미지는 등록 대시보드의 이미지 관리에서 구성합니다.</span>
+            </div>
+            <div className="wide form-field">
+              <span>대표 이미지 URL</span>
+              <div className="image-input-row">
+                <input className="input" value={form.imageUrl} onChange={(event) => update("imageUrl", event.target.value)} placeholder="권리 확보된 이미지 URL 또는 업로드 결과 URL" />
+                <label className={`btn small upload-button ${imageUploading ? "disabled" : ""}`}>
+                  {imageUploading ? "업로드 중" : "PC 이미지 업로드"}
+                  <input
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp,image/gif"
+                    disabled={imageUploading}
+                    onChange={(event) => {
+                      handleImageUpload(event.target.files?.[0]);
+                      event.currentTarget.value = "";
+                    }}
+                  />
+                </label>
+              </div>
+              {imageUploadError && <small className="error-text">{imageUploadError}</small>}
+              {form.imageUrl && (
+                <div className="image-preview">
+                  <img src={form.imageUrl} alt="대표 이미지 미리보기" />
+                  <span>업로드한 이미지는 등록 초안의 대표 이미지로 사용됩니다.</span>
+                </div>
+              )}
+            </div>
+            <div className="wide form-section-title" id="section-detail">
+              <strong>상세페이지</strong>
+              <span>상품 설명과 상세 이미지 묶음으로 네이버 detailContent를 생성합니다.</span>
+            </div>
+            <label className="wide">
+              <span>상세설명</span>
+              <textarea value={form.description} onChange={(event) => update("description", event.target.value)} />
+            </label>
+          </div>
         </div>
-        <label className="wide">
-          <span>상세설명</span>
-          <textarea value={form.description} onChange={(event) => update("description", event.target.value)} />
-        </label>
       </div>
 
       <div className="draft-actions">
         <button className="btn" onClick={onCancel}>취소</button>
+        {extraActions}
         <button className="btn primary" onClick={onApprove} disabled={!smartstoreActive || !form.title.trim()}>
-          초안 승인
+          {submitLabel}
         </button>
       </div>
     </div>

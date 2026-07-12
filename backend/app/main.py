@@ -1508,6 +1508,116 @@ def create_listing_draft(payload: ListingDraftPayload) -> dict[str, Any]:
     return listing_draft_row_to_dict(row)
 
 
+@app.put("/listing-drafts/{draft_id}", dependencies=[Depends(require_admin)])
+def update_listing_draft(draft_id: str, payload: ListingDraftPayload) -> dict[str, Any]:
+    target_platforms = [platform for platform in payload.target_platforms if platform == "smartstore"] or ["smartstore"]
+    with connect() as db:
+        row = db.execute("SELECT * FROM listing_drafts WHERE id = ?", (draft_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Listing draft not found")
+
+        images = normalize_draft_images(parse_json_text(row["images_json"], {}), row["image_url"])
+        images["representative_url"] = payload.image_url.strip()
+        draft_data = row_to_dict(row) or {}
+        draft_data.update(
+            {
+                "source_item_id": payload.source_item_id,
+                "source": payload.source,
+                "mall": payload.mall,
+                "source_url": payload.source_url,
+                "target_platforms_json": json.dumps(target_platforms, ensure_ascii=False),
+                "title": payload.title,
+                "sale_price": max(payload.sale_price, 0),
+                "display_price": max(payload.display_price, 0),
+                "shipping_fee": max(payload.shipping_fee, 0),
+                "category_id": payload.category_id,
+                "stock_quantity": max(payload.stock_quantity, 0),
+                "image_url": images["representative_url"],
+                "images_json": draft_images_to_json(images),
+                "option_name": payload.option_name,
+                "description": payload.description,
+                "brand_name": payload.brand_name,
+                "manufacturer_name": payload.manufacturer_name,
+                "model_name": payload.model_name,
+                "origin_area_code": payload.origin_area_code,
+                "origin_area_name": payload.origin_area_name,
+                "product_info_notice_type": payload.product_info_notice_type,
+                "product_info_notice_content": payload.product_info_notice_content,
+                "delivery_method": payload.delivery_method,
+                "delivery_company_code": payload.delivery_company_code,
+                "return_delivery_fee": max(payload.return_delivery_fee, 0),
+                "exchange_delivery_fee": max(payload.exchange_delivery_fee, 0),
+                "as_telephone": payload.as_telephone,
+                "as_guide_content": payload.as_guide_content,
+            }
+        )
+        validation = validate_listing_draft_data(draft_data)
+        if row["status"] == "draft":
+            next_status = "draft"
+            platform_status = parse_json_text(row["platform_status_json"], {}) or {platform: "draft" for platform in target_platforms}
+            publish_error = row["publish_error"]
+        else:
+            next_status = "validated" if validation["ready"] else "validation_failed"
+            platform_status = {platform: next_status for platform in target_platforms}
+            publish_error = "" if validation["ready"] else "필수값 부족"
+
+        db.execute(
+            """
+            UPDATE listing_drafts
+            SET source_item_id = ?, source = ?, mall = ?, source_url = ?, target_platforms_json = ?,
+                title = ?, sale_price = ?, display_price = ?, shipping_fee = ?, category_id = ?,
+                stock_quantity = ?, image_url = ?, images_json = ?, option_name = ?, description = ?,
+                brand_name = ?, manufacturer_name = ?, model_name = ?, origin_area_code = ?,
+                origin_area_name = ?, product_info_notice_type = ?, product_info_notice_content = ?,
+                delivery_method = ?, delivery_company_code = ?, return_delivery_fee = ?,
+                exchange_delivery_fee = ?, as_telephone = ?, as_guide_content = ?,
+                status = ?, platform_status_json = ?, validation_json = ?, publish_request_json = ?,
+                publish_error = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                payload.source_item_id,
+                payload.source,
+                payload.mall,
+                payload.source_url,
+                json.dumps(target_platforms, ensure_ascii=False),
+                payload.title,
+                max(payload.sale_price, 0),
+                max(payload.display_price, 0),
+                max(payload.shipping_fee, 0),
+                payload.category_id,
+                max(payload.stock_quantity, 0),
+                images["representative_url"],
+                draft_images_to_json(images),
+                payload.option_name,
+                payload.description,
+                payload.brand_name,
+                payload.manufacturer_name,
+                payload.model_name,
+                payload.origin_area_code,
+                payload.origin_area_name,
+                payload.product_info_notice_type,
+                payload.product_info_notice_content,
+                payload.delivery_method,
+                payload.delivery_company_code,
+                max(payload.return_delivery_fee, 0),
+                max(payload.exchange_delivery_fee, 0),
+                payload.as_telephone,
+                payload.as_guide_content,
+                next_status,
+                json.dumps(platform_status, ensure_ascii=False),
+                json.dumps(validation, ensure_ascii=False),
+                "{}",
+                publish_error,
+                now(),
+                draft_id,
+            ),
+        )
+        updated = db.execute("SELECT * FROM listing_drafts WHERE id = ?", (draft_id,)).fetchone()
+    log_event(f"listing draft updated: {payload.title}")
+    return listing_draft_row_to_dict(updated)
+
+
 @app.post("/listing-drafts/{draft_id}/approve", dependencies=[Depends(require_admin)])
 def approve_listing_draft(draft_id: str, payload: ListingApprovePayload) -> dict[str, Any]:
     target_platforms = [platform for platform in payload.target_platforms if platform == "smartstore"] or ["smartstore"]
