@@ -268,6 +268,12 @@ type DraftValidation = {
   checked_at?: string;
 };
 
+type DraftImages = {
+  representative_url: string;
+  optional_urls: string[];
+  detail_urls: string[];
+};
+
 type ListingDraft = {
   id: string;
   source_item_id: string;
@@ -282,8 +288,10 @@ type ListingDraft = {
   category_id: string;
   stock_quantity: number;
   image_url: string;
+  images: DraftImages;
   option_name: string;
   description: string;
+  detail_content_html: string;
   brand_name: string;
   manufacturer_name: string;
   model_name: string;
@@ -349,11 +357,18 @@ type DraftForm = {
 };
 
 type ImageUploadResult = {
+  id: string;
   filename: string;
   original_filename: string;
   content_type: string;
   size: number;
   url: string;
+};
+
+type ImageAsset = ImageUploadResult & {
+  source: string;
+  purpose: string;
+  created_at: string;
 };
 
 async function request<T>(path: string, token: string, options: RequestInit = {}): Promise<T> {
@@ -801,6 +816,7 @@ export default function App() {
   const [channels, setChannels] = useState<Channel[]>([]);
   const [logs, setLogs] = useState<LogItem[]>([]);
   const [listingDrafts, setListingDrafts] = useState<ListingDraft[]>([]);
+  const [imageAssets, setImageAssets] = useState<ImageAsset[]>([]);
   const [keyword, setKeyword] = useState("노트북");
   const [sortMode, setSortMode] = useState("lowest");
   const [collecting, setCollecting] = useState(false);
@@ -860,7 +876,7 @@ export default function App() {
 
   const loadAll = async () => {
     if (!token) return;
-    const [dashboardData, latestSearch, keyData, orderData, channelData, logData, draftData] = await Promise.all([
+    const [dashboardData, latestSearch, keyData, orderData, channelData, logData, draftData, imageData] = await Promise.all([
       request<Dashboard>("/dashboard", token),
       request<SearchPayload>("/price-search/latest", token),
       request<ApiKey[]>("/api-keys", token),
@@ -868,6 +884,7 @@ export default function App() {
       request<Channel[]>("/channels", token),
       request<LogItem[]>("/logs", token),
       request<ListingDraft[]>("/listing-drafts", token),
+      request<ImageAsset[]>("/image-assets", token),
     ]);
     setDashboard(dashboardData);
     setSearchPayload(latestSearch);
@@ -876,6 +893,7 @@ export default function App() {
     setChannels(channelData);
     setLogs(logData);
     setListingDrafts(draftData);
+    setImageAssets(imageData);
     const visibleKeyData = keyData.filter((item) => item.platform !== "naver_datalab");
     const selected = visibleKeyData.find((item) => item.platform === apiPlatform) || visibleKeyData.find((item) => item.platform === "naver") || visibleKeyData[0];
     if (selected) {
@@ -903,16 +921,22 @@ export default function App() {
   };
 
   const refreshPublishData = async () => {
-    const [keyData, channelData, draftData, dashboardData] = await Promise.all([
+    const [keyData, channelData, draftData, dashboardData, imageData] = await Promise.all([
       request<ApiKey[]>("/api-keys", token),
       request<Channel[]>("/channels", token),
       request<ListingDraft[]>("/listing-drafts", token),
       request<Dashboard>("/dashboard", token),
+      request<ImageAsset[]>("/image-assets", token),
     ]);
     setApiKeys(keyData);
     setChannels(channelData);
     setListingDrafts(draftData);
     setDashboard(dashboardData);
+    setImageAssets(imageData);
+  };
+
+  const refreshImageAssets = async () => {
+    setImageAssets(await request<ImageAsset[]>("/image-assets", token));
   };
 
   const loadSmartstoreProducts = async (searchKeyword = keyword.trim()) => {
@@ -1230,6 +1254,7 @@ export default function App() {
       });
       updateDraftState(draft);
       setNotice("등록 초안 대표 이미지 저장 완료");
+      await refreshImageAssets();
       await refreshPublishData();
       await refreshLogs();
     } catch (error) {
@@ -1237,6 +1262,32 @@ export default function App() {
     } finally {
       setDraftImageUploading((current) => ({ ...current, [draftId]: false }));
     }
+  };
+
+  const uploadPoolImage = async (file: File) => {
+    try {
+      await uploadDraftImage(file);
+      await refreshImageAssets();
+      setNotice("이미지 풀에 이미지 추가 완료");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "이미지 업로드 실패");
+    }
+  };
+
+  const saveDraftImages = async (draftId: string, images: DraftImages, detailContentHtml = "") => {
+    const draft = await request<ListingDraft>(`/listing-drafts/${draftId}/images`, token, {
+      method: "PUT",
+      body: JSON.stringify({
+        representative_url: images.representative_url,
+        optional_urls: images.optional_urls,
+        detail_urls: images.detail_urls,
+        detail_content_html: detailContentHtml,
+      }),
+    });
+    updateDraftState(draft);
+    setNotice("네이버 이미지 구조와 상세페이지 초안 저장 완료");
+    await refreshPublishData();
+    await refreshLogs();
   };
 
   const printInvoices = async () => {
@@ -1506,12 +1557,15 @@ export default function App() {
               apiKeys={apiKeys}
               channels={channels}
               drafts={listingDrafts}
+              imageAssets={imageAssets}
               onSaveSmartstore={saveSmartstorePublishKey}
               onTestSmartstore={testSmartstorePublishKey}
               onValidateDraft={validateDraft}
               onPreparePublish={preparePublish}
               onDeleteDraft={deleteDraft}
               onUploadDraftImage={uploadApprovedDraftImage}
+              onUploadPoolImage={uploadPoolImage}
+              onSaveDraftImages={saveDraftImages}
               draftImageUploading={draftImageUploading}
             />
           </section>
@@ -1848,23 +1902,29 @@ function PublishSetup({
   apiKeys,
   channels,
   drafts,
+  imageAssets,
   onSaveSmartstore,
   onTestSmartstore,
   onValidateDraft,
   onPreparePublish,
   onDeleteDraft,
   onUploadDraftImage,
+  onUploadPoolImage,
+  onSaveDraftImages,
   draftImageUploading,
 }: {
   apiKeys: ApiKey[];
   channels: Channel[];
   drafts: ListingDraft[];
+  imageAssets: ImageAsset[];
   onSaveSmartstore: (clientId: string, clientSecret: string) => void;
   onTestSmartstore: (clientId: string, clientSecret: string) => void;
   onValidateDraft: (draftId: string) => void;
   onPreparePublish: (draftId: string) => void;
   onDeleteDraft: (draftId: string) => void;
   onUploadDraftImage: (draftId: string, file: File) => void;
+  onUploadPoolImage: (file: File) => void;
+  onSaveDraftImages: (draftId: string, images: DraftImages, detailContentHtml?: string) => void;
   draftImageUploading: Record<string, boolean>;
 }) {
   const smartstore = apiKeys.find((item) => item.platform === "smartstore");
@@ -1875,11 +1935,38 @@ function PublishSetup({
   ];
   const [clientId, setClientId] = useState(smartstore?.client_id || "");
   const [clientSecret, setClientSecret] = useState(smartstore?.client_secret || "");
+  const [imageManagerDraftId, setImageManagerDraftId] = useState("");
 
   useEffect(() => {
     setClientId(smartstore?.client_id || "");
     setClientSecret(smartstore?.client_secret || "");
   }, [smartstore?.client_id, smartstore?.client_secret]);
+
+  const draftImages = (draft: ListingDraft): DraftImages => ({
+    representative_url: draft.images?.representative_url || draft.image_url || "",
+    optional_urls: draft.images?.optional_urls || [],
+    detail_urls: draft.images?.detail_urls || [],
+  });
+  const addUniqueUrl = (urls: string[], url: string, limit: number) => (urls.includes(url) ? urls : [...urls, url].slice(0, limit));
+  const removeUrl = (urls: string[], url: string) => urls.filter((item) => item !== url);
+  const saveRepresentative = (draft: ListingDraft, url: string) => {
+    const current = draftImages(draft);
+    onSaveDraftImages(draft.id, { ...current, representative_url: url });
+  };
+  const addOptionalImage = (draft: ListingDraft, url: string) => {
+    const current = draftImages(draft);
+    onSaveDraftImages(draft.id, { ...current, optional_urls: addUniqueUrl(current.optional_urls, url, 9) });
+  };
+  const addDetailImage = (draft: ListingDraft, url: string) => {
+    const current = draftImages(draft);
+    onSaveDraftImages(draft.id, { ...current, detail_urls: addUniqueUrl(current.detail_urls, url, 30) });
+  };
+  const removeDraftImage = (draft: ListingDraft, role: "representative" | "optional" | "detail", url: string) => {
+    const current = draftImages(draft);
+    if (role === "representative") onSaveDraftImages(draft.id, { ...current, representative_url: "" });
+    if (role === "optional") onSaveDraftImages(draft.id, { ...current, optional_urls: removeUrl(current.optional_urls, url) });
+    if (role === "detail") onSaveDraftImages(draft.id, { ...current, detail_urls: removeUrl(current.detail_urls, url) });
+  };
 
   return (
     <div className="publish-setup">
@@ -1923,41 +2010,129 @@ function PublishSetup({
         <div className="draft-list">
           {drafts.map((draft) => {
             const isUploading = Boolean(draftImageUploading[draft.id]);
-            const imageLabel = draft.image_url ? "대표 이미지 등록됨" : "대표 이미지 미선택";
+            const images = draftImages(draft);
+            const imageLabel = images.representative_url
+              ? `대표 1 · 추가 ${images.optional_urls.length} · 상세 ${images.detail_urls.length}`
+              : "대표 이미지 미선택";
             return (
-              <div className="draft-row" key={draft.id}>
-                <div className="draft-main">
-                  <div className="draft-title-line">
-                    {draft.image_url ? <img className="draft-thumb" src={draft.image_url} alt="" /> : <span className="draft-thumb empty">IMG</span>}
-                    <div>
-                      <strong>{draft.title}</strong>
-                      <small>{draftMissingLabels(draft) ? `누락: ${draftMissingLabels(draft)}` : imageLabel}</small>
+              <div className="draft-group" key={draft.id}>
+                <div className="draft-row">
+                  <div className="draft-main">
+                    <div className="draft-title-line">
+                      {images.representative_url ? <img className="draft-thumb" src={images.representative_url} alt="" /> : <span className="draft-thumb empty">IMG</span>}
+                      <div>
+                        <strong>{draft.title}</strong>
+                        <small>{draftMissingLabels(draft) ? `누락: ${draftMissingLabels(draft)}` : imageLabel}</small>
+                      </div>
                     </div>
                   </div>
+                  <span>{draft.target_platforms.includes("smartstore") ? "네이버 스마트스토어" : draft.target_platforms.join(", ")}</span>
+                  <span>{money(draft.display_price || draft.sale_price)}</span>
+                  <span className={pillClass(draft.status)}>{statusLabel(draft.status)}</span>
+                  <div className="draft-row-actions">
+                    <label className={`btn small upload-button ${isUploading ? "disabled" : ""}`}>
+                      {isUploading ? "업로드 중" : images.representative_url ? "대표 교체" : "대표 선택"}
+                      <input
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp,image/gif"
+                        disabled={isUploading}
+                        onChange={(event) => {
+                          const file = event.target.files?.[0];
+                          if (file) onUploadDraftImage(draft.id, file);
+                          event.currentTarget.value = "";
+                        }}
+                      />
+                    </label>
+                    <button
+                      className="btn small orange"
+                      onClick={() => setImageManagerDraftId(imageManagerDraftId === draft.id ? "" : draft.id)}
+                    >
+                      이미지 관리
+                    </button>
+                    <button className="btn small" onClick={() => onValidateDraft(draft.id)}>검사</button>
+                    <button className="btn small primary" onClick={() => onPreparePublish(draft.id)} disabled={draft.status === "published"}>
+                      등록실행
+                    </button>
+                    <button className="btn small danger" onClick={() => onDeleteDraft(draft.id)}>삭제</button>
+                  </div>
                 </div>
-                <span>{draft.target_platforms.includes("smartstore") ? "네이버 스마트스토어" : draft.target_platforms.join(", ")}</span>
-                <span>{money(draft.display_price || draft.sale_price)}</span>
-                <span className={pillClass(draft.status)}>{statusLabel(draft.status)}</span>
-                <div className="draft-row-actions">
-                  <label className={`btn small upload-button ${isUploading ? "disabled" : ""}`}>
-                    {isUploading ? "업로드 중" : draft.image_url ? "이미지 교체" : "이미지 선택"}
-                    <input
-                      type="file"
-                      accept="image/png,image/jpeg,image/webp,image/gif"
-                      disabled={isUploading}
-                      onChange={(event) => {
-                        const file = event.target.files?.[0];
-                        if (file) onUploadDraftImage(draft.id, file);
-                        event.currentTarget.value = "";
-                      }}
-                    />
-                  </label>
-                  <button className="btn small" onClick={() => onValidateDraft(draft.id)}>검사</button>
-                  <button className="btn small primary" onClick={() => onPreparePublish(draft.id)} disabled={draft.status === "published"}>
-                    등록실행
-                  </button>
-                  <button className="btn small danger" onClick={() => onDeleteDraft(draft.id)}>삭제</button>
-                </div>
+                {imageManagerDraftId === draft.id && (
+                  <div className="image-manager-panel">
+                    <div className="image-manager-head">
+                      <div>
+                        <strong>네이버 이미지 구조</strong>
+                        <span>대표 1장, 추가 최대 9장, 상세페이지 이미지 최대 30장까지 준비합니다.</span>
+                      </div>
+                      <label className="btn small upload-button">
+                        이미지 풀 추가
+                        <input
+                          type="file"
+                          accept="image/png,image/jpeg,image/webp,image/gif"
+                          onChange={(event) => {
+                            const file = event.target.files?.[0];
+                            if (file) onUploadPoolImage(file);
+                            event.currentTarget.value = "";
+                          }}
+                        />
+                      </label>
+                    </div>
+                    <div className="image-role-grid">
+                      <div className="image-role-card">
+                        <strong>대표 이미지</strong>
+                        {images.representative_url ? (
+                          <div className="selected-image-chip">
+                            <img src={images.representative_url} alt="" />
+                            <button className="btn small danger" onClick={() => removeDraftImage(draft, "representative", images.representative_url)}>삭제</button>
+                          </div>
+                        ) : <span className="muted-text">미선택</span>}
+                      </div>
+                      <div className="image-role-card">
+                        <strong>추가 이미지</strong>
+                        <div className="selected-image-list">
+                          {images.optional_urls.map((url) => (
+                            <div className="selected-image-chip" key={url}>
+                              <img src={url} alt="" />
+                              <button className="btn small danger" onClick={() => removeDraftImage(draft, "optional", url)}>삭제</button>
+                            </div>
+                          ))}
+                          {images.optional_urls.length === 0 && <span className="muted-text">미선택</span>}
+                        </div>
+                      </div>
+                      <div className="image-role-card">
+                        <strong>상세페이지 이미지</strong>
+                        <div className="selected-image-list">
+                          {images.detail_urls.map((url) => (
+                            <div className="selected-image-chip" key={url}>
+                              <img src={url} alt="" />
+                              <button className="btn small danger" onClick={() => removeDraftImage(draft, "detail", url)}>삭제</button>
+                            </div>
+                          ))}
+                          {images.detail_urls.length === 0 && <span className="muted-text">미선택</span>}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="image-pool-grid">
+                      {imageAssets.map((asset) => {
+                        const url = apiAssetUrl(asset.url);
+                        return (
+                          <div className="image-pool-item" key={asset.id}>
+                            <img src={url} alt={asset.original_filename} />
+                            <small>{asset.original_filename || asset.filename}</small>
+                            <div>
+                              <button className="btn small" onClick={() => saveRepresentative(draft, url)}>대표</button>
+                              <button className="btn small" onClick={() => addOptionalImage(draft, url)}>추가</button>
+                              <button className="btn small" onClick={() => addDetailImage(draft, url)}>상세</button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                      {imageAssets.length === 0 && <div className="muted-row">아직 이미지 풀이 없습니다. 먼저 이미지를 업로드하세요.</div>}
+                    </div>
+                    <div className="draft-actions compact">
+                      <button className="btn primary" onClick={() => onSaveDraftImages(draft.id, images, "")}>상세페이지 자동생성 저장</button>
+                    </div>
+                  </div>
+                )}
               </div>
             );
           })}

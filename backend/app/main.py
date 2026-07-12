@@ -221,6 +221,18 @@ def init_db() -> None:
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS image_assets (
+                id TEXT PRIMARY KEY,
+                filename TEXT NOT NULL,
+                original_filename TEXT NOT NULL DEFAULT '',
+                content_type TEXT NOT NULL DEFAULT '',
+                size INTEGER NOT NULL DEFAULT 0,
+                url TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'upload',
+                purpose TEXT NOT NULL DEFAULT 'product',
+                created_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS listing_drafts (
                 id TEXT PRIMARY KEY,
                 source_item_id TEXT NOT NULL DEFAULT '',
@@ -270,10 +282,41 @@ def init_db() -> None:
             ("exchange_delivery_fee", "ALTER TABLE listing_drafts ADD COLUMN exchange_delivery_fee INTEGER NOT NULL DEFAULT 0"),
             ("as_telephone", "ALTER TABLE listing_drafts ADD COLUMN as_telephone TEXT NOT NULL DEFAULT ''"),
             ("as_guide_content", "ALTER TABLE listing_drafts ADD COLUMN as_guide_content TEXT NOT NULL DEFAULT ''"),
+            ("images_json", "ALTER TABLE listing_drafts ADD COLUMN images_json TEXT NOT NULL DEFAULT '{}'"),
+            ("detail_content_html", "ALTER TABLE listing_drafts ADD COLUMN detail_content_html TEXT NOT NULL DEFAULT ''"),
         ]
         for column, statement in listing_column_migrations:
             if column not in listing_columns:
                 db.execute(statement)
+
+        for image_path in UPLOAD_DIR.iterdir():
+            if not image_path.is_file():
+                continue
+            if image_path.suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+                continue
+            row = db.execute("SELECT id FROM image_assets WHERE filename = ?", (image_path.name,)).fetchone()
+            if row:
+                continue
+            content_type = mimetypes.guess_type(str(image_path))[0] or "application/octet-stream"
+            db.execute(
+                """
+                INSERT INTO image_assets (
+                    id, filename, original_filename, content_type, size, url, source, purpose, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    new_id("img"),
+                    image_path.name,
+                    image_path.name,
+                    content_type,
+                    image_path.stat().st_size,
+                    f"/uploaded-images/{image_path.name}",
+                    "server_pool",
+                    "product",
+                    now(),
+                ),
+            )
 
         platforms = [
             ("naver", "네이버 쇼핑 검색 API"),
@@ -412,6 +455,13 @@ class ListingDraftImagePayload(BaseModel):
     image_url: str = Field(min_length=1)
 
 
+class ListingDraftImagesPayload(BaseModel):
+    representative_url: str = ""
+    optional_urls: list[str] = Field(default_factory=list)
+    detail_urls: list[str] = Field(default_factory=list)
+    detail_content_html: str = ""
+
+
 def parse_json_text(value: str | None, fallback: Any) -> Any:
     if not value:
         return fallback
@@ -427,7 +477,76 @@ def listing_draft_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     data["platform_status"] = parse_json_text(data.pop("platform_status_json", "{}"), {})
     data["validation"] = parse_json_text(data.pop("validation_json", "{}"), {})
     data["publish_request"] = parse_json_text(data.pop("publish_request_json", "{}"), {})
+    data["images"] = normalize_draft_images(parse_json_text(data.pop("images_json", "{}"), {}), data.get("image_url", ""))
     return data
+
+
+def normalize_url_list(values: Any, limit: int) -> list[str]:
+    if not isinstance(values, list):
+        values = []
+    result: list[str] = []
+    for value in values:
+        url = str(value or "").strip()
+        if not url or url in result:
+            continue
+        result.append(url)
+        if len(result) >= limit:
+            break
+    return result
+
+
+def normalize_draft_images(raw: Any, fallback_representative: str = "") -> dict[str, Any]:
+    data = raw if isinstance(raw, dict) else {}
+    representative_url = str(
+        data.get("representative_url")
+        or data.get("representativeUrl")
+        or fallback_representative
+        or ""
+    ).strip()
+    optional_urls = normalize_url_list(data.get("optional_urls") or data.get("optionalUrls") or [], 9)
+    detail_urls = normalize_url_list(data.get("detail_urls") or data.get("detailUrls") or [], 30)
+    return {
+        "representative_url": representative_url,
+        "optional_urls": optional_urls,
+        "detail_urls": detail_urls,
+    }
+
+
+def draft_images_to_json(images: dict[str, Any]) -> str:
+    return json.dumps(normalize_draft_images(images), ensure_ascii=False)
+
+
+def generate_detail_content_html(draft: dict[str, Any], images: dict[str, Any]) -> str:
+    title = html.escape(str(draft.get("title") or "상품 상세정보").strip())
+    description = html.escape(str(draft.get("description") or "").strip()).replace("\n", "<br>")
+    brand = html.escape(str(draft.get("brand_name") or "").strip())
+    manufacturer = html.escape(str(draft.get("manufacturer_name") or "").strip())
+    model = html.escape(str(draft.get("model_name") or "").strip())
+    source_url = html.escape(str(draft.get("source_url") or "").strip())
+    detail_images = images.get("detail_urls") or []
+    detail_image_html = "\n".join(
+        f'<figure><img src="{html.escape(url)}" alt="{title} 상세 이미지" style="max-width:100%;height:auto;" /></figure>'
+        for url in detail_images
+    )
+    spec_rows = "\n".join(
+        row for row in [
+            f"<li><strong>브랜드</strong> {brand}</li>" if brand else "",
+            f"<li><strong>제조사</strong> {manufacturer}</li>" if manufacturer else "",
+            f"<li><strong>모델명</strong> {model}</li>" if model else "",
+        ] if row
+    )
+    source_html = f'<p class="source">원본 상품 확인: <a href="{source_url}">{source_url}</a></p>' if source_url else ""
+    return f"""
+<section class="pricescan-detail">
+  <h2>{title}</h2>
+  <p>{description}</p>
+  {detail_image_html}
+  <ul>
+    {spec_rows}
+  </ul>
+  {source_html}
+</section>
+""".strip()
 
 
 def validate_listing_draft_data(draft: dict[str, Any]) -> dict[str, Any]:
@@ -498,6 +617,13 @@ def validate_listing_draft_data(draft: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_smartstore_publish_request(draft: dict[str, Any], validation: dict[str, Any]) -> dict[str, Any]:
+    images = normalize_draft_images(
+        parse_json_text(str(draft.get("images_json") or "{}"), {}),
+        str(draft.get("image_url") or ""),
+    )
+    representative_url = images["representative_url"]
+    optional_images = [{"url": url} for url in images["optional_urls"]]
+    detail_content = str(draft.get("detail_content_html") or "").strip() or generate_detail_content_html(draft, images)
     return {
         "platform": "smartstore",
         "mode": "protected",
@@ -514,9 +640,14 @@ def build_smartstore_publish_request(draft: dict[str, Any], validation: dict[str
             "sale_price": parse_price(draft.get("sale_price")),
             "display_price": parse_price(draft.get("display_price")),
             "stock_quantity": parse_price(draft.get("stock_quantity")),
-            "representative_image_url": draft.get("image_url", ""),
+            "representative_image_url": representative_url,
+            "images": {
+                "representativeImage": {"url": representative_url} if representative_url else {},
+                "optionalImages": optional_images,
+            },
             "option_name": draft.get("option_name", ""),
             "detail_content": draft.get("description", ""),
+            "detailContent": detail_content,
             "brand_name": draft.get("brand_name", ""),
             "manufacturer_name": draft.get("manufacturer_name", ""),
             "model_name": draft.get("model_name", ""),
@@ -540,10 +671,15 @@ def build_smartstore_publish_request(draft: dict[str, Any], validation: dict[str
                 "guide_content": draft.get("as_guide_content", ""),
             },
         },
+        "image_assets": {
+            "representative_url": representative_url,
+            "optional_urls": images["optional_urls"],
+            "detail_urls": images["detail_urls"],
+        },
         "validation": validation,
         "required_before_live_publish": [
             "네이버 카테고리별 옵션/속성 API 결과와 필드 재검증",
-            "네이버 이미지 업로드 API로 대표/상세 이미지 전환",
+            "네이버 상품 이미지 다건 등록 API로 대표/추가 이미지 URL 전환",
             "배송/반품 템플릿 ID 또는 실제 배송정책 매핑",
             "권리 확보된 대표/상세 이미지 업로드",
         ],
@@ -1427,7 +1563,10 @@ def update_listing_draft_image(draft_id: str, payload: ListingDraftImagePayload)
             raise HTTPException(status_code=404, detail="Listing draft not found")
 
         draft_data = row_to_dict(row) or {}
+        images = normalize_draft_images(parse_json_text(row["images_json"], {}), row["image_url"])
+        images["representative_url"] = image_url
         draft_data["image_url"] = image_url
+        draft_data["images_json"] = draft_images_to_json(images)
         validation = validate_listing_draft_data(draft_data)
         status = row["status"]
         publish_error = row["publish_error"]
@@ -1451,12 +1590,13 @@ def update_listing_draft_image(draft_id: str, payload: ListingDraftImagePayload)
         db.execute(
             """
             UPDATE listing_drafts
-            SET image_url = ?, validation_json = ?, publish_request_json = ?,
+            SET image_url = ?, images_json = ?, validation_json = ?, publish_request_json = ?,
                 status = ?, platform_status_json = ?, publish_error = ?, updated_at = ?
             WHERE id = ?
             """,
             (
                 image_url,
+                draft_images_to_json(images),
                 json.dumps(validation, ensure_ascii=False),
                 json.dumps(publish_request, ensure_ascii=False),
                 status,
@@ -1468,6 +1608,76 @@ def update_listing_draft_image(draft_id: str, payload: ListingDraftImagePayload)
         )
         updated = db.execute("SELECT * FROM listing_drafts WHERE id = ?", (draft_id,)).fetchone()
     log_event(f"listing draft image updated: {row['title']}")
+    return listing_draft_row_to_dict(updated)
+
+
+@app.put("/listing-drafts/{draft_id}/images", dependencies=[Depends(require_admin)])
+def update_listing_draft_images(draft_id: str, payload: ListingDraftImagesPayload) -> dict[str, Any]:
+    images = normalize_draft_images(
+        {
+            "representative_url": payload.representative_url,
+            "optional_urls": payload.optional_urls,
+            "detail_urls": payload.detail_urls,
+        }
+    )
+    all_urls = [images["representative_url"], *images["optional_urls"], *images["detail_urls"]]
+    invalid_urls = [url for url in all_urls if url and not url.startswith(("http://", "https://"))]
+    if invalid_urls:
+        raise HTTPException(status_code=400, detail="이미지 URL은 http/https 주소여야 합니다.")
+
+    with connect() as db:
+        row = db.execute("SELECT * FROM listing_drafts WHERE id = ?", (draft_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Listing draft not found")
+
+        draft_data = row_to_dict(row) or {}
+        draft_data["image_url"] = images["representative_url"]
+        draft_data["images_json"] = draft_images_to_json(images)
+        detail_content_html = payload.detail_content_html.strip() or generate_detail_content_html(draft_data, images)
+        draft_data["detail_content_html"] = detail_content_html
+        validation = validate_listing_draft_data(draft_data)
+        status = row["status"]
+        publish_error = row["publish_error"]
+        platform_status = parse_json_text(row["platform_status_json"], {})
+        publish_request = parse_json_text(row["publish_request_json"], {})
+
+        if status in {"validated", "validation_failed"}:
+            status = "validated" if validation["ready"] else "validation_failed"
+            platform_status["smartstore"] = status
+            publish_error = "" if validation["ready"] else "필수값 부족"
+        elif status == "publish_ready":
+            if validation["ready"]:
+                publish_request = build_smartstore_publish_request(draft_data, validation)
+                platform_status["smartstore"] = "protected_ready"
+                publish_error = ""
+            else:
+                status = "validation_failed"
+                platform_status["smartstore"] = "validation_failed"
+                publish_error = "필수값 부족"
+
+        db.execute(
+            """
+            UPDATE listing_drafts
+            SET image_url = ?, images_json = ?, detail_content_html = ?,
+                validation_json = ?, publish_request_json = ?, status = ?,
+                platform_status_json = ?, publish_error = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                images["representative_url"],
+                draft_images_to_json(images),
+                detail_content_html,
+                json.dumps(validation, ensure_ascii=False),
+                json.dumps(publish_request, ensure_ascii=False),
+                status,
+                json.dumps(platform_status, ensure_ascii=False),
+                publish_error,
+                now(),
+                draft_id,
+            ),
+        )
+        updated = db.execute("SELECT * FROM listing_drafts WHERE id = ?", (draft_id,)).fetchone()
+    log_event(f"listing draft images updated: {row['title']}")
     return listing_draft_row_to_dict(updated)
 
 
@@ -1561,6 +1771,13 @@ def prepare_listing_publish(draft_id: str) -> dict[str, Any]:
     return listing_draft_row_to_dict(updated)
 
 
+@app.get("/image-assets", dependencies=[Depends(require_admin)])
+def image_assets() -> list[dict[str, Any]]:
+    with connect() as db:
+        rows = db.execute("SELECT * FROM image_assets ORDER BY created_at DESC LIMIT 120").fetchall()
+        return [row_to_dict(row) or {} for row in rows]
+
+
 @app.post("/uploads/product-image", dependencies=[Depends(require_admin)])
 async def upload_product_image(file: UploadFile = File(...)) -> dict[str, Any]:
     content_type = (file.content_type or "").lower()
@@ -1581,14 +1798,37 @@ async def upload_product_image(file: UploadFile = File(...)) -> dict[str, Any]:
     saved_name = f"product_{uuid4().hex[:16]}{extension}"
     target_path = UPLOAD_DIR / saved_name
     target_path.write_bytes(content)
+    asset_id = new_id("img")
+    asset_url = f"/uploaded-images/{saved_name}"
+    with connect() as db:
+        db.execute(
+            """
+            INSERT INTO image_assets (
+                id, filename, original_filename, content_type, size, url, source, purpose, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                asset_id,
+                saved_name,
+                original_name,
+                content_type,
+                len(content),
+                asset_url,
+                "upload",
+                "product",
+                now(),
+            ),
+        )
 
     log_event(f"product image uploaded: {original_name}")
     return {
+        "id": asset_id,
         "filename": saved_name,
         "original_filename": original_name,
         "content_type": content_type,
         "size": len(content),
-        "url": f"/uploaded-images/{saved_name}",
+        "url": asset_url,
     }
 
 

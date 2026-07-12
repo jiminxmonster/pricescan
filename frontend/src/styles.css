@@ -1016,6 +1016,10 @@ textarea {
   display: grid;
   gap: 7px;
 }
+.draft-group {
+  display: grid;
+  gap: 7px;
+}
 .draft-row {
   display: grid;
   grid-template-columns: minmax(220px, 1.6fr) minmax(120px, 0.8fr) minmax(100px, 0.6fr) auto auto;
@@ -1073,6 +1077,96 @@ textarea {
   flex-wrap: wrap;
   gap: 6px;
   justify-content: flex-end;
+}
+.image-manager-panel {
+  border: 1px solid #dbe7f5;
+  border-radius: 4px;
+  background: #fff;
+  padding: 12px;
+}
+.image-manager-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.image-manager-head strong,
+.image-role-card strong {
+  color: var(--brand);
+}
+.image-manager-head span,
+.muted-text {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 850;
+}
+.image-role-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.image-role-card {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #fbfcfe;
+  padding: 9px;
+}
+.selected-image-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 7px;
+}
+.selected-image-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #fff;
+  padding: 5px;
+  margin-top: 7px;
+}
+.selected-image-chip img,
+.image-pool-item img {
+  width: 54px;
+  height: 54px;
+  object-fit: cover;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  background: #fff;
+}
+.image-pool-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 8px;
+}
+.image-pool-item {
+  display: grid;
+  gap: 7px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #f8fbff;
+  padding: 8px;
+}
+.image-pool-item small {
+  min-height: 28px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 850;
+  word-break: break-all;
+}
+.image-pool-item div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.draft-actions.compact {
+  justify-content: flex-end;
+  margin-top: 10px;
 }
 .channel,
 .api-card {
@@ -1317,6 +1411,9 @@ textarea {
     width: 100%;
   }
   .draft-row {
+    grid-template-columns: 1fr;
+  }
+  .image-role-grid {
     grid-template-columns: 1fr;
   }
 }
