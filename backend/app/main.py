@@ -435,14 +435,10 @@ def validate_listing_draft_data(draft: dict[str, Any]) -> dict[str, Any]:
             missing.append({"field": field, "label": label})
 
     require_text("title", "상품명")
-    require_text("category_id", "네이버 카테고리 ID")
-    require_text("image_url", "대표 이미지 URL")
     require_text("description", "상세설명")
-    require_text("origin_area_name", "원산지")
     require_text("product_info_notice_type", "상품정보제공고시 유형")
     require_text("product_info_notice_content", "상품정보제공고시 내용")
     require_text("delivery_method", "배송방법")
-    require_text("as_telephone", "A/S 전화번호")
     require_text("as_guide_content", "A/S 안내")
 
     sale_price = parse_price(draft.get("sale_price"))
@@ -465,12 +461,23 @@ def validate_listing_draft_data(draft: dict[str, Any]) -> dict[str, Any]:
     title = str(draft.get("title") or "").strip()
     description = str(draft.get("description") or "").strip()
     image_url = str(draft.get("image_url") or "").strip()
+    category_id = str(draft.get("category_id") or "").strip()
+    origin_area_name = str(draft.get("origin_area_name") or "").strip()
+    as_telephone = str(draft.get("as_telephone") or "").strip()
     if title and len(title) > 100:
         warnings.append("상품명이 길어 네이버 등록 시 거절될 수 있습니다.")
     if description and len(description) < 30:
         warnings.append("상세설명이 너무 짧습니다. 실제 판매용 상세설명 보강이 필요합니다.")
     if image_url and not image_url.startswith(("http://", "https://")):
         warnings.append("대표 이미지 URL은 http/https 주소여야 합니다.")
+    if not category_id:
+        warnings.append("네이버 실등록 전 카테고리 ID를 확정해야 합니다.")
+    if not image_url:
+        warnings.append("네이버 실등록 전 권리 확보된 대표 이미지를 등록해야 합니다.")
+    if not origin_area_name:
+        warnings.append("네이버 실등록 전 원산지를 확정해야 합니다.")
+    if not as_telephone:
+        warnings.append("네이버 실등록 전 A/S 전화번호를 확정해야 합니다.")
     if not str(draft.get("source_url") or "").strip():
         warnings.append("원본 상품 링크가 없어 추적이 어렵습니다.")
     if not str(draft.get("brand_name") or "").strip():
@@ -1389,6 +1396,17 @@ def approve_listing_draft(draft_id: str, payload: ListingApprovePayload) -> dict
         updated = db.execute("SELECT * FROM listing_drafts WHERE id = ?", (draft_id,)).fetchone()
     log_event(f"listing draft approved for publish: {row['title']}")
     return listing_draft_row_to_dict(updated)
+
+
+@app.delete("/listing-drafts/{draft_id}", dependencies=[Depends(require_admin)])
+def delete_listing_draft(draft_id: str) -> dict[str, str]:
+    with connect() as db:
+        row = db.execute("SELECT title FROM listing_drafts WHERE id = ?", (draft_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Listing draft not found")
+        db.execute("DELETE FROM listing_drafts WHERE id = ?", (draft_id,))
+    log_event(f"listing draft deleted: {row['title']}")
+    return {"status": "deleted", "id": draft_id}
 
 
 @app.post("/listing-drafts/{draft_id}/validate", dependencies=[Depends(require_admin)])

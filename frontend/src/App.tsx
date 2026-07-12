@@ -463,16 +463,17 @@ function draftFormValidation(form: DraftForm): DraftValidation {
   if (!form.title.trim()) missing.push({ field: "title", label: "상품명" });
   if ((Number(form.salePrice) || 0) <= 0) missing.push({ field: "sale_price", label: "판매가" });
   if ((Number(form.stockQuantity) || 0) <= 0) missing.push({ field: "stock_quantity", label: "재고" });
-  if (!form.categoryId.trim()) missing.push({ field: "category_id", label: "네이버 카테고리 ID" });
-  if (!form.imageUrl.trim()) missing.push({ field: "image_url", label: "대표 이미지 URL" });
   if (!form.description.trim()) missing.push({ field: "description", label: "상세설명" });
-  if (!form.originAreaName.trim()) missing.push({ field: "origin_area_name", label: "원산지" });
   if (!form.productInfoNoticeType.trim()) missing.push({ field: "product_info_notice_type", label: "상품정보제공고시 유형" });
   if (!form.productInfoNoticeContent.trim()) missing.push({ field: "product_info_notice_content", label: "상품정보제공고시 내용" });
   if (!form.deliveryMethod.trim()) missing.push({ field: "delivery_method", label: "배송방법" });
-  if (!form.asTelephone.trim()) missing.push({ field: "as_telephone", label: "A/S 전화번호" });
   if (!form.asGuideContent.trim()) missing.push({ field: "as_guide_content", label: "A/S 안내" });
-  return { ready: missing.length === 0, missing, warnings: [] };
+  const warnings: string[] = [];
+  if (!form.categoryId.trim()) warnings.push("실등록 전 네이버 카테고리 ID 필요");
+  if (!form.imageUrl.trim()) warnings.push("실등록 전 대표 이미지 필요");
+  if (!form.originAreaName.trim()) warnings.push("실등록 전 원산지 필요");
+  if (!form.asTelephone.trim()) warnings.push("실등록 전 A/S 전화번호 필요");
+  return { ready: missing.length === 0, missing, warnings };
 }
 
 function normalize(value: string): string {
@@ -831,14 +832,14 @@ export default function App() {
     manufacturerName: "",
     modelName: "",
     originAreaCode: "",
-    originAreaName: "",
+    originAreaName: "상세페이지 참조",
     productInfoNoticeType: "기타 재화",
     productInfoNoticeContent: "상세페이지 참조",
     deliveryMethod: "택배/소포/등기",
     deliveryCompanyCode: "",
     returnDeliveryFee: 3000,
     exchangeDeliveryFee: 6000,
-    asTelephone: "",
+    asTelephone: "판매자 고객센터",
     asGuideContent: "구매처 고객센터로 문의해 주세요.",
   });
 
@@ -1095,14 +1096,14 @@ export default function App() {
       manufacturerName: "",
       modelName: "",
       originAreaCode: "",
-      originAreaName: "",
+      originAreaName: "상세페이지 참조",
       productInfoNoticeType: "기타 재화",
       productInfoNoticeContent: "상세페이지 참조",
       deliveryMethod: "택배/소포/등기",
       deliveryCompanyCode: "",
       returnDeliveryFee: 3000,
       exchangeDeliveryFee: 6000,
-      asTelephone: "",
+      asTelephone: "판매자 고객센터",
       asGuideContent: "구매처 고객센터로 문의해 주세요.",
       description: `${item.name}\n\n원본 소스: ${item.mall}\n기준 판매가: ${money(item.salePrice)}\n노출가: ${money(item.displayPrice)}\n\n상세설명과 이미지는 권리 확인 후 교체하세요.`,
     });
@@ -1187,6 +1188,15 @@ export default function App() {
     } else {
       setNotice(`등록실행 전 필수값 보완 필요: ${missing || "확인 필요"}`);
     }
+    await refreshPublishData();
+    await refreshLogs();
+  };
+
+  const deleteDraft = async (draftId: string) => {
+    if (!window.confirm("이 상품등록 초안을 삭제할까요?")) return;
+    await request(`/listing-drafts/${draftId}`, token, { method: "DELETE" });
+    setListingDrafts((current) => current.filter((item) => item.id !== draftId));
+    setNotice("상품등록 초안 삭제 완료");
     await refreshPublishData();
     await refreshLogs();
   };
@@ -1480,6 +1490,7 @@ export default function App() {
               onTestSmartstore={testSmartstorePublishKey}
               onValidateDraft={validateDraft}
               onPreparePublish={preparePublish}
+              onDeleteDraft={deleteDraft}
             />
           </section>
         )}
@@ -1819,6 +1830,7 @@ function PublishSetup({
   onTestSmartstore,
   onValidateDraft,
   onPreparePublish,
+  onDeleteDraft,
 }: {
   apiKeys: ApiKey[];
   channels: Channel[];
@@ -1827,6 +1839,7 @@ function PublishSetup({
   onTestSmartstore: (clientId: string, clientSecret: string) => void;
   onValidateDraft: (draftId: string) => void;
   onPreparePublish: (draftId: string) => void;
+  onDeleteDraft: (draftId: string) => void;
 }) {
   const smartstore = apiKeys.find((item) => item.platform === "smartstore");
   const emptyChannels = channels.length > 1 ? channels.slice(1, 4) : [
@@ -1896,6 +1909,7 @@ function PublishSetup({
                 <button className="btn small primary" onClick={() => onPreparePublish(draft.id)} disabled={draft.status === "published"}>
                   등록실행
                 </button>
+                <button className="btn small danger" onClick={() => onDeleteDraft(draft.id)}>삭제</button>
               </div>
             </div>
           ))}
