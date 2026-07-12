@@ -77,6 +77,8 @@ const readySourceKeys = new Set(searchSourceGroups.flatMap((group) => group.opti
 const priceReadySourceKeys = new Set(["naver", "danawa"]);
 const apiPlatformOrder = ["naver", "smartstore", "danawa", "enuri", "elevenst", "gmarket", "auction", "google_search", "naver_search", "coupang"];
 const serviceUrl = "https://pricescan.d2blue.com/";
+const productInfoNoticeTypes = ["기타 재화", "전자제품", "가전제품", "의류", "신발", "가방", "식품", "화장품"];
+const deliveryMethods = ["택배/소포/등기", "직접배송", "방문수령", "퀵서비스"];
 
 type NaverApiGuide = {
   title: string;
@@ -282,6 +284,19 @@ type ListingDraft = {
   image_url: string;
   option_name: string;
   description: string;
+  brand_name: string;
+  manufacturer_name: string;
+  model_name: string;
+  origin_area_code: string;
+  origin_area_name: string;
+  product_info_notice_type: string;
+  product_info_notice_content: string;
+  delivery_method: string;
+  delivery_company_code: string;
+  return_delivery_fee: number;
+  exchange_delivery_fee: number;
+  as_telephone: string;
+  as_guide_content: string;
   status: string;
   platform_status: Record<string, string>;
   validation: DraftValidation;
@@ -318,6 +333,19 @@ type DraftForm = {
   imageUrl: string;
   optionName: string;
   description: string;
+  brandName: string;
+  manufacturerName: string;
+  modelName: string;
+  originAreaCode: string;
+  originAreaName: string;
+  productInfoNoticeType: string;
+  productInfoNoticeContent: string;
+  deliveryMethod: string;
+  deliveryCompanyCode: string;
+  returnDeliveryFee: number;
+  exchangeDeliveryFee: number;
+  asTelephone: string;
+  asGuideContent: string;
 };
 
 type ImageUploadResult = {
@@ -438,6 +466,12 @@ function draftFormValidation(form: DraftForm): DraftValidation {
   if (!form.categoryId.trim()) missing.push({ field: "category_id", label: "네이버 카테고리 ID" });
   if (!form.imageUrl.trim()) missing.push({ field: "image_url", label: "대표 이미지 URL" });
   if (!form.description.trim()) missing.push({ field: "description", label: "상세설명" });
+  if (!form.originAreaName.trim()) missing.push({ field: "origin_area_name", label: "원산지" });
+  if (!form.productInfoNoticeType.trim()) missing.push({ field: "product_info_notice_type", label: "상품정보제공고시 유형" });
+  if (!form.productInfoNoticeContent.trim()) missing.push({ field: "product_info_notice_content", label: "상품정보제공고시 내용" });
+  if (!form.deliveryMethod.trim()) missing.push({ field: "delivery_method", label: "배송방법" });
+  if (!form.asTelephone.trim()) missing.push({ field: "as_telephone", label: "A/S 전화번호" });
+  if (!form.asGuideContent.trim()) missing.push({ field: "as_guide_content", label: "A/S 안내" });
   return { ready: missing.length === 0, missing, warnings: [] };
 }
 
@@ -793,6 +827,19 @@ export default function App() {
     imageUrl: "",
     optionName: "",
     description: "",
+    brandName: "",
+    manufacturerName: "",
+    modelName: "",
+    originAreaCode: "",
+    originAreaName: "",
+    productInfoNoticeType: "기타 재화",
+    productInfoNoticeContent: "상세페이지 참조",
+    deliveryMethod: "택배/소포/등기",
+    deliveryCompanyCode: "",
+    returnDeliveryFee: 3000,
+    exchangeDeliveryFee: 6000,
+    asTelephone: "",
+    asGuideContent: "구매처 고객센터로 문의해 주세요.",
   });
 
   useEffect(() => {
@@ -1044,6 +1091,19 @@ export default function App() {
       stockQuantity: 100,
       imageUrl: "",
       optionName: "",
+      brandName: "",
+      manufacturerName: "",
+      modelName: "",
+      originAreaCode: "",
+      originAreaName: "",
+      productInfoNoticeType: "기타 재화",
+      productInfoNoticeContent: "상세페이지 참조",
+      deliveryMethod: "택배/소포/등기",
+      deliveryCompanyCode: "",
+      returnDeliveryFee: 3000,
+      exchangeDeliveryFee: 6000,
+      asTelephone: "",
+      asGuideContent: "구매처 고객센터로 문의해 주세요.",
       description: `${item.name}\n\n원본 소스: ${item.mall}\n기준 판매가: ${money(item.salePrice)}\n노출가: ${money(item.displayPrice)}\n\n상세설명과 이미지는 권리 확인 후 교체하세요.`,
     });
     setNotice("상품등록 초안을 확인하고 초안 승인을 진행하세요.");
@@ -1079,6 +1139,19 @@ export default function App() {
         image_url: draftForm.imageUrl.trim(),
         option_name: draftForm.optionName.trim(),
         description: draftForm.description.trim(),
+        brand_name: draftForm.brandName.trim(),
+        manufacturer_name: draftForm.manufacturerName.trim(),
+        model_name: draftForm.modelName.trim(),
+        origin_area_code: draftForm.originAreaCode.trim(),
+        origin_area_name: draftForm.originAreaName.trim(),
+        product_info_notice_type: draftForm.productInfoNoticeType.trim(),
+        product_info_notice_content: draftForm.productInfoNoticeContent.trim(),
+        delivery_method: draftForm.deliveryMethod.trim(),
+        delivery_company_code: draftForm.deliveryCompanyCode.trim(),
+        return_delivery_fee: Number(draftForm.returnDeliveryFee) || 0,
+        exchange_delivery_fee: Number(draftForm.exchangeDeliveryFee) || 0,
+        as_telephone: draftForm.asTelephone.trim(),
+        as_guide_content: draftForm.asGuideContent.trim(),
       }),
     });
     const approved = await request<ListingDraft>(`/listing-drafts/${created.id}/approve`, token, {
@@ -1941,6 +2014,70 @@ function PublishDraftPanel({
         <label>
           <span>옵션명</span>
           <input className="input" value={form.optionName} onChange={(event) => update("optionName", event.target.value)} placeholder="예: 기본옵션" />
+        </label>
+        <div className="wide form-section-title">
+          <strong>네이버 상품 속성</strong>
+          <span>카테고리별 필수값은 달라질 수 있어, 우선 공통 등록 필드를 맞춥니다.</span>
+        </div>
+        <label>
+          <span>브랜드</span>
+          <input className="input" value={form.brandName} onChange={(event) => update("brandName", event.target.value)} placeholder="예: LG전자" />
+        </label>
+        <label>
+          <span>제조사</span>
+          <input className="input" value={form.manufacturerName} onChange={(event) => update("manufacturerName", event.target.value)} placeholder="예: LG전자" />
+        </label>
+        <label>
+          <span>모델명</span>
+          <input className="input" value={form.modelName} onChange={(event) => update("modelName", event.target.value)} placeholder="예: 15ZD90RU-GX56K" />
+        </label>
+        <label>
+          <span>원산지</span>
+          <input className="input" value={form.originAreaName} onChange={(event) => update("originAreaName", event.target.value)} placeholder="예: 대한민국, 중국" />
+        </label>
+        <label>
+          <span>원산지 코드</span>
+          <input className="input" value={form.originAreaCode} onChange={(event) => update("originAreaCode", event.target.value)} placeholder="네이버 원산지 코드 확인 후 입력" />
+        </label>
+        <label>
+          <span>상품정보제공고시 유형</span>
+          <select value={form.productInfoNoticeType} onChange={(event) => update("productInfoNoticeType", event.target.value)}>
+            {productInfoNoticeTypes.map((type) => <option key={type} value={type}>{type}</option>)}
+          </select>
+        </label>
+        <label className="wide">
+          <span>상품정보제공고시 내용</span>
+          <textarea value={form.productInfoNoticeContent} onChange={(event) => update("productInfoNoticeContent", event.target.value)} placeholder="예: 품명 및 모델명, 인증/허가 사항, 제조국, 제조자, A/S 책임자 등을 입력" />
+        </label>
+        <div className="wide form-section-title">
+          <strong>배송/반품/A/S</strong>
+          <span>실등록 전 배송 템플릿 또는 배송정책 매핑이 필요합니다.</span>
+        </div>
+        <label>
+          <span>배송방법</span>
+          <select value={form.deliveryMethod} onChange={(event) => update("deliveryMethod", event.target.value)}>
+            {deliveryMethods.map((method) => <option key={method} value={method}>{method}</option>)}
+          </select>
+        </label>
+        <label>
+          <span>택배사 코드</span>
+          <input className="input" value={form.deliveryCompanyCode} onChange={(event) => update("deliveryCompanyCode", event.target.value)} placeholder="예: CJGLS, HANJIN" />
+        </label>
+        <label>
+          <span>반품배송비</span>
+          <input className="input" type="number" value={form.returnDeliveryFee} onChange={(event) => update("returnDeliveryFee", Number(event.target.value))} />
+        </label>
+        <label>
+          <span>교환배송비</span>
+          <input className="input" type="number" value={form.exchangeDeliveryFee} onChange={(event) => update("exchangeDeliveryFee", Number(event.target.value))} />
+        </label>
+        <label>
+          <span>A/S 전화번호</span>
+          <input className="input" value={form.asTelephone} onChange={(event) => update("asTelephone", event.target.value)} placeholder="예: 010-0000-0000" />
+        </label>
+        <label>
+          <span>A/S 안내</span>
+          <input className="input" value={form.asGuideContent} onChange={(event) => update("asGuideContent", event.target.value)} placeholder="예: 구매처 고객센터로 문의" />
         </label>
         <div className="wide form-field">
           <span>대표 이미지 URL</span>

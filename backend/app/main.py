@@ -257,6 +257,19 @@ def init_db() -> None:
             ("external_url", "ALTER TABLE listing_drafts ADD COLUMN external_url TEXT NOT NULL DEFAULT ''"),
             ("last_publish_attempt_at", "ALTER TABLE listing_drafts ADD COLUMN last_publish_attempt_at TEXT"),
             ("publish_error", "ALTER TABLE listing_drafts ADD COLUMN publish_error TEXT NOT NULL DEFAULT ''"),
+            ("brand_name", "ALTER TABLE listing_drafts ADD COLUMN brand_name TEXT NOT NULL DEFAULT ''"),
+            ("manufacturer_name", "ALTER TABLE listing_drafts ADD COLUMN manufacturer_name TEXT NOT NULL DEFAULT ''"),
+            ("model_name", "ALTER TABLE listing_drafts ADD COLUMN model_name TEXT NOT NULL DEFAULT ''"),
+            ("origin_area_code", "ALTER TABLE listing_drafts ADD COLUMN origin_area_code TEXT NOT NULL DEFAULT ''"),
+            ("origin_area_name", "ALTER TABLE listing_drafts ADD COLUMN origin_area_name TEXT NOT NULL DEFAULT ''"),
+            ("product_info_notice_type", "ALTER TABLE listing_drafts ADD COLUMN product_info_notice_type TEXT NOT NULL DEFAULT ''"),
+            ("product_info_notice_content", "ALTER TABLE listing_drafts ADD COLUMN product_info_notice_content TEXT NOT NULL DEFAULT ''"),
+            ("delivery_method", "ALTER TABLE listing_drafts ADD COLUMN delivery_method TEXT NOT NULL DEFAULT ''"),
+            ("delivery_company_code", "ALTER TABLE listing_drafts ADD COLUMN delivery_company_code TEXT NOT NULL DEFAULT ''"),
+            ("return_delivery_fee", "ALTER TABLE listing_drafts ADD COLUMN return_delivery_fee INTEGER NOT NULL DEFAULT 0"),
+            ("exchange_delivery_fee", "ALTER TABLE listing_drafts ADD COLUMN exchange_delivery_fee INTEGER NOT NULL DEFAULT 0"),
+            ("as_telephone", "ALTER TABLE listing_drafts ADD COLUMN as_telephone TEXT NOT NULL DEFAULT ''"),
+            ("as_guide_content", "ALTER TABLE listing_drafts ADD COLUMN as_guide_content TEXT NOT NULL DEFAULT ''"),
         ]
         for column, statement in listing_column_migrations:
             if column not in listing_columns:
@@ -376,6 +389,19 @@ class ListingDraftPayload(BaseModel):
     image_url: str = ""
     option_name: str = ""
     description: str = ""
+    brand_name: str = ""
+    manufacturer_name: str = ""
+    model_name: str = ""
+    origin_area_code: str = ""
+    origin_area_name: str = ""
+    product_info_notice_type: str = ""
+    product_info_notice_content: str = ""
+    delivery_method: str = ""
+    delivery_company_code: str = ""
+    return_delivery_fee: int = 0
+    exchange_delivery_fee: int = 0
+    as_telephone: str = ""
+    as_guide_content: str = ""
 
 
 class ListingApprovePayload(BaseModel):
@@ -412,10 +438,18 @@ def validate_listing_draft_data(draft: dict[str, Any]) -> dict[str, Any]:
     require_text("category_id", "네이버 카테고리 ID")
     require_text("image_url", "대표 이미지 URL")
     require_text("description", "상세설명")
+    require_text("origin_area_name", "원산지")
+    require_text("product_info_notice_type", "상품정보제공고시 유형")
+    require_text("product_info_notice_content", "상품정보제공고시 내용")
+    require_text("delivery_method", "배송방법")
+    require_text("as_telephone", "A/S 전화번호")
+    require_text("as_guide_content", "A/S 안내")
 
     sale_price = parse_price(draft.get("sale_price"))
     stock_quantity = parse_price(draft.get("stock_quantity"))
     shipping_fee = parse_price(draft.get("shipping_fee"))
+    return_delivery_fee = parse_price(draft.get("return_delivery_fee"))
+    exchange_delivery_fee = parse_price(draft.get("exchange_delivery_fee"))
 
     if sale_price <= 0:
         missing.append({"field": "sale_price", "label": "판매가"})
@@ -423,6 +457,10 @@ def validate_listing_draft_data(draft: dict[str, Any]) -> dict[str, Any]:
         missing.append({"field": "stock_quantity", "label": "재고"})
     if shipping_fee < 0:
         missing.append({"field": "shipping_fee", "label": "배송비"})
+    if return_delivery_fee < 0:
+        missing.append({"field": "return_delivery_fee", "label": "반품배송비"})
+    if exchange_delivery_fee < 0:
+        missing.append({"field": "exchange_delivery_fee", "label": "교환배송비"})
 
     title = str(draft.get("title") or "").strip()
     description = str(draft.get("description") or "").strip()
@@ -435,6 +473,10 @@ def validate_listing_draft_data(draft: dict[str, Any]) -> dict[str, Any]:
         warnings.append("대표 이미지 URL은 http/https 주소여야 합니다.")
     if not str(draft.get("source_url") or "").strip():
         warnings.append("원본 상품 링크가 없어 추적이 어렵습니다.")
+    if not str(draft.get("brand_name") or "").strip():
+        warnings.append("브랜드가 없는 경우 카테고리에 따라 네이버 등록 시 추가 확인이 필요할 수 있습니다.")
+    if not str(draft.get("manufacturer_name") or "").strip():
+        warnings.append("제조사가 없는 경우 카테고리에 따라 네이버 등록 시 추가 확인이 필요할 수 있습니다.")
 
     return {
         "ready": len(missing) == 0,
@@ -464,13 +506,34 @@ def build_smartstore_publish_request(draft: dict[str, Any], validation: dict[str
             "representative_image_url": draft.get("image_url", ""),
             "option_name": draft.get("option_name", ""),
             "detail_content": draft.get("description", ""),
-            "delivery_fee": parse_price(draft.get("shipping_fee")),
+            "brand_name": draft.get("brand_name", ""),
+            "manufacturer_name": draft.get("manufacturer_name", ""),
+            "model_name": draft.get("model_name", ""),
+            "origin_area": {
+                "code": draft.get("origin_area_code", ""),
+                "name": draft.get("origin_area_name", ""),
+            },
+            "product_info_provided_notice": {
+                "type": draft.get("product_info_notice_type", ""),
+                "content": draft.get("product_info_notice_content", ""),
+            },
+            "delivery": {
+                "method": draft.get("delivery_method", ""),
+                "company_code": draft.get("delivery_company_code", ""),
+                "base_fee": parse_price(draft.get("shipping_fee")),
+                "return_fee": parse_price(draft.get("return_delivery_fee")),
+                "exchange_fee": parse_price(draft.get("exchange_delivery_fee")),
+            },
+            "after_service": {
+                "telephone": draft.get("as_telephone", ""),
+                "guide_content": draft.get("as_guide_content", ""),
+            },
         },
         "validation": validation,
         "required_before_live_publish": [
-            "네이버 상품정보제공고시 유형/항목",
-            "배송/반품 템플릿 또는 배송정책",
-            "원산지/제조사/브랜드 등 카테고리별 필수 속성",
+            "네이버 카테고리별 옵션/속성 API 결과와 필드 재검증",
+            "네이버 이미지 업로드 API로 대표/상세 이미지 전환",
+            "배송/반품 템플릿 ID 또는 실제 배송정책 매핑",
             "권리 확보된 대표/상세 이미지 업로드",
         ],
         "prepared_at": now(),
@@ -1251,9 +1314,12 @@ def create_listing_draft(payload: ListingDraftPayload) -> dict[str, Any]:
             INSERT INTO listing_drafts (
                 id, source_item_id, source, mall, source_url, target_platforms_json,
                 title, sale_price, display_price, shipping_fee, category_id, stock_quantity,
-                image_url, option_name, description, status, platform_status_json, created_at, updated_at
+                image_url, option_name, description, brand_name, manufacturer_name, model_name,
+                origin_area_code, origin_area_name, product_info_notice_type, product_info_notice_content,
+                delivery_method, delivery_company_code, return_delivery_fee, exchange_delivery_fee,
+                as_telephone, as_guide_content, status, platform_status_json, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 draft_id,
@@ -1271,6 +1337,19 @@ def create_listing_draft(payload: ListingDraftPayload) -> dict[str, Any]:
                 payload.image_url,
                 payload.option_name,
                 payload.description,
+                payload.brand_name,
+                payload.manufacturer_name,
+                payload.model_name,
+                payload.origin_area_code,
+                payload.origin_area_name,
+                payload.product_info_notice_type,
+                payload.product_info_notice_content,
+                payload.delivery_method,
+                payload.delivery_company_code,
+                max(payload.return_delivery_fee, 0),
+                max(payload.exchange_delivery_fee, 0),
+                payload.as_telephone,
+                payload.as_guide_content,
                 "draft",
                 json.dumps({platform: "draft" for platform in target_platforms}, ensure_ascii=False),
                 timestamp,

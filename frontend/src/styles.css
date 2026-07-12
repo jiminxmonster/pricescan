@@ -762,6 +762,26 @@ td { font-size: 14px; }
 .publish-form-grid .wide {
   grid-column: 1 / -1;
 }
+.form-section-title {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid #dbe7f5;
+  border-radius: 4px;
+  background: #f6f9fd;
+  padding: 10px 12px;
+}
+.form-section-title strong {
+  color: var(--brand);
+  font-size: 14px;
+  letter-spacing: -0.02em;
+}
+.form-section-title span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 850;
+}
 .image-input-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
