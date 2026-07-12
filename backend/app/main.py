@@ -408,6 +408,10 @@ class ListingApprovePayload(BaseModel):
     target_platforms: list[str] = ["smartstore"]
 
 
+class ListingDraftImagePayload(BaseModel):
+    image_url: str = Field(min_length=1)
+
+
 def parse_json_text(value: str | None, fallback: Any) -> Any:
     if not value:
         return fallback
@@ -1407,6 +1411,64 @@ def delete_listing_draft(draft_id: str) -> dict[str, str]:
         db.execute("DELETE FROM listing_drafts WHERE id = ?", (draft_id,))
     log_event(f"listing draft deleted: {row['title']}")
     return {"status": "deleted", "id": draft_id}
+
+
+@app.put("/listing-drafts/{draft_id}/image", dependencies=[Depends(require_admin)])
+def update_listing_draft_image(draft_id: str, payload: ListingDraftImagePayload) -> dict[str, Any]:
+    image_url = payload.image_url.strip()
+    if not image_url:
+        raise HTTPException(status_code=400, detail="대표 이미지 URL이 필요합니다.")
+    if not image_url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="대표 이미지 URL은 http/https 주소여야 합니다.")
+
+    with connect() as db:
+        row = db.execute("SELECT * FROM listing_drafts WHERE id = ?", (draft_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Listing draft not found")
+
+        draft_data = row_to_dict(row) or {}
+        draft_data["image_url"] = image_url
+        validation = validate_listing_draft_data(draft_data)
+        status = row["status"]
+        publish_error = row["publish_error"]
+        platform_status = parse_json_text(row["platform_status_json"], {})
+        publish_request = parse_json_text(row["publish_request_json"], {})
+
+        if status in {"validated", "validation_failed"}:
+            status = "validated" if validation["ready"] else "validation_failed"
+            platform_status["smartstore"] = status
+            publish_error = "" if validation["ready"] else "필수값 부족"
+        elif status == "publish_ready":
+            if validation["ready"]:
+                publish_request = build_smartstore_publish_request(draft_data, validation)
+                platform_status["smartstore"] = "protected_ready"
+                publish_error = ""
+            else:
+                status = "validation_failed"
+                platform_status["smartstore"] = "validation_failed"
+                publish_error = "필수값 부족"
+
+        db.execute(
+            """
+            UPDATE listing_drafts
+            SET image_url = ?, validation_json = ?, publish_request_json = ?,
+                status = ?, platform_status_json = ?, publish_error = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                image_url,
+                json.dumps(validation, ensure_ascii=False),
+                json.dumps(publish_request, ensure_ascii=False),
+                status,
+                json.dumps(platform_status, ensure_ascii=False),
+                publish_error,
+                now(),
+                draft_id,
+            ),
+        )
+        updated = db.execute("SELECT * FROM listing_drafts WHERE id = ?", (draft_id,)).fetchone()
+    log_event(f"listing draft image updated: {row['title']}")
+    return listing_draft_row_to_dict(updated)
 
 
 @app.post("/listing-drafts/{draft_id}/validate", dependencies=[Depends(require_admin)])

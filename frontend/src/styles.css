@@ -1034,6 +1034,31 @@ textarea {
   display: grid;
   gap: 3px;
 }
+.draft-title-line {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+.draft-thumb {
+  width: 42px;
+  height: 42px;
+  flex: 0 0 auto;
+  object-fit: cover;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #fff;
+}
+.draft-thumb.empty {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: #eef4fb;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 950;
+  letter-spacing: 0.04em;
+}
 .draft-main small {
   color: var(--muted);
   font-size: 12px;

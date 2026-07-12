@@ -817,6 +817,7 @@ export default function App() {
   const [smartstoreError, setSmartstoreError] = useState("");
   const [showSourcePanel, setShowSourcePanel] = useState(false);
   const [draftSourceItem, setDraftSourceItem] = useState<DraftSourceItem | null>(null);
+  const [draftImageUploading, setDraftImageUploading] = useState<Record<string, boolean>>({});
   const [draftForm, setDraftForm] = useState<DraftForm>({
     targetPlatforms: ["smartstore"],
     title: "",
@@ -1219,6 +1220,25 @@ export default function App() {
     return imageUrl;
   };
 
+  const uploadApprovedDraftImage = async (draftId: string, file: File) => {
+    setDraftImageUploading((current) => ({ ...current, [draftId]: true }));
+    try {
+      const imageUrl = await uploadDraftImage(file);
+      const draft = await request<ListingDraft>(`/listing-drafts/${draftId}/image`, token, {
+        method: "PUT",
+        body: JSON.stringify({ image_url: imageUrl }),
+      });
+      updateDraftState(draft);
+      setNotice("등록 초안 대표 이미지 저장 완료");
+      await refreshPublishData();
+      await refreshLogs();
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "이미지 업로드 실패");
+    } finally {
+      setDraftImageUploading((current) => ({ ...current, [draftId]: false }));
+    }
+  };
+
   const printInvoices = async () => {
     const ids = selectedOrders.length ? selectedOrders : orders.filter((order) => order.status === "ready").map((order) => order.id);
     await request("/invoices/print", token, { method: "POST", body: JSON.stringify({ order_ids: ids }) });
@@ -1491,6 +1511,8 @@ export default function App() {
               onValidateDraft={validateDraft}
               onPreparePublish={preparePublish}
               onDeleteDraft={deleteDraft}
+              onUploadDraftImage={uploadApprovedDraftImage}
+              draftImageUploading={draftImageUploading}
             />
           </section>
         )}
@@ -1831,6 +1853,8 @@ function PublishSetup({
   onValidateDraft,
   onPreparePublish,
   onDeleteDraft,
+  onUploadDraftImage,
+  draftImageUploading,
 }: {
   apiKeys: ApiKey[];
   channels: Channel[];
@@ -1840,6 +1864,8 @@ function PublishSetup({
   onValidateDraft: (draftId: string) => void;
   onPreparePublish: (draftId: string) => void;
   onDeleteDraft: (draftId: string) => void;
+  onUploadDraftImage: (draftId: string, file: File) => void;
+  draftImageUploading: Record<string, boolean>;
 }) {
   const smartstore = apiKeys.find((item) => item.platform === "smartstore");
   const emptyChannels = channels.length > 1 ? channels.slice(1, 4) : [
@@ -1895,24 +1921,46 @@ function PublishSetup({
           <span className="pill blue">{drafts.length}건</span>
         </div>
         <div className="draft-list">
-          {drafts.map((draft) => (
-            <div className="draft-row" key={draft.id}>
-              <div className="draft-main">
-                <strong>{draft.title}</strong>
-                <small>{draftMissingLabels(draft) ? `누락: ${draftMissingLabels(draft)}` : "필수값 상태 확인 가능"}</small>
+          {drafts.map((draft) => {
+            const isUploading = Boolean(draftImageUploading[draft.id]);
+            const imageLabel = draft.image_url ? "대표 이미지 등록됨" : "대표 이미지 미선택";
+            return (
+              <div className="draft-row" key={draft.id}>
+                <div className="draft-main">
+                  <div className="draft-title-line">
+                    {draft.image_url ? <img className="draft-thumb" src={draft.image_url} alt="" /> : <span className="draft-thumb empty">IMG</span>}
+                    <div>
+                      <strong>{draft.title}</strong>
+                      <small>{draftMissingLabels(draft) ? `누락: ${draftMissingLabels(draft)}` : imageLabel}</small>
+                    </div>
+                  </div>
+                </div>
+                <span>{draft.target_platforms.includes("smartstore") ? "네이버 스마트스토어" : draft.target_platforms.join(", ")}</span>
+                <span>{money(draft.display_price || draft.sale_price)}</span>
+                <span className={pillClass(draft.status)}>{statusLabel(draft.status)}</span>
+                <div className="draft-row-actions">
+                  <label className={`btn small upload-button ${isUploading ? "disabled" : ""}`}>
+                    {isUploading ? "업로드 중" : draft.image_url ? "이미지 교체" : "이미지 선택"}
+                    <input
+                      type="file"
+                      accept="image/png,image/jpeg,image/webp,image/gif"
+                      disabled={isUploading}
+                      onChange={(event) => {
+                        const file = event.target.files?.[0];
+                        if (file) onUploadDraftImage(draft.id, file);
+                        event.currentTarget.value = "";
+                      }}
+                    />
+                  </label>
+                  <button className="btn small" onClick={() => onValidateDraft(draft.id)}>검사</button>
+                  <button className="btn small primary" onClick={() => onPreparePublish(draft.id)} disabled={draft.status === "published"}>
+                    등록실행
+                  </button>
+                  <button className="btn small danger" onClick={() => onDeleteDraft(draft.id)}>삭제</button>
+                </div>
               </div>
-              <span>{draft.target_platforms.includes("smartstore") ? "네이버 스마트스토어" : draft.target_platforms.join(", ")}</span>
-              <span>{money(draft.display_price || draft.sale_price)}</span>
-              <span className={pillClass(draft.status)}>{statusLabel(draft.status)}</span>
-              <div className="draft-row-actions">
-                <button className="btn small" onClick={() => onValidateDraft(draft.id)}>검사</button>
-                <button className="btn small primary" onClick={() => onPreparePublish(draft.id)} disabled={draft.status === "published"}>
-                  등록실행
-                </button>
-                <button className="btn small danger" onClick={() => onDeleteDraft(draft.id)}>삭제</button>
-              </div>
-            </div>
-          ))}
+            );
+          })}
           {drafts.length === 0 && <div className="draft-row muted-row">아직 등록 초안이 없습니다.</div>}
         </div>
       </div>
