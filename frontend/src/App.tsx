@@ -1462,10 +1462,7 @@ export default function App() {
       return (aIndex === -1 ? 999 : aIndex) - (bIndex === -1 ? 999 : bIndex) || a.label.localeCompare(b.label, "ko");
     });
   const filterKeyword = searchPayload.run?.query || keyword;
-  const detailFilters = buildDetailFilters(filterKeyword, searchPayload.items);
-  const scanTemplateFilters = templateDetailFilters(keyword);
-  const activeTemplateFilters = sanitizeSelectedFilters(selectedDetailFilters, scanTemplateFilters);
-  const activeDetailFilters = sanitizeSelectedFilters(selectedDetailFilters, detailFilters);
+  const activeDetailFilters: SelectedDetailFilters = {};
   const filteredSearchPayload = {
     ...searchPayload,
     items: sortedPriceItems(filterPriceItems(searchPayload.items, activeDetailFilters), sortMode),
@@ -1519,7 +1516,6 @@ export default function App() {
                 )}
               </div>
             )}
-            <span className="pill blue">FastAPI 연결됨</span>
             <button className="btn small" onClick={logout}>로그아웃</button>
           </div>
         </header>
@@ -1549,34 +1545,14 @@ export default function App() {
                 <option value="margin">마진높은순</option>
                 <option value="recent">최근검색순</option>
               </select>
-              <button className="btn orange" onClick={openDetailScan} disabled={collecting}>상세스캔</button>
               <button className="btn primary" onClick={() => runSearch("simple")} disabled={collecting}>스캔</button>
               <button className="btn danger" onClick={stopSearch} disabled={!collecting}>수집 중지</button>
             </div>
-            {showDetailScan && (
-              <DetailScanBuilder
-                filters={scanTemplateFilters}
-                selected={activeTemplateFilters}
-                onToggle={toggleDetailFilter}
-                onClear={() => setSelectedDetailFilters({})}
-                onClose={() => setShowDetailScan(false)}
-                onScan={() => runSearch("detail")}
-                disabled={collecting}
-              />
-            )}
             {Boolean(searchPayload.warnings?.length) && (
               <div className="source-warning">
                 {searchPayload.warnings?.map((warning) => <span key={warning}>{warning}</span>)}
               </div>
             )}
-            <DetailFilterPanel
-              filters={detailFilters}
-              selected={activeDetailFilters}
-              totalCount={searchPayload.items.length}
-              visibleCount={filteredSearchPayload.items.length}
-              onToggle={toggleDetailFilter}
-              onClear={() => setSelectedDetailFilters({})}
-            />
             <SearchResultList
               payload={filteredSearchPayload}
               keyword={filterKeyword}
@@ -1823,13 +1799,27 @@ function StatCard({ label, value }: { label: string; value: number }) {
 }
 
 function PublishStatusBar({ apiKeys }: { apiKeys: ApiKey[] }) {
-  const active = isSmartstoreActive(apiKeys);
+  const connected = new Set(apiKeys.filter((item) => item.status === "connected" || item.status === "configured").map((item) => item.platform));
+  const platforms = [
+    { key: "smartstore", label: "네이버스마트", active: isSmartstoreActive(apiKeys), status: "자동등록" },
+    { key: "coupang", label: "쿠팡", active: connected.has("coupang"), status: "대기" },
+    { key: "elevenst", label: "11번가", active: connected.has("elevenst"), status: "대기" },
+    { key: "gmarket", label: "G마켓", active: connected.has("gmarket"), status: "대기" },
+    { key: "auction", label: "옥션", active: connected.has("auction"), status: "대기" },
+    { key: "danawa", label: "다나와", active: connected.has("danawa"), status: "대기" },
+    { key: "enuri", label: "에누리", active: connected.has("enuri"), status: "대기" },
+  ];
   return (
     <div className="publish-status-bar" aria-label="쇼핑몰 자동등록 연결 상태">
-      <span className={`status-dot ${active ? "on" : ""}`} />
-      <strong>네이버스마트({active ? "o" : "-"})</strong>
-      <em>{active ? "활성화" : "미연결"}</em>
-      <span className="status-empty">+ 쇼핑몰 추가 대기</span>
+      <div className="publish-status-track">
+        {platforms.map((platform) => (
+          <span className={`publish-status-item ${platform.active ? "active" : ""}`} key={platform.key}>
+            <span className={`status-dot ${platform.active ? "on" : ""}`} />
+            <strong>{platform.label}</strong>
+            <em>{platform.active ? "활성화" : platform.status}</em>
+          </span>
+        ))}
+      </div>
     </div>
   );
 }
@@ -2600,10 +2590,63 @@ function SearchResultList({
         };
       })
     : [];
-  const rows = [...priceRows, ...storeRows];
+  const rows = [...priceRows, ...storeRows].sort((a, b) => a.displayPrice - b.displayPrice || a.salePrice - b.salePrice || a.name.localeCompare(b.name, "ko"));
   const positivePrices = rows.map((row) => row.displayPrice).filter((value) => value > 0);
   const fallbackBaseline = positivePrices.length ? Math.min(...positivePrices) : 0;
   const baselineTotal = payload.summary.baseline_total || fallbackBaseline;
+  const lowestTotal = positivePrices.length ? Math.min(...positivePrices) : 0;
+  const lowestRows = lowestTotal ? rows.filter((row) => row.displayPrice === lowestTotal) : [];
+  const comparisonRows = lowestTotal ? rows.filter((row) => row.displayPrice !== lowestTotal) : rows;
+
+  const renderResultRow = (row: SearchResultRow, isLowest: boolean) => {
+    const margin = row.displayPrice - baselineTotal;
+    const compareRate = baselineTotal ? (margin / baselineTotal) * 100 : 0;
+    const marginRate = row.displayPrice ? (margin / row.displayPrice) * 100 : 0;
+    return (
+      <div className={`result-row ${isLowest ? "lowest-row" : ""} ${row.status === "baseline" ? "baseline-row" : ""}`} key={row.id}>
+        <a className="result-model" href={row.url} target="_blank" rel="noreferrer">{row.name}</a>
+        <span className="result-colon">:</span>
+        <span className="source-chip">{sourceLabel(row.collectionSource)}</span>
+        <span>판매처 {row.mall}</span>
+        <span>/ 판매가 {money(row.salePrice)}</span>
+        <span>/ 노출가 {money(row.displayPrice)}</span>
+        <span>/ 비교율 {percent(compareRate)}</span>
+        <span>/ 마진율 {percent(marginRate)}</span>
+        {isLowest && <span className="pill green">최저가</span>}
+        {row.source === "price" && row.status && <span className={pillClass(row.status)}>{statusLabel(row.status)}</span>}
+        {row.source === "price" && (
+          <span className="result-actions">
+            <button className="btn small" onClick={() => onBaseline(row.id)}>기준</button>
+            <button className="btn small danger" onClick={() => onExclude(row.id)}>{row.isExcluded ? "복구" : "제외"}</button>
+            <button className="btn small orange" onClick={() => onOpenPublish({
+              sourceItemId: row.sourceItemId,
+              source: row.collectionSource,
+              mall: row.mall,
+              name: row.name,
+              salePrice: row.salePrice,
+              displayPrice: row.displayPrice,
+              shippingFee: row.shippingFee,
+              url: row.url,
+            })}>상품등록</button>
+          </span>
+        )}
+        {row.source === "smartstore" && (
+          <span className="result-actions">
+            <button className="btn small orange" onClick={() => onOpenPublish({
+              sourceItemId: row.sourceItemId,
+              source: row.collectionSource,
+              mall: row.mall,
+              name: row.name,
+              salePrice: row.salePrice,
+              displayPrice: row.displayPrice,
+              shippingFee: row.shippingFee,
+              url: row.url,
+            })}>상품등록</button>
+          </span>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div className="result-list">
@@ -2613,54 +2656,11 @@ function SearchResultList({
       </div>
       {smartstoreError && <div className="source-warning"><span>{smartstoreError}</span></div>}
       {smartstoreLoading && <div className="result-row muted-row">스마트스토어 상품정보 조회 중...</div>}
-      {rows.map((row) => {
-        const margin = row.displayPrice - baselineTotal;
-        const compareRate = baselineTotal ? (margin / baselineTotal) * 100 : 0;
-        const marginRate = row.displayPrice ? (margin / row.displayPrice) * 100 : 0;
-        return (
-          <div className={`result-row ${row.status === "baseline" ? "baseline-row" : ""}`} key={row.id}>
-            <a className="result-model" href={row.url} target="_blank" rel="noreferrer">{row.name}</a>
-            <span className="result-colon">:</span>
-            <span className="source-chip">수집소스 {sourceLabel(row.collectionSource)}</span>
-            <span>판매처 {row.mall}</span>
-            <span>/ 판매가 {money(row.salePrice)}</span>
-            <span>/ 노출가 {money(row.displayPrice)}</span>
-            <span>/ 비교율 {percent(compareRate)}</span>
-            <span>/ 마진율 {percent(marginRate)}</span>
-            {row.source === "price" && row.status && <span className={pillClass(row.status)}>{statusLabel(row.status)}</span>}
-            {row.source === "price" && (
-              <span className="result-actions">
-                <button className="btn small" onClick={() => onBaseline(row.id)}>기준</button>
-                <button className="btn small danger" onClick={() => onExclude(row.id)}>{row.isExcluded ? "복구" : "제외"}</button>
-                <button className="btn small orange" onClick={() => onOpenPublish({
-                  sourceItemId: row.sourceItemId,
-                  source: row.collectionSource,
-                  mall: row.mall,
-                  name: row.name,
-                  salePrice: row.salePrice,
-                  displayPrice: row.displayPrice,
-                  shippingFee: row.shippingFee,
-                  url: row.url,
-                })}>상품등록</button>
-              </span>
-            )}
-            {row.source === "smartstore" && (
-              <span className="result-actions">
-                <button className="btn small orange" onClick={() => onOpenPublish({
-                  sourceItemId: row.sourceItemId,
-                  source: row.collectionSource,
-                  mall: row.mall,
-                  name: row.name,
-                  salePrice: row.salePrice,
-                  displayPrice: row.displayPrice,
-                  shippingFee: row.shippingFee,
-                  url: row.url,
-                })}>상품등록</button>
-              </span>
-            )}
-          </div>
-        );
-      })}
+      {lowestRows.map((row) => renderResultRow(row, true))}
+      {lowestRows.length > 0 && comparisonRows.length > 0 && (
+        <div className="result-divider">비교 대상 리스트</div>
+      )}
+      {comparisonRows.map((row) => renderResultRow(row, false))}
       {rows.length === 0 && !smartstoreLoading && <div className="result-row muted-row">검색 결과가 없습니다.</div>}
     </div>
   );
