@@ -1556,6 +1556,7 @@ export default function App() {
             <SearchResultList
               payload={filteredSearchPayload}
               keyword={filterKeyword}
+              sortMode={sortMode}
               smartstorePayload={smartstorePayload}
               includeSmartstore={selectedSources.includes("smartstore")}
               smartstoreLoading={smartstoreLoading}
@@ -1660,6 +1661,7 @@ export default function App() {
             <SearchResultList
               payload={filteredSearchPayload}
               keyword={filterKeyword}
+              sortMode={sortMode}
               smartstorePayload={{ items: [], count: 0, page: 1, size: 0 }}
               includeSmartstore={false}
               smartstoreLoading={false}
@@ -2533,14 +2535,31 @@ type SearchResultRow = {
   displayPrice: number;
   shippingFee: number;
   url: string;
+  collectedAt: string;
   source: "price" | "smartstore";
   status?: PriceItem["status"];
   isExcluded?: number;
 };
 
+function sortResultRows(rows: SearchResultRow[], sortMode: string, lowestTotal: number): SearchResultRow[] {
+  const sorted = [...rows];
+  if (sortMode === "margin") {
+    return sorted.sort((a, b) => {
+      const aMargin = lowestTotal ? a.displayPrice - lowestTotal : 0;
+      const bMargin = lowestTotal ? b.displayPrice - lowestTotal : 0;
+      return bMargin - aMargin || a.displayPrice - b.displayPrice || a.name.localeCompare(b.name, "ko");
+    });
+  }
+  if (sortMode === "recent") {
+    return sorted.sort((a, b) => b.collectedAt.localeCompare(a.collectedAt) || a.displayPrice - b.displayPrice || a.name.localeCompare(b.name, "ko"));
+  }
+  return sorted.sort((a, b) => a.displayPrice - b.displayPrice || a.salePrice - b.salePrice || a.name.localeCompare(b.name, "ko"));
+}
+
 function SearchResultList({
   payload,
   keyword,
+  sortMode,
   smartstorePayload,
   includeSmartstore,
   smartstoreLoading,
@@ -2551,6 +2570,7 @@ function SearchResultList({
 }: {
   payload: SearchPayload;
   keyword: string;
+  sortMode: string;
   smartstorePayload: SmartstorePayload;
   includeSmartstore: boolean;
   smartstoreLoading: boolean;
@@ -2569,6 +2589,7 @@ function SearchResultList({
     displayPrice: item.total,
     shippingFee: item.shipping,
     url: item.url,
+    collectedAt: item.collected_at,
     source: "price",
     status: item.status,
     isExcluded: item.is_excluded,
@@ -2586,21 +2607,21 @@ function SearchResultList({
           displayPrice: exposedPrice,
           shippingFee: item.delivery_fee,
           url: item.url,
+          collectedAt: "",
           source: "smartstore" as const,
         };
       })
     : [];
-  const rows = [...priceRows, ...storeRows].sort((a, b) => a.displayPrice - b.displayPrice || a.salePrice - b.salePrice || a.name.localeCompare(b.name, "ko"));
-  const positivePrices = rows.map((row) => row.displayPrice).filter((value) => value > 0);
-  const fallbackBaseline = positivePrices.length ? Math.min(...positivePrices) : 0;
-  const baselineTotal = payload.summary.baseline_total || fallbackBaseline;
+  const rawRows = [...priceRows, ...storeRows];
+  const positivePrices = rawRows.map((row) => row.displayPrice).filter((value) => value > 0);
   const lowestTotal = positivePrices.length ? Math.min(...positivePrices) : 0;
-  const lowestRows = lowestTotal ? rows.filter((row) => row.displayPrice === lowestTotal) : [];
-  const comparisonRows = lowestTotal ? rows.filter((row) => row.displayPrice !== lowestTotal) : rows;
+  const rows = sortResultRows(rawRows, sortMode, lowestTotal);
+  const lowestRows = lowestTotal ? sortResultRows(rows.filter((row) => row.displayPrice === lowestTotal), "lowest", lowestTotal) : [];
+  const comparisonRows = lowestTotal ? sortResultRows(rows.filter((row) => row.displayPrice !== lowestTotal), sortMode, lowestTotal) : rows;
 
   const renderResultRow = (row: SearchResultRow, isLowest: boolean) => {
-    const margin = row.displayPrice - baselineTotal;
-    const compareRate = baselineTotal ? (margin / baselineTotal) * 100 : 0;
+    const margin = lowestTotal ? row.displayPrice - lowestTotal : 0;
+    const compareRate = lowestTotal ? (margin / lowestTotal) * 100 : 0;
     const marginRate = row.displayPrice ? (margin / row.displayPrice) * 100 : 0;
     return (
       <div className={`result-row ${isLowest ? "lowest-row" : ""} ${row.status === "baseline" ? "baseline-row" : ""}`} key={row.id}>
