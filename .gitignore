@@ -37,3 +37,4 @@ docker-compose.override.yml
 
 # Local backup archives
 _archive/
+.gstack/

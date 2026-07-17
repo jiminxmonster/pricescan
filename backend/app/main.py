@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import mimetypes
 import os
 import re
@@ -254,6 +255,24 @@ def init_db() -> None:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS prepared_products (
+                id TEXT PRIMARY KEY,
+                dedupe_key TEXT NOT NULL UNIQUE,
+                source_item_id TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT '',
+                mall TEXT NOT NULL DEFAULT '',
+                source_url TEXT NOT NULL DEFAULT '',
+                title TEXT NOT NULL,
+                sale_price INTEGER NOT NULL DEFAULT 0,
+                display_price INTEGER NOT NULL DEFAULT 0,
+                shipping_fee INTEGER NOT NULL DEFAULT 0,
+                image_url TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'prepared',
+                listing_draft_id TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             """
         )
 
@@ -460,6 +479,24 @@ class ListingDraftImagesPayload(BaseModel):
     optional_urls: list[str] = Field(default_factory=list)
     detail_urls: list[str] = Field(default_factory=list)
     detail_content_html: str = ""
+
+
+class PreparedProductPayload(BaseModel):
+    source_item_id: str = ""
+    source: str = ""
+    mall: str = ""
+    source_url: str = ""
+    title: str = Field(min_length=1)
+    sale_price: int = 0
+    display_price: int = 0
+    shipping_fee: int = 0
+    image_url: str = ""
+
+
+def prepared_product_dedupe_key(payload: PreparedProductPayload) -> str:
+    identity = payload.source_item_id.strip() or payload.source_url.strip() or " ".join(payload.title.lower().split())
+    raw_key = "|".join((payload.source.strip().lower(), identity, payload.mall.strip().lower()))
+    return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
 
 
 def parse_json_text(value: str | None, fallback: Any) -> Any:
@@ -1443,6 +1480,90 @@ def channels() -> list[dict[str, Any]]:
     ]
 
 
+@app.get("/prepared-products", dependencies=[Depends(require_admin)])
+def prepared_products() -> list[dict[str, Any]]:
+    with connect() as db:
+        rows = db.execute(
+            "SELECT * FROM prepared_products ORDER BY updated_at DESC LIMIT 300"
+        ).fetchall()
+    return [row_to_dict(row) or {} for row in rows]
+
+
+@app.post("/prepared-products", dependencies=[Depends(require_admin)])
+def prepare_product(payload: PreparedProductPayload) -> dict[str, Any]:
+    dedupe_key = prepared_product_dedupe_key(payload)
+    timestamp = now()
+    with connect() as db:
+        existing = db.execute(
+            "SELECT * FROM prepared_products WHERE dedupe_key = ?",
+            (dedupe_key,),
+        ).fetchone()
+        if existing:
+            db.execute(
+                """
+                UPDATE prepared_products
+                SET source_item_id = ?, source = ?, mall = ?, source_url = ?, title = ?,
+                    sale_price = ?, display_price = ?, shipping_fee = ?, image_url = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    payload.source_item_id.strip(),
+                    payload.source.strip(),
+                    payload.mall.strip(),
+                    payload.source_url.strip(),
+                    payload.title.strip(),
+                    max(payload.sale_price, 0),
+                    max(payload.display_price, 0),
+                    max(payload.shipping_fee, 0),
+                    payload.image_url.strip(),
+                    timestamp,
+                    existing["id"],
+                ),
+            )
+            prepared_id = existing["id"]
+        else:
+            prepared_id = new_id("prepared")
+            db.execute(
+                """
+                INSERT INTO prepared_products (
+                    id, dedupe_key, source_item_id, source, mall, source_url, title,
+                    sale_price, display_price, shipping_fee, image_url, status,
+                    listing_draft_id, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'prepared', '', ?, ?)
+                """,
+                (
+                    prepared_id,
+                    dedupe_key,
+                    payload.source_item_id.strip(),
+                    payload.source.strip(),
+                    payload.mall.strip(),
+                    payload.source_url.strip(),
+                    payload.title.strip(),
+                    max(payload.sale_price, 0),
+                    max(payload.display_price, 0),
+                    max(payload.shipping_fee, 0),
+                    payload.image_url.strip(),
+                    timestamp,
+                    timestamp,
+                ),
+            )
+        row = db.execute("SELECT * FROM prepared_products WHERE id = ?", (prepared_id,)).fetchone()
+    log_event(f"product prepared: {payload.title}")
+    return row_to_dict(row) or {}
+
+
+@app.delete("/prepared-products/{prepared_id}", dependencies=[Depends(require_admin)])
+def delete_prepared_product(prepared_id: str) -> dict[str, str]:
+    with connect() as db:
+        row = db.execute("SELECT title FROM prepared_products WHERE id = ?", (prepared_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Prepared product not found")
+        db.execute("DELETE FROM prepared_products WHERE id = ?", (prepared_id,))
+    log_event(f"prepared product deleted: {row['title']}")
+    return {"status": "deleted", "id": prepared_id}
+
+
 @app.get("/listing-drafts", dependencies=[Depends(require_admin)])
 def listing_drafts() -> list[dict[str, Any]]:
     with connect() as db:
@@ -1502,6 +1623,14 @@ def create_listing_draft(payload: ListingDraftPayload) -> dict[str, Any]:
                 timestamp,
                 timestamp,
             ),
+        )
+        db.execute(
+            """
+            UPDATE prepared_products
+            SET status = 'drafting', listing_draft_id = ?, updated_at = ?
+            WHERE source = ? AND source_item_id = ?
+            """,
+            (draft_id, timestamp, payload.source, payload.source_item_id),
         )
         row = db.execute("SELECT * FROM listing_drafts WHERE id = ?", (draft_id,)).fetchone()
     log_event(f"listing draft created: {payload.title}")
@@ -1654,6 +1783,14 @@ def delete_listing_draft(draft_id: str) -> dict[str, str]:
         row = db.execute("SELECT title FROM listing_drafts WHERE id = ?", (draft_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Listing draft not found")
+        db.execute(
+            """
+            UPDATE prepared_products
+            SET status = 'prepared', listing_draft_id = '', updated_at = ?
+            WHERE listing_draft_id = ?
+            """,
+            (now(), draft_id),
+        )
         db.execute("DELETE FROM listing_drafts WHERE id = ?", (draft_id,))
     log_event(f"listing draft deleted: {row['title']}")
     return {"status": "deleted", "id": draft_id}

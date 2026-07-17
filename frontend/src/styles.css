@@ -1340,6 +1340,110 @@ textarea {
 .smartstore-table {
   min-width: 1040px;
 }
+.monitoring-board {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+.monitoring-panel {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #f8fafc;
+  overflow: hidden;
+}
+.monitoring-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--line);
+  background: #fff;
+  padding: 14px;
+}
+.monitoring-panel-head > div {
+  display: grid;
+  gap: 3px;
+}
+.monitoring-panel-head strong {
+  color: var(--text);
+  font-size: 17px;
+}
+.monitoring-panel-head span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+.monitoring-panel-head b {
+  display: grid;
+  place-items: center;
+  min-width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  background: var(--brand-soft);
+  color: var(--brand);
+}
+.monitoring-list {
+  display: grid;
+  gap: 1px;
+  max-height: 680px;
+  overflow: auto;
+  background: var(--line);
+}
+.monitoring-item {
+  display: grid;
+  gap: 8px;
+  background: #fff;
+  padding: 14px;
+}
+.monitoring-item-title {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+.monitoring-item-title a,
+.monitoring-item-title > strong {
+  color: var(--brand);
+  font-weight: 900;
+  line-height: 1.45;
+  text-decoration: none;
+}
+.monitoring-item-title a:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.monitoring-item p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+.monitoring-price,
+.monitoring-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.monitoring-price span {
+  color: var(--muted);
+  font-size: 12px;
+}
+.monitoring-actions {
+  justify-content: flex-end;
+}
+.monitoring-empty {
+  display: grid;
+  place-items: center;
+  gap: 10px;
+  min-height: 140px;
+  background: #fff;
+  padding: 20px;
+  color: var(--muted);
+  text-align: center;
+  font-weight: 800;
+}
 .mt { margin-top: 14px; }
 .settings-grid {
   display: grid;
@@ -1436,6 +1540,9 @@ textarea {
     grid-template-columns: 1fr;
   }
   .smartstore-form-layout {
+    grid-template-columns: 1fr;
+  }
+  .monitoring-board {
     grid-template-columns: 1fr;
   }
   .smartstore-form-nav {
