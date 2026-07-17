@@ -399,7 +399,14 @@ async function request<T>(path: string, token: string, options: RequestInit = {}
     },
   });
   if (!response.ok) {
-    const detail = await response.text();
+    const body = await response.text();
+    let detail = body;
+    try {
+      const parsed = JSON.parse(body) as { detail?: string };
+      detail = parsed.detail || body;
+    } catch {
+      // Keep non-JSON error responses as-is.
+    }
     throw new Error(detail || `Request failed: ${response.status}`);
   }
   return response.json() as Promise<T>;
@@ -441,6 +448,8 @@ function statusLabel(status: string): string {
     validation_failed: "필수값 부족",
     publish_ready: "등록준비",
     protected_ready: "보호모드 준비",
+    publishing: "네이버 등록 중",
+    publish_failed: "등록 실패",
     published: "등록완료",
     prepared: "예비상품",
     drafting: "등록폼 작성중",
@@ -484,7 +493,7 @@ function isSmartstoreActive(apiKeys: ApiKey[]): boolean {
 function pillClass(status: string): string {
   if (["baseline", "ready", "connected", "printed", "validated", "publish_ready", "published", "protected_ready"].includes(status)) return "pill green";
   if (["abnormal", "warning", "address_check"].includes(status)) return "pill orange";
-  if (["excluded", "not_configured", "validation_failed"].includes(status)) return "pill red";
+  if (["excluded", "not_configured", "validation_failed", "publish_failed"].includes(status)) return "pill red";
   return "pill blue";
 }
 
@@ -1373,6 +1382,11 @@ export default function App() {
     if (saved) await preparePublish(saved.id);
   };
 
+  const saveAndPublishLiveEditingDraft = async () => {
+    const saved = await saveEditingDraft();
+    if (saved) await publishLive(saved.id);
+  };
+
   const validateDraft = async (draftId: string) => {
     const draft = await request<ListingDraft>(`/listing-drafts/${draftId}/validate`, token, { method: "POST" });
     updateDraftState(draft);
@@ -1390,6 +1404,29 @@ export default function App() {
       setNotice("등록실행 준비 완료 · 보호모드로 요청값을 저장했습니다.");
     } else {
       setNotice(`등록실행 전 필수값 보완 필요: ${missing || "확인 필요"}`);
+    }
+    await refreshPublishData();
+    await refreshLogs();
+  };
+
+  const publishLive = async (draftId: string) => {
+    const confirmed = window.confirm(
+      "네이버 스마트스토어에 판매중·전시중 상태로 실제 상품을 등록합니다. 등록 후에는 스마트스토어센터에서 수정 또는 판매중지해야 합니다. 계속할까요?",
+    );
+    if (!confirmed) return;
+    setNotice("네이버 이미지 업로드 및 실제 상품등록을 진행 중입니다.");
+    try {
+      const draft = await request<ListingDraft>(`/listing-drafts/${draftId}/publish-live`, token, {
+        method: "POST",
+        body: JSON.stringify({ confirmation: "NAVER_LIVE_PUBLISH" }),
+      });
+      updateDraftState(draft);
+      setEditingDraft(draft);
+      setEditingDraftForm(formFromDraft(draft));
+      const productNo = draft.external_channel_product_no || draft.external_product_no;
+      setNotice(`네이버 실제 상품등록 완료${productNo ? ` · 상품번호 ${productNo}` : ""}`);
+    } catch (error) {
+      setNotice(error instanceof Error ? `네이버 실제등록 실패: ${error.message}` : "네이버 실제등록에 실패했습니다.");
     }
     await refreshPublishData();
     await refreshLogs();
@@ -1719,6 +1756,7 @@ export default function App() {
               onTestSmartstore={testSmartstorePublishKey}
               onValidateDraft={validateDraft}
               onPreparePublish={preparePublish}
+              onPublishLive={publishLive}
               onDeleteDraft={deleteDraft}
               onEditDraft={openDraftEditor}
               onUploadDraftImage={uploadApprovedDraftImage}
@@ -1881,7 +1919,10 @@ export default function App() {
                 extraActions={(
                   <>
                     <button className="btn" onClick={saveAndValidateEditingDraft}>저장 후 검사</button>
-                    <button className="btn primary" onClick={saveAndPrepareEditingDraft}>저장 후 등록실행</button>
+                    <button className="btn" onClick={saveAndPrepareEditingDraft}>저장 후 등록 요청 검사</button>
+                    <button className="btn orange" onClick={saveAndPublishLiveEditingDraft} disabled={editingDraft.status === "published" || editingDraft.status === "publishing"}>
+                      저장 후 네이버 실제등록
+                    </button>
                   </>
                 )}
               />
@@ -2216,6 +2257,7 @@ function PublishSetup({
   onTestSmartstore,
   onValidateDraft,
   onPreparePublish,
+  onPublishLive,
   onDeleteDraft,
   onEditDraft,
   onUploadDraftImage,
@@ -2231,6 +2273,7 @@ function PublishSetup({
   onTestSmartstore: (clientId: string, clientSecret: string) => void;
   onValidateDraft: (draftId: string) => void;
   onPreparePublish: (draftId: string) => void;
+  onPublishLive: (draftId: string) => void;
   onDeleteDraft: (draftId: string) => void;
   onEditDraft: (draft: ListingDraft) => void;
   onUploadDraftImage: (draftId: string, file: File) => void;
@@ -2334,6 +2377,13 @@ function PublishSetup({
                       <div>
                         <strong>{draft.title}</strong>
                         <small>{draftMissingLabels(draft) ? `누락: ${draftMissingLabels(draft)}` : imageLabel}</small>
+                        {draft.publish_error && <small className="danger-text">{draft.publish_error}</small>}
+                        {(draft.external_channel_product_no || draft.external_product_no) && (
+                          <small>
+                            네이버 상품번호 {draft.external_channel_product_no || draft.external_product_no}
+                            {draft.external_url && <a href={draft.external_url} target="_blank" rel="noreferrer"> · 스마트스토어센터 열기</a>}
+                          </small>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -2362,8 +2412,11 @@ function PublishSetup({
                     </button>
                     <button className="btn small" onClick={() => onEditDraft(draft)}>등록폼 열기</button>
                     <button className="btn small" onClick={() => onValidateDraft(draft.id)}>검사</button>
-                    <button className="btn small primary" onClick={() => onPreparePublish(draft.id)} disabled={draft.status === "published"}>
-                      등록실행
+                    <button className="btn small" onClick={() => onPreparePublish(draft.id)} disabled={draft.status === "published" || draft.status === "publishing"}>
+                      등록 요청 검사
+                    </button>
+                    <button className="btn small orange" onClick={() => onPublishLive(draft.id)} disabled={draft.status === "published" || draft.status === "publishing"}>
+                      {draft.status === "publishing" ? "등록 중" : "네이버 실제등록"}
                     </button>
                     <button className="btn small danger" onClick={() => onDeleteDraft(draft.id)}>삭제</button>
                   </div>
@@ -2609,11 +2662,24 @@ function PublishDraftPanel({
             </label>
             <label>
               <span>원산지</span>
-              <input className="input" value={form.originAreaName} onChange={(event) => update("originAreaName", event.target.value)} placeholder="예: 대한민국, 중국" />
+              <input
+                className="input"
+                value={form.originAreaName}
+                onChange={(event) => update("originAreaName", event.target.value)}
+                placeholder={form.originAreaCode === "04" ? "원산지를 직접 입력" : "선택한 코드의 참고 설명"}
+              />
             </label>
             <label>
               <span>원산지 코드</span>
-              <input className="input" value={form.originAreaCode} onChange={(event) => update("originAreaCode", event.target.value)} placeholder="네이버 원산지 코드 확인 후 입력" />
+              <select value={form.originAreaCode} onChange={(event) => update("originAreaCode", event.target.value)}>
+                <option value="">선택</option>
+                <option value="00">00 · 국산</option>
+                <option value="01">01 · 원양산</option>
+                <option value="02">02 · 수입산</option>
+                <option value="03">03 · 기타(상세설명 표시)</option>
+                <option value="04">04 · 기타(직접 입력)</option>
+                <option value="05">05 · 원산지 표기 의무 대상 아님</option>
+              </select>
             </label>
             <label>
               <span>상품정보제공고시 유형</span>

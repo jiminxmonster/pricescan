@@ -19,6 +19,7 @@ from typing import Any
 from uuid import uuid4
 
 import bcrypt
+import httpx
 from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -42,6 +43,8 @@ ALLOWED_IMAGE_TYPES = {
     "image/webp": ".webp",
     "image/gif": ".gif",
 }
+NAVER_LIVE_PUBLISH_CONFIRMATION = "NAVER_LIVE_PUBLISH"
+NAVER_PRODUCT_IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/bmp"}
 
 
 app = FastAPI(title="PriceScan API", version="0.1.0")
@@ -470,6 +473,10 @@ class ListingApprovePayload(BaseModel):
     target_platforms: list[str] = ["smartstore"]
 
 
+class ListingLivePublishPayload(BaseModel):
+    confirmation: str
+
+
 class ListingDraftImagePayload(BaseModel):
     image_url: str = Field(min_length=1)
 
@@ -722,6 +729,277 @@ def build_smartstore_publish_request(draft: dict[str, Any], validation: dict[str
         ],
         "prepared_at": now(),
     }
+
+
+def validate_smartstore_live_draft_data(draft: dict[str, Any]) -> dict[str, Any]:
+    validation = validate_listing_draft_data(draft)
+    missing = list(validation["missing"])
+    warnings = list(validation["warnings"])
+    existing_fields = {item["field"] for item in missing}
+
+    def require_live_text(field: str, label: str) -> None:
+        if field not in existing_fields and not str(draft.get(field) or "").strip():
+            missing.append({"field": field, "label": label})
+            existing_fields.add(field)
+
+    images = normalize_draft_images(
+        parse_json_text(str(draft.get("images_json") or "{}"), {}),
+        str(draft.get("image_url") or ""),
+    )
+    require_live_text("category_id", "네이버 리프 카테고리 ID")
+    require_live_text("origin_area_code", "원산지 코드")
+    require_live_text("as_telephone", "A/S 전화번호")
+    if not images["representative_url"]:
+        missing.append({"field": "image_url", "label": "대표 이미지"})
+
+    origin_code = str(draft.get("origin_area_code") or "").strip()
+    if origin_code and origin_code not in {"00", "01", "02", "03", "04", "05"}:
+        missing.append({"field": "origin_area_code", "label": "공식 원산지 코드(00~05)"})
+    if origin_code == "04":
+        require_live_text("origin_area_name", "원산지 직접 입력")
+
+    delivery_method = str(draft.get("delivery_method") or "").strip()
+    if delivery_method not in {"택배/소포/등기", "직접배송"}:
+        missing.append({"field": "delivery_method", "label": "지원 배송방법(택배/소포/등기 또는 직접배송)"})
+    if delivery_method == "택배/소포/등기":
+        require_live_text("delivery_company_code", "택배사 코드")
+
+    return {
+        "ready": len(missing) == 0,
+        "missing": missing,
+        "warnings": warnings,
+        "checked_at": now(),
+    }
+
+
+def naver_notice_payload(draft: dict[str, Any]) -> dict[str, Any]:
+    reference = str(draft.get("product_info_notice_content") or "상품상세 참조").strip() or "상품상세 참조"
+    title = str(draft.get("title") or "상품").strip()
+    model_name = str(draft.get("model_name") or title).strip()
+    manufacturer = str(draft.get("manufacturer_name") or "상품상세 참조").strip()
+    as_director = str(draft.get("as_guide_content") or "상품상세 참조").strip()
+    return {
+        "productInfoProvidedNoticeType": "ETC",
+        "etc": {
+            "returnCostReason": reference,
+            "noRefundReason": reference,
+            "qualityAssuranceStandard": reference,
+            "compensationProcedure": reference,
+            "troubleShootingContents": reference,
+            "itemName": title[:50],
+            "modelName": model_name[:50],
+            "manufacturer": manufacturer[:200],
+            "afterServiceDirector": as_director[:200],
+            "customerServicePhoneNumber": str(draft.get("as_telephone") or "").strip()[:30],
+        },
+    }
+
+
+def build_naver_live_product_payload(draft: dict[str, Any], uploaded_image_urls: list[str]) -> dict[str, Any]:
+    if not uploaded_image_urls:
+        raise RuntimeError("네이버에 등록할 대표 이미지가 없습니다.")
+    shipping_fee = parse_price(draft.get("shipping_fee"))
+    delivery_method = str(draft.get("delivery_method") or "").strip()
+    delivery_type = "DELIVERY" if delivery_method == "택배/소포/등기" else "DIRECT"
+    delivery_info: dict[str, Any] = {
+        "deliveryType": delivery_type,
+        "deliveryAttributeType": "NORMAL",
+        "deliveryFee": {
+            "deliveryFeeType": "PAID" if shipping_fee > 0 else "FREE",
+            "baseFee": shipping_fee,
+            "deliveryFeePayType": "PREPAID",
+        },
+        "claimDeliveryInfo": {
+            "returnDeliveryFee": parse_price(draft.get("return_delivery_fee")),
+            "exchangeDeliveryFee": parse_price(draft.get("exchange_delivery_fee")),
+        },
+    }
+    if delivery_type == "DELIVERY":
+        delivery_info["deliveryCompany"] = str(draft.get("delivery_company_code") or "").strip()
+
+    search_info = {
+        key: value
+        for key, value in {
+            "brandName": str(draft.get("brand_name") or "").strip(),
+            "manufacturerName": str(draft.get("manufacturer_name") or "").strip(),
+            "modelName": str(draft.get("model_name") or "").strip(),
+        }.items()
+        if value
+    }
+    origin_info: dict[str, Any] = {
+        "originAreaCode": str(draft.get("origin_area_code") or "").strip(),
+        "plural": False,
+    }
+    if str(draft.get("origin_area_name") or "").strip():
+        origin_info["content"] = str(draft.get("origin_area_name") or "").strip()
+
+    images = normalize_draft_images(
+        parse_json_text(str(draft.get("images_json") or "{}"), {}),
+        str(draft.get("image_url") or ""),
+    )
+    detail_content = str(draft.get("detail_content_html") or "").strip() or generate_detail_content_html(draft, images)
+    detail_attribute: dict[str, Any] = {
+        "afterServiceInfo": {
+            "afterServiceTelephoneNumber": str(draft.get("as_telephone") or "").strip(),
+            "afterServiceGuideContent": str(draft.get("as_guide_content") or "").strip(),
+        },
+        "originAreaInfo": origin_info,
+        "productInfoProvidedNotice": naver_notice_payload(draft),
+        "minorPurchasable": True,
+    }
+    if search_info:
+        detail_attribute["naverShoppingSearchInfo"] = search_info
+
+    return {
+        "originProduct": {
+            "statusType": "SALE",
+            "saleType": "NEW",
+            "leafCategoryId": str(draft.get("category_id") or "").strip(),
+            "name": str(draft.get("title") or "").strip(),
+            "detailContent": detail_content,
+            "images": {
+                "representativeImage": {"url": uploaded_image_urls[0]},
+                "optionalImages": [{"url": url} for url in uploaded_image_urls[1:10]],
+            },
+            "salePrice": parse_price(draft.get("sale_price")),
+            "stockQuantity": parse_price(draft.get("stock_quantity")),
+            "deliveryInfo": delivery_info,
+            "detailAttribute": detail_attribute,
+        },
+        "smartstoreChannelProduct": {
+            "naverShoppingRegistration": True,
+            "channelProductDisplayStatusType": "ON",
+        },
+    }
+
+
+def naver_api_error(response: httpx.Response) -> str:
+    try:
+        data = response.json()
+    except ValueError:
+        return clean_text(response.text)[:500] or f"HTTP {response.status_code}"
+
+    if not isinstance(data, dict):
+        return clean_text(json.dumps(data, ensure_ascii=False))[:500]
+    message = str(data.get("message") or data.get("detail") or data.get("code") or f"HTTP {response.status_code}")
+    invalid_inputs = data.get("invalidInputs")
+    details: list[str] = []
+    if isinstance(invalid_inputs, list):
+        for item in invalid_inputs:
+            if not isinstance(item, dict):
+                continue
+            field = str(item.get("name") or item.get("field") or "필드")
+            reason = str(item.get("message") or item.get("reason") or "유효하지 않은 값")
+            details.append(f"{field}: {reason}")
+    return " · ".join([message, *details])[:900]
+
+
+def load_publish_image(image_url: str) -> tuple[str, bytes, str]:
+    parsed = urllib.parse.urlparse(image_url)
+    filename = safe_upload_filename(Path(parsed.path).name or "product-image.jpg")
+
+    uploaded_marker = "/uploaded-images/"
+    if uploaded_marker in parsed.path:
+        stored_name = safe_upload_filename(parsed.path.split(uploaded_marker, 1)[1])
+        local_path = UPLOAD_DIR / stored_name
+        if not local_path.is_file():
+            raise RuntimeError(f"서버 이미지 파일을 찾을 수 없습니다: {stored_name}")
+        content = local_path.read_bytes()
+        content_type = mimetypes.guess_type(stored_name)[0] or "application/octet-stream"
+    else:
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise RuntimeError("상품 이미지는 서버 업로드 파일 또는 http/https URL이어야 합니다.")
+        try:
+            with httpx.Client(timeout=20, follow_redirects=True) as client:
+                response = client.get(image_url, headers={"User-Agent": CRAWLER_USER_AGENT, "Accept": "image/*"})
+                response.raise_for_status()
+        except httpx.HTTPError as error:
+            raise RuntimeError(f"상품 이미지를 가져오지 못했습니다: {error}") from error
+        content = response.content
+        content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
+        if not content_type:
+            content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+
+    if not content:
+        raise RuntimeError("빈 상품 이미지는 등록할 수 없습니다.")
+    if len(content) > MAX_IMAGE_UPLOAD_BYTES:
+        raise RuntimeError("네이버 등록 이미지는 장당 8MB 이하여야 합니다.")
+    if content_type not in NAVER_PRODUCT_IMAGE_TYPES:
+        raise RuntimeError("네이버 실제 등록 이미지는 jpg, png, gif, bmp 형식이어야 합니다. webp 이미지는 변환 후 다시 선택하세요.")
+    return filename, content, content_type
+
+
+def collect_response_values(data: Any, keys: set[str]) -> list[str]:
+    values: list[str] = []
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if key in keys and value not in (None, ""):
+                values.append(str(value))
+            if isinstance(value, (dict, list)):
+                values.extend(collect_response_values(value, keys))
+    elif isinstance(data, list):
+        for value in data:
+            values.extend(collect_response_values(value, keys))
+    return values
+
+
+def upload_naver_product_images(access_token: str, image_urls: list[str]) -> list[str]:
+    files: list[tuple[str, tuple[str, bytes, str]]] = []
+    for image_url in image_urls[:10]:
+        filename, content, content_type = load_publish_image(image_url)
+        files.append(("imageFiles", (filename, content, content_type)))
+
+    try:
+        with httpx.Client(timeout=40) as client:
+            response = client.post(
+                f"{NAVER_COMMERCE_API_BASE}/v1/product-images/upload",
+                headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+                files=files,
+            )
+    except httpx.HTTPError as error:
+        raise RuntimeError(f"네이버 상품 이미지 업로드 연결 오류: {error}") from error
+    if response.status_code not in {200, 201}:
+        raise RuntimeError(f"네이버 상품 이미지 업로드 오류: HTTP {response.status_code} · {naver_api_error(response)}")
+
+    try:
+        data = response.json()
+    except ValueError as error:
+        raise RuntimeError("네이버 상품 이미지 업로드 응답을 해석하지 못했습니다.") from error
+    uploaded_urls = collect_response_values(data, {"url", "imageUrl"})
+    uploaded_urls = list(dict.fromkeys(url for url in uploaded_urls if url.startswith(("http://", "https://"))))
+    if len(uploaded_urls) < len(files):
+        raise RuntimeError(f"네이버 이미지 업로드 결과가 부족합니다: 요청 {len(files)}장, 응답 {len(uploaded_urls)}장")
+    return uploaded_urls[: len(files)]
+
+
+def create_naver_product(access_token: str, product_payload: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
+    try:
+        with httpx.Client(timeout=40) as client:
+            response = client.post(
+                f"{NAVER_COMMERCE_API_BASE}/v2/products",
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Accept": "application/json",
+                    "Content-Type": "application/json;charset=UTF-8",
+                },
+                json=product_payload,
+            )
+    except httpx.HTTPError as error:
+        raise RuntimeError(f"네이버 상품등록 연결 오류: {error}") from error
+    if response.status_code not in {200, 201}:
+        raise RuntimeError(f"네이버 상품등록 오류: HTTP {response.status_code} · {naver_api_error(response)}")
+
+    try:
+        data = response.json()
+    except ValueError as error:
+        raise RuntimeError("네이버 상품등록 응답을 해석하지 못했습니다.") from error
+    origin_numbers = collect_response_values(data, {"originProductNo"})
+    channel_numbers = collect_response_values(data, {"smartstoreChannelProductNo", "channelProductNo"})
+    origin_product_no = origin_numbers[0] if origin_numbers else ""
+    channel_product_no = channel_numbers[0] if channel_numbers else ""
+    if not origin_product_no and not channel_product_no:
+        raise RuntimeError("네이버 상품등록 응답에 상품번호가 없습니다. 중복 등록 여부를 스마트스토어센터에서 확인하세요.")
+    return origin_product_no, channel_product_no, data
 
 
 def safe_upload_filename(filename: str) -> str:
@@ -2015,6 +2293,134 @@ def prepare_listing_publish(draft_id: str) -> dict[str, Any]:
         )
         updated = db.execute("SELECT * FROM listing_drafts WHERE id = ?", (draft_id,)).fetchone()
     log_event(f"listing publish request prepared: {row['title']}")
+    return listing_draft_row_to_dict(updated)
+
+
+@app.post("/listing-drafts/{draft_id}/publish-live", dependencies=[Depends(require_admin)])
+def publish_listing_live(draft_id: str, payload: ListingLivePublishPayload) -> dict[str, Any]:
+    if payload.confirmation != NAVER_LIVE_PUBLISH_CONFIRMATION:
+        raise HTTPException(status_code=400, detail="실제 등록 확인값이 올바르지 않습니다.")
+
+    validation_error = ""
+    with connect() as db:
+        row = db.execute("SELECT * FROM listing_drafts WHERE id = ?", (draft_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Listing draft not found")
+        if row["external_product_no"] or row["external_channel_product_no"] or row["status"] == "published":
+            raise HTTPException(status_code=409, detail="이미 네이버에 등록된 상품입니다. 등록 상품번호를 확인하세요.")
+        if row["status"] == "publishing":
+            raise HTTPException(status_code=409, detail="등록 요청이 진행 중입니다. 중복 등록 방지를 위해 다시 요청할 수 없습니다.")
+
+        key = db.execute("SELECT * FROM api_keys WHERE platform = 'smartstore'").fetchone()
+        if not key or key["status"] not in {"connected", "configured"}:
+            raise HTTPException(status_code=400, detail="네이버 스마트스토어 커머스API 연결 테스트를 먼저 완료하세요.")
+
+        draft_data = row_to_dict(row) or {}
+        validation = validate_smartstore_live_draft_data(draft_data)
+        if not validation["ready"]:
+            missing_labels = ", ".join(item["label"] for item in validation["missing"])
+            validation_error = f"실제 등록 필수값 부족: {missing_labels}"
+            db.execute(
+                """
+                UPDATE listing_drafts
+                SET status = 'validation_failed', validation_json = ?, platform_status_json = ?,
+                    publish_error = ?, last_publish_attempt_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    json.dumps(validation, ensure_ascii=False),
+                    json.dumps({"smartstore": "validation_failed"}, ensure_ascii=False),
+                    validation_error,
+                    now(),
+                    now(),
+                    draft_id,
+                ),
+            )
+        else:
+            images = normalize_draft_images(
+                parse_json_text(str(draft_data.get("images_json") or "{}"), {}),
+                str(draft_data.get("image_url") or ""),
+            )
+            image_urls = [images["representative_url"], *images["optional_urls"]]
+            client_id = str(key["client_id"])
+            client_secret = str(key["client_secret"])
+            attempt_at = now()
+            db.execute(
+                """
+                UPDATE listing_drafts
+                SET status = 'publishing', validation_json = ?, publish_mode = 'live',
+                    platform_status_json = ?, publish_error = '', last_publish_attempt_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    json.dumps(validation, ensure_ascii=False),
+                    json.dumps({"smartstore": "publishing"}, ensure_ascii=False),
+                    attempt_at,
+                    attempt_at,
+                    draft_id,
+                ),
+            )
+
+    if validation_error:
+        log_event(f"live listing publish blocked: {draft_data.get('title', '')} · {validation_error}", "warning")
+        raise HTTPException(status_code=400, detail=validation_error)
+
+    try:
+        access_token = fetch_smartstore_access_token(client_id, client_secret)
+        uploaded_image_urls = upload_naver_product_images(access_token, image_urls)
+        product_request = build_naver_live_product_payload(draft_data, uploaded_image_urls)
+        origin_product_no, channel_product_no, response_data = create_naver_product(access_token, product_request)
+    except Exception as error:
+        error_message = str(error)[:1200] or "네이버 실제 상품등록에 실패했습니다."
+        with connect() as db:
+            db.execute(
+                """
+                UPDATE listing_drafts
+                SET status = 'publish_failed', platform_status_json = ?, publish_error = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    json.dumps({"smartstore": "publish_failed"}, ensure_ascii=False),
+                    error_message,
+                    now(),
+                    draft_id,
+                ),
+            )
+        log_event(f"live listing publish failed: {draft_data.get('title', '')} · {error_message}", "error")
+        raise HTTPException(status_code=502, detail=error_message) from error
+
+    publish_request = {
+        "platform": "smartstore",
+        "mode": "live",
+        "request": product_request,
+        "uploaded_image_urls": uploaded_image_urls,
+        "response": response_data,
+        "published_at": now(),
+    }
+    seller_center_url = "https://sell.smartstore.naver.com/#/products/origin-list"
+    with connect() as db:
+        db.execute(
+            """
+            UPDATE listing_drafts
+            SET status = 'published', publish_request_json = ?, publish_mode = 'live',
+                platform_status_json = ?, external_product_no = ?, external_channel_product_no = ?,
+                external_url = ?, publish_error = '', updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                json.dumps(publish_request, ensure_ascii=False),
+                json.dumps({"smartstore": "published"}, ensure_ascii=False),
+                origin_product_no,
+                channel_product_no,
+                seller_center_url,
+                now(),
+                draft_id,
+            ),
+        )
+        updated = db.execute("SELECT * FROM listing_drafts WHERE id = ?", (draft_id,)).fetchone()
+    log_event(
+        f"live listing published: {draft_data.get('title', '')} · origin={origin_product_no} · channel={channel_product_no}"
+    )
     return listing_draft_row_to_dict(updated)
 
 

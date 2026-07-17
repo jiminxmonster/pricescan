@@ -1152,6 +1152,9 @@ textarea {
   font-size: 12px;
   font-weight: 800;
 }
+.draft-main small.danger-text {
+  color: var(--danger);
+}
 .draft-row span {
   color: var(--muted);
   font-weight: 800;
