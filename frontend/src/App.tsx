@@ -1758,11 +1758,14 @@ export default function App() {
             </div>
             <MonitoringBoard
               preparedProducts={preparedProducts}
+              drafts={listingDrafts}
               smartstorePayload={smartstorePayload}
               smartstoreActive={isSmartstoreActive(apiKeys)}
               smartstoreLoading={smartstoreLoading}
               smartstoreError={smartstoreError}
               onOpenDraft={(item) => openPublishDraft(preparedToDraftSource(item))}
+              onEditDraft={openDraftEditor}
+              onValidateDraft={validateDraft}
               onDeletePrepared={deletePreparedProduct}
               onCopySmartstore={copySmartstoreToPrepared}
               onOpenApi={() => {
@@ -2016,21 +2019,27 @@ function StatCard({ label, value }: { label: string; value: number }) {
 
 function MonitoringBoard({
   preparedProducts,
+  drafts,
   smartstorePayload,
   smartstoreActive,
   smartstoreLoading,
   smartstoreError,
   onOpenDraft,
+  onEditDraft,
+  onValidateDraft,
   onDeletePrepared,
   onCopySmartstore,
   onOpenApi,
 }: {
   preparedProducts: PreparedProduct[];
+  drafts: ListingDraft[];
   smartstorePayload: SmartstorePayload;
   smartstoreActive: boolean;
   smartstoreLoading: boolean;
   smartstoreError: string;
   onOpenDraft: (item: PreparedProduct) => void;
+  onEditDraft: (draft: ListingDraft) => void;
+  onValidateDraft: (draftId: string) => void;
   onDeletePrepared: (id: string) => void;
   onCopySmartstore: (item: SmartstoreProduct) => void;
   onOpenApi: () => void;
@@ -2043,7 +2052,10 @@ function MonitoringBoard({
           <b>{preparedProducts.length}</b>
         </div>
         <div className="monitoring-list">
-          {preparedProducts.map((item) => (
+          {preparedProducts.map((item) => {
+            const draft = drafts.find((candidate) => candidate.id === item.listing_draft_id);
+            const missing = draft ? draftMissingLabels(draft) : "";
+            return (
             <article className="monitoring-item" key={item.id}>
               <div className="monitoring-item-title">
                 {item.source_url ? <a href={item.source_url} target="_blank" rel="noreferrer">{item.title}</a> : <strong>{item.title}</strong>}
@@ -2051,12 +2063,25 @@ function MonitoringBoard({
               </div>
               <p>{sourceLabel(item.source)} · {item.mall || "판매처 미확인"}</p>
               <div className="monitoring-price"><strong>{money(item.display_price)}</strong><span>배송비 {money(item.shipping_fee)}</span></div>
+              {draft?.validation?.checked_at && (
+                <div className={`monitoring-validation ${draft.validation.ready ? "ready" : "warning"}`}>
+                  <strong>{draft.validation.ready ? "등록검사 통과" : "등록검사 보완 필요"}</strong>
+                  {!draft.validation.ready && <span>{missing || "필수 항목을 확인하세요."}</span>}
+                </div>
+              )}
               <div className="monitoring-actions">
-                <button className="btn small primary" onClick={() => onOpenDraft(item)}>등록 준비</button>
+                {draft ? (
+                  <>
+                    <button className="btn small primary" onClick={() => onEditDraft(draft)}>등록폼 열기</button>
+                    <button className="btn small" onClick={() => onValidateDraft(draft.id)}>등록검사</button>
+                  </>
+                ) : (
+                  <button className="btn small primary" onClick={() => onOpenDraft(item)}>등록 준비</button>
+                )}
                 <button className="btn small danger" onClick={() => onDeletePrepared(item.id)}>삭제</button>
               </div>
             </article>
-          ))}
+          )})}
           {preparedProducts.length === 0 && <div className="monitoring-empty">상품검색 결과에서 `상품준비`를 눌러 추가하세요.</div>}
         </div>
       </section>
