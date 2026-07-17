@@ -45,6 +45,8 @@ ALLOWED_IMAGE_TYPES = {
 }
 NAVER_LIVE_PUBLISH_CONFIRMATION = "NAVER_LIVE_PUBLISH"
 NAVER_PRODUCT_IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/bmp"}
+SMARTSTORE_CATEGORY_CACHE_TTL = 6 * 60 * 60
+smartstore_category_cache: dict[str, Any] = {"fetched_at": 0.0, "items": []}
 
 
 app = FastAPI(title="PriceScan API", version="0.1.0")
@@ -1175,6 +1177,83 @@ def fetch_smartstore_products(client_id: str, client_secret: str, keyword: str =
     return normalize_smartstore_products(data, keyword)
 
 
+def normalize_smartstore_categories(data: Any) -> list[dict[str, Any]]:
+    categories: list[dict[str, Any]] = []
+
+    def visit(value: Any, parent_path: list[str] | None = None) -> None:
+        path = parent_path or []
+        if isinstance(value, list):
+            for item in value:
+                visit(item, path)
+            return
+        if not isinstance(value, dict):
+            return
+        category_id = str(first_existing(value, ("id", "categoryId", "category_id"))).strip()
+        name = clean_text(str(first_existing(value, ("name", "categoryName", "category_name"))))
+        whole_name = clean_text(str(first_existing(value, ("wholeCategoryName", "wholeName", "path"))))
+        current_path = [*path, name] if name and name not in path else path
+        children = first_existing(value, ("subCategories", "children", "childCategories"), [])
+        has_children = isinstance(children, list) and bool(children)
+        is_leaf = bool(first_existing(value, ("last", "isLast", "leaf", "isLeaf"), False)) or not has_children
+        if category_id and name:
+            categories.append({"id": category_id, "name": name, "path": whole_name or " > ".join(current_path), "is_leaf": is_leaf})
+        if has_children:
+            visit(children, current_path)
+
+    visit(data)
+    return list({category["id"]: category for category in categories}.values())
+
+
+def fetch_smartstore_categories(client_id: str, client_secret: str) -> list[dict[str, Any]]:
+    cached_at = float(smartstore_category_cache.get("fetched_at") or 0)
+    cached_items = smartstore_category_cache.get("items")
+    if isinstance(cached_items, list) and cached_items and time.time() - cached_at < SMARTSTORE_CATEGORY_CACHE_TTL:
+        return cached_items
+    access_token = fetch_smartstore_access_token(client_id, client_secret)
+    status, body = read_url(
+        f"{NAVER_COMMERCE_API_BASE}/v1/categories",
+        {"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+    )
+    if status != 200:
+        raise RuntimeError(f"스마트스토어 카테고리 조회 오류: HTTP {status} · {clean_text(body)[:220]}")
+    try:
+        categories = normalize_smartstore_categories(json.loads(body))
+    except json.JSONDecodeError as error:
+        raise RuntimeError("스마트스토어 카테고리 응답을 JSON으로 해석하지 못했습니다.") from error
+    if not categories:
+        raise RuntimeError("스마트스토어 카테고리 응답에서 카테고리를 찾지 못했습니다.")
+    smartstore_category_cache.update({"fetched_at": time.time(), "items": categories})
+    return categories
+
+
+def smartstore_category_suggestions(categories: list[dict[str, Any]], keyword: str, limit: int = 12) -> list[dict[str, Any]]:
+    keyword_text = clean_text(keyword).lower()
+    tokens = {token for token in re.findall(r"[가-힣a-zA-Z0-9]+", keyword_text) if len(token) >= 2}
+    aliases = {
+        "노트북": ("노트북", "랩탑", "갤럭시북", "맥북", "그램"),
+        "태블릿": ("태블릿", "아이패드", "갤럭시탭"),
+        "모니터": ("모니터", "디스플레이"),
+        "스마트폰": ("스마트폰", "휴대폰", "아이폰", "갤럭시"),
+        "텔레비전": ("tv", "텔레비전", "스마트tv"),
+    }
+    for category_word, words in aliases.items():
+        if any(word in keyword_text for word in words):
+            tokens.add(category_word)
+    scored: list[tuple[int, dict[str, Any]]] = []
+    for category in categories:
+        if not category.get("is_leaf"):
+            continue
+        path = clean_text(str(category.get("path") or category.get("name") or "")).lower()
+        name = str(category.get("name") or "").lower()
+        score = sum(4 if token in name else 2 for token in tokens if token in path)
+        if "노트북" in tokens and any(word in path for word in ("가방", "파우치", "스킨", "보호필름", "액세서리")):
+            score -= 8
+        if score > 0:
+            scored.append((score, category))
+    scored.sort(key=lambda item: (-item[0], len(str(item[1].get("path", ""))), str(item[1].get("path", ""))))
+    return [{**category, "score": score} for score, category in scored[: min(max(limit, 1), 30)]]
+
+
 def parse_danawa_products(document: str, limit: int = 30) -> list[dict[str, Any]]:
     starts = [match.start() for match in re.finditer(r"<li\s+id=[\"']productItem\d+[\"']", document, flags=re.IGNORECASE)]
     blocks = [document[start : starts[index + 1] if index + 1 < len(starts) else len(document)] for index, start in enumerate(starts)]
@@ -1676,6 +1755,23 @@ def smartstore_products(q: str = "", page: int = 1, size: int = 50) -> dict[str,
         "page": max(page, 1),
         "size": min(max(size, 1), 100),
     }
+
+
+@app.get("/smartstore/category-suggestions", dependencies=[Depends(require_admin)])
+def smartstore_categories(q: str, limit: int = 12) -> dict[str, Any]:
+    if not q.strip():
+        raise HTTPException(status_code=400, detail="카테고리를 추천할 상품명을 입력하세요.")
+    with connect() as db:
+        key = db.execute("SELECT * FROM api_keys WHERE platform = 'smartstore'").fetchone()
+        if not key or not key["client_id"] or not key["client_secret"]:
+            raise HTTPException(status_code=400, detail="스마트스토어 커머스API 키를 먼저 저장하세요.")
+    try:
+        categories = fetch_smartstore_categories(key["client_id"], key["client_secret"])
+        items = smartstore_category_suggestions(categories, q, limit)
+    except Exception as error:
+        log_event(f"smartstore category fetch failed: {error}", "warning")
+        raise HTTPException(status_code=502, detail=str(error)) from error
+    return {"items": items, "count": len(items), "query": q}
 
 
 @app.post("/price-search/stop", dependencies=[Depends(require_admin)])

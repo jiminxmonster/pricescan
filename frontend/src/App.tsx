@@ -217,6 +217,14 @@ type SmartstorePayload = {
   size: number;
 };
 
+type SmartstoreCategoryCandidate = {
+  id: string;
+  name: string;
+  path: string;
+  is_leaf: boolean;
+  score: number;
+};
+
 type PreparedProduct = {
   id: string;
   source_item_id: string;
@@ -1943,6 +1951,10 @@ export default function App() {
                 onTogglePlatform={toggleDraftPlatform}
                 onApprove={approveDraft}
                 onUploadImage={uploadDraftImage}
+                onLoadCategoryCandidates={async (keyword) => {
+                  const data = await request<{ items: SmartstoreCategoryCandidate[] }>(`/smartstore/category-suggestions?q=${encodeURIComponent(keyword)}`, token);
+                  return data.items;
+                }}
                 onCancel={() => setDraftSourceItem(null)}
               />
             </div>
@@ -1966,6 +1978,10 @@ export default function App() {
                 onTogglePlatform={toggleEditingDraftPlatform}
                 onApprove={saveEditingDraft}
                 onUploadImage={uploadDraftImage}
+                onLoadCategoryCandidates={async (keyword) => {
+                  const data = await request<{ items: SmartstoreCategoryCandidate[] }>(`/smartstore/category-suggestions?q=${encodeURIComponent(keyword)}`, token);
+                  return data.items;
+                }}
                 onCancel={closeDraftEditor}
                 title="네이버 상품등록 폼"
                 description="스마트스토어 상품등록 화면 흐름에 맞춰 초안 필드를 보완합니다."
@@ -2571,6 +2587,7 @@ function PublishDraftPanel({
   onTogglePlatform,
   onApprove,
   onUploadImage,
+  onLoadCategoryCandidates,
   onCancel,
   title = "상품등록 초안",
   description = "스캔된 상품 정보를 등록폼에 자동 채움했습니다. 이미지/상세설명 권리 확인 후 승인하세요.",
@@ -2585,6 +2602,7 @@ function PublishDraftPanel({
   onTogglePlatform: (platform: string) => void;
   onApprove: () => void;
   onUploadImage: (file: File) => Promise<string>;
+  onLoadCategoryCandidates: (keyword: string) => Promise<SmartstoreCategoryCandidate[]>;
   onCancel: () => void;
   title?: string;
   description?: string;
@@ -2594,6 +2612,9 @@ function PublishDraftPanel({
 }) {
   const [imageUploading, setImageUploading] = useState(false);
   const [imageUploadError, setImageUploadError] = useState("");
+  const [categoryCandidates, setCategoryCandidates] = useState<SmartstoreCategoryCandidate[]>([]);
+  const [categoryLoading, setCategoryLoading] = useState(false);
+  const [categoryError, setCategoryError] = useState("");
   const update = <K extends keyof DraftForm>(key: K, value: DraftForm[K]) => {
     onChange({ ...form, [key]: value });
   };
@@ -2610,6 +2631,20 @@ function PublishDraftPanel({
       setImageUploadError(error instanceof Error ? error.message : "이미지 업로드 실패");
     } finally {
       setImageUploading(false);
+    }
+  };
+  const loadCategoryCandidates = async () => {
+    if (!form.title.trim()) return;
+    setCategoryLoading(true);
+    setCategoryError("");
+    try {
+      const items = await onLoadCategoryCandidates(form.title);
+      setCategoryCandidates(items);
+      if (items.length === 0) setCategoryError("상품명과 일치하는 최종 카테고리를 찾지 못했습니다.");
+    } catch (error) {
+      setCategoryError(error instanceof Error ? error.message : "카테고리 조회 실패");
+    } finally {
+      setCategoryLoading(false);
     }
   };
 
@@ -2665,9 +2700,25 @@ function PublishDraftPanel({
                 </label>
               </div>
             </label>
-            <label>
+            <label className="category-field">
               <span>카테고리 ID</span>
-              <input className="input" value={form.categoryId} onChange={(event) => update("categoryId", event.target.value)} placeholder="네이버 카테고리 ID" />
+              <div className="category-input-row">
+                <input className="input" value={form.categoryId} onChange={(event) => update("categoryId", event.target.value)} placeholder="네이버 리프 카테고리 ID" />
+                <button className="btn" type="button" onClick={loadCategoryCandidates} disabled={categoryLoading || !form.title.trim()}>
+                  {categoryLoading ? "조회 중" : "카테고리 추천"}
+                </button>
+              </div>
+              {categoryCandidates.length > 0 && (
+                <select
+                  className="category-candidate-select"
+                  value={categoryCandidates.some((item) => item.id === form.categoryId) ? form.categoryId : ""}
+                  onChange={(event) => update("categoryId", event.target.value)}
+                >
+                  <option value="">최종 카테고리를 선택하세요</option>
+                  {categoryCandidates.map((item) => <option key={item.id} value={item.id}>{item.path} ({item.id})</option>)}
+                </select>
+              )}
+              {categoryError && <small className="field-error">{categoryError}</small>}
             </label>
             <label className="wide">
               <span>상품명</span>

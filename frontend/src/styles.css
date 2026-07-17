@@ -759,6 +759,28 @@ td { font-size: 14px; }
   gap: 12px;
   min-width: 0;
 }
+.category-input-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+.category-input-row .btn {
+  white-space: nowrap;
+}
+.category-candidate-select {
+  margin-top: 8px;
+  width: 100%;
+}
+.field-error {
+  display: block;
+  margin-top: 6px;
+  color: #b42318;
+}
+@media (max-width: 720px) {
+  .category-input-row {
+    grid-template-columns: 1fr;
+  }
+}
 .source-summary {
   display: flex;
   flex-wrap: wrap;
