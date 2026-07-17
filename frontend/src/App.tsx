@@ -2625,16 +2625,6 @@ function PublishDraftPanel({
       </div>
 
       <div className="smartstore-form-layout">
-        <aside className="smartstore-form-nav" aria-label="네이버 등록폼 섹션">
-          <strong>상품등록</strong>
-          <a href="#section-basic">기본정보</a>
-          <a href="#section-attributes">상품속성</a>
-          <a href="#section-delivery">배송/반품</a>
-          <a href="#section-images">이미지</a>
-          <a href="#section-detail">상세페이지</a>
-          <a href="#section-check">등록검사</a>
-        </aside>
-
         <div className="smartstore-form-body">
           <div className="source-summary">
             <strong>원본 상품</strong>

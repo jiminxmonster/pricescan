@@ -751,39 +751,8 @@ td { font-size: 14px; }
 }
 .smartstore-form-layout {
   display: grid;
-  grid-template-columns: 170px minmax(0, 1fr);
-  gap: 14px;
+  grid-template-columns: minmax(0, 1fr);
   align-items: start;
-}
-.smartstore-form-nav {
-  position: sticky;
-  top: 12px;
-  z-index: 8;
-  display: grid;
-  gap: 6px;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  background: #f7f9fc;
-  padding: 10px;
-}
-.smartstore-form-nav strong {
-  color: var(--text);
-  font-size: 14px;
-  letter-spacing: -0.02em;
-}
-.smartstore-form-nav a {
-  border: 1px solid transparent;
-  border-radius: 4px;
-  padding: 8px 9px;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 900;
-  text-decoration: none;
-}
-.smartstore-form-nav a:hover {
-  border-color: var(--line-strong);
-  background: #fff;
-  color: var(--brand);
 }
 .smartstore-form-body {
   display: grid;
@@ -1554,20 +1523,8 @@ textarea {
   .naver-guide-body {
     grid-template-columns: 1fr;
   }
-  .smartstore-form-layout {
-    grid-template-columns: 1fr;
-  }
   .monitoring-board {
     grid-template-columns: 1fr;
-  }
-  .smartstore-form-nav {
-    position: sticky;
-    top: 0;
-    z-index: 8;
-    grid-auto-flow: column;
-    grid-auto-columns: max-content;
-    overflow-x: auto;
-    box-shadow: 0 8px 18px rgba(10, 22, 40, 0.08);
   }
 }
 
