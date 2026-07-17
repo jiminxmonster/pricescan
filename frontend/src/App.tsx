@@ -533,7 +533,61 @@ function sourceItemFromDraft(draft: ListingDraft): DraftSourceItem {
   };
 }
 
+type InferredProductIdentity = {
+  brandName: string;
+  manufacturerName: string;
+  modelName: string;
+};
+
+function inferProductIdentity(title: string): InferredProductIdentity {
+  const brandRules: Array<[RegExp, string, string]> = [
+    [/삼성전자|삼성|samsung|갤럭시북|galaxy\s*book/i, "삼성전자", "삼성전자"],
+    [/lg전자|(^|[^a-z])lg([^a-z]|$)|그램|ultra\s*pc/i, "LG전자", "LG전자"],
+    [/apple|애플|맥북|macbook/i, "Apple", "Apple"],
+    [/lenovo|레노버|thinkpad|씽크패드|ideapad/i, "Lenovo", "Lenovo"],
+    [/asus|에이수스|비보북|vivobook|rog|(^|[^a-z])tuf([^a-z]|$)/i, "ASUS", "ASUS"],
+    [/(^|[^a-z])hp([^a-z]|$)|휴렛팩커드/i, "HP", "HP"],
+    [/microsoft|마이크로소프트|surface|서피스/i, "Microsoft", "Microsoft"],
+    [/dell|델|xps|inspiron/i, "Dell", "Dell"],
+    [/acer|에이서|swift|aspire/i, "Acer", "Acer"],
+    [/msi|엠에스아이|스텔스|프레스티지/i, "MSI", "MSI"],
+    [/한성컴퓨터|한성|tfg/i, "한성컴퓨터", "한성컴퓨터"],
+    [/gigabyte|기가바이트|aorus/i, "GIGABYTE", "GIGABYTE"],
+  ];
+  const brand = brandRules.find(([pattern]) => pattern.test(title));
+  const modelCandidates = title.toUpperCase().match(/\b(?=[A-Z0-9-]{5,}\b)(?=[A-Z0-9-]*[A-Z])(?=[A-Z0-9-]*\d)[A-Z0-9]+(?:-[A-Z0-9]+)+\b/g) || [];
+  const modelName = modelCandidates.sort((a, b) => b.length - a.length)[0] || "";
+  return {
+    brandName: brand?.[1] || "",
+    manufacturerName: brand?.[2] || "",
+    modelName,
+  };
+}
+
+function productOnlyDescription(title: string, identity: InferredProductIdentity): string {
+  const details = [
+    identity.brandName ? `브랜드: ${identity.brandName}` : "",
+    identity.manufacturerName ? `제조사: ${identity.manufacturerName}` : "",
+    identity.modelName ? `모델명: ${identity.modelName}` : "",
+  ].filter(Boolean);
+  return [title.trim(), ...details].filter(Boolean).join("\n\n");
+}
+
+function sanitizeDraftDescription(description: string, title: string, identity: InferredProductIdentity): string {
+  const legacyPattern = /^(원본 소스|기준 판매가|노출가):|^상세설명과 이미지는 권리 확인 후 교체하세요\.$/;
+  const containedLegacyText = description.split("\n").some((line) => legacyPattern.test(line.trim()));
+  const cleaned = description
+    .split("\n")
+    .filter((line) => !legacyPattern.test(line.trim()))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  if (!cleaned || containedLegacyText) return productOnlyDescription(title, identity);
+  return cleaned;
+}
+
 function formFromDraft(draft: ListingDraft): DraftForm {
+  const identity = inferProductIdentity(draft.title);
   return {
     targetPlatforms: draft.target_platforms.length ? draft.target_platforms : ["smartstore"],
     title: draft.title,
@@ -544,10 +598,10 @@ function formFromDraft(draft: ListingDraft): DraftForm {
     stockQuantity: draft.stock_quantity,
     imageUrl: draft.images?.representative_url || draft.image_url || "",
     optionName: draft.option_name,
-    description: draft.description,
-    brandName: draft.brand_name,
-    manufacturerName: draft.manufacturer_name,
-    modelName: draft.model_name,
+    description: sanitizeDraftDescription(draft.description, draft.title, identity),
+    brandName: draft.brand_name || identity.brandName,
+    manufacturerName: draft.manufacturer_name || identity.manufacturerName,
+    modelName: draft.model_name || identity.modelName,
     originAreaCode: draft.origin_area_code,
     originAreaName: draft.origin_area_name,
     productInfoNoticeType: draft.product_info_notice_type || "기타 재화",
@@ -1242,6 +1296,7 @@ export default function App() {
       setNotice("네이버 스마트스토어 API 슬롯을 먼저 저장/연결하세요.");
       return;
     }
+    const identity = inferProductIdentity(item.name);
     setDraftSourceItem(item);
     setDraftForm({
       targetPlatforms: ["smartstore"],
@@ -1253,9 +1308,9 @@ export default function App() {
       stockQuantity: 100,
       imageUrl: "",
       optionName: "",
-      brandName: "",
-      manufacturerName: "",
-      modelName: "",
+      brandName: identity.brandName,
+      manufacturerName: identity.manufacturerName,
+      modelName: identity.modelName,
       originAreaCode: "",
       originAreaName: "상세페이지 참조",
       productInfoNoticeType: "기타 재화",
@@ -1266,7 +1321,7 @@ export default function App() {
       exchangeDeliveryFee: 6000,
       asTelephone: "판매자 고객센터",
       asGuideContent: "구매처 고객센터로 문의해 주세요.",
-      description: `${item.name}\n\n원본 소스: ${item.mall}\n기준 판매가: ${money(item.salePrice)}\n노출가: ${money(item.displayPrice)}\n\n상세설명과 이미지는 권리 확인 후 교체하세요.`,
+      description: productOnlyDescription(item.name, identity),
     });
     setNotice("상품등록 초안을 확인하고 초안 승인을 진행하세요.");
   };
@@ -2566,7 +2621,7 @@ function PublishDraftPanel({
           <h2>{title}</h2>
           <p>{description}</p>
         </div>
-        <button className="btn small" onClick={onCancel}>닫기</button>
+        <button className="btn small modal-close-button" onClick={onCancel} aria-label="닫기" title="닫기">×</button>
       </div>
 
       <div className="smartstore-form-layout">
@@ -2630,7 +2685,7 @@ function PublishDraftPanel({
             </label>
             <label>
               <span>판매가</span>
-              <input className="input" type="number" value={form.salePrice} onChange={(event) => update("salePrice", Number(event.target.value))} />
+              <input className="input" type="number" min="0" step="1000" value={form.salePrice} onChange={(event) => update("salePrice", Number(event.target.value))} />
             </label>
             <label>
               <span>노출가</span>

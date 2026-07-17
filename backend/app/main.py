@@ -566,7 +566,6 @@ def generate_detail_content_html(draft: dict[str, Any], images: dict[str, Any]) 
     brand = html.escape(str(draft.get("brand_name") or "").strip())
     manufacturer = html.escape(str(draft.get("manufacturer_name") or "").strip())
     model = html.escape(str(draft.get("model_name") or "").strip())
-    source_url = html.escape(str(draft.get("source_url") or "").strip())
     detail_images = images.get("detail_urls") or []
     detail_image_html = "\n".join(
         f'<figure><img src="{html.escape(url)}" alt="{title} 상세 이미지" style="max-width:100%;height:auto;" /></figure>'
@@ -579,7 +578,6 @@ def generate_detail_content_html(draft: dict[str, Any], images: dict[str, Any]) 
             f"<li><strong>모델명</strong> {model}</li>" if model else "",
         ] if row
     )
-    source_html = f'<p class="source">원본 상품 확인: <a href="{source_url}">{source_url}</a></p>' if source_url else ""
     return f"""
 <section class="pricescan-detail">
   <h2>{title}</h2>
@@ -588,7 +586,6 @@ def generate_detail_content_html(draft: dict[str, Any], images: dict[str, Any]) 
   <ul>
     {spec_rows}
   </ul>
-  {source_html}
 </section>
 """.strip()
 

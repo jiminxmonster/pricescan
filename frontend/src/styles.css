@@ -718,6 +718,17 @@ td { font-size: 14px; }
   border: 0;
   box-shadow: none;
 }
+.modal-close-button {
+  display: inline-grid;
+  place-items: center;
+  width: 36px;
+  min-width: 36px;
+  height: 36px;
+  padding: 0;
+  font-size: 26px;
+  font-weight: 500;
+  line-height: 1;
+}
 @keyframes modal-in {
   from {
     opacity: 0;
@@ -747,6 +758,7 @@ td { font-size: 14px; }
 .smartstore-form-nav {
   position: sticky;
   top: 12px;
+  z-index: 8;
   display: grid;
   gap: 6px;
   border: 1px solid var(--line);
@@ -1549,10 +1561,13 @@ textarea {
     grid-template-columns: 1fr;
   }
   .smartstore-form-nav {
-    position: static;
+    position: sticky;
+    top: 0;
+    z-index: 8;
     grid-auto-flow: column;
     grid-auto-columns: max-content;
     overflow-x: auto;
+    box-shadow: 0 8px 18px rgba(10, 22, 40, 0.08);
   }
 }
 
