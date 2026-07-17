@@ -46,6 +46,14 @@ admin / admin
 
 ## Vultr 배포
 
+일반 업데이트는 `main` 푸시 후 로컬에서 배포 스크립트를 실행합니다.
+
+```bash
+./scripts/deploy-vultr.sh
+```
+
+최초 서버 구성은 아래 명령으로 진행합니다.
+
 서버에서:
 
 ```bash
