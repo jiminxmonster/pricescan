@@ -14,5 +14,14 @@ fi
 ssh -i "$key" -o IdentitiesOnly=yes -o ConnectTimeout=10 "$server" \
   "set -e; cd '$remote_dir'; git pull --ff-only; docker compose up -d --build; docker compose ps"
 
-curl --fail --silent --show-error "$health_url"
-printf '\nDeployment health check passed: %s\n' "$health_url"
+for attempt in {1..20}; do
+  if response="$(curl --fail --silent --show-error "$health_url" 2>/dev/null)"; then
+    printf '%s\n' "$response"
+    printf 'Deployment health check passed: %s\n' "$health_url"
+    exit 0
+  fi
+  sleep 2
+done
+
+echo "Deployment health check failed after 40 seconds: $health_url" >&2
+exit 1
