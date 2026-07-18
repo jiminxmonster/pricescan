@@ -418,21 +418,11 @@ def init_db() -> None:
                 (legacy_naver["client_id"], legacy_naver["client_secret"]),
             )
 
-        order_count = db.execute("SELECT COUNT(*) AS count FROM orders").fetchone()["count"]
-        if order_count == 0:
-            seed_orders = [
-                ("ORD-260701-018", "스마트스토어", "초경량 업무용 노트북", "김민준", "CJ대한통운", "ready"),
-                ("ORD-260701-019", "11번가", "무선 충전 케이블", "이서연", "한진택배", "address_check"),
-                ("ORD-260701-020", "쿠팡", "노트북 파우치", "박도윤", "롯데택배", "ready"),
-            ]
-            for order in seed_orders:
-                db.execute(
-                    """
-                    INSERT INTO orders (id, channel, product, recipient, courier, status, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (*order, now()),
-                )
+        # Remove fixed recovery-demo orders so the operations board only shows
+        # orders collected from a real sales channel.
+        db.execute(
+            "DELETE FROM orders WHERE id IN ('ORD-260701-018', 'ORD-260701-019', 'ORD-260701-020')"
+        )
 
         log_count = db.execute("SELECT COUNT(*) AS count FROM logs").fetchone()["count"]
         if log_count == 0:
