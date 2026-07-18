@@ -217,6 +217,15 @@ def init_db() -> None:
                 recipient TEXT NOT NULL,
                 courier TEXT NOT NULL,
                 status TEXT NOT NULL,
+                source_mall TEXT NOT NULL DEFAULT '',
+                source_url TEXT NOT NULL DEFAULT '',
+                source_price INTEGER NOT NULL DEFAULT 0,
+                source_shipping INTEGER NOT NULL DEFAULT 0,
+                sale_amount INTEGER NOT NULL DEFAULT 0,
+                procurement_status TEXT NOT NULL DEFAULT 'source_unlinked',
+                source_order_no TEXT NOT NULL DEFAULT '',
+                tracking_no TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL
             );
 
@@ -312,6 +321,25 @@ def init_db() -> None:
         for column, statement in listing_column_migrations:
             if column not in listing_columns:
                 db.execute(statement)
+
+        order_columns = {
+            row["name"] for row in db.execute("PRAGMA table_info(orders)").fetchall()
+        }
+        order_column_migrations = [
+            ("source_mall", "ALTER TABLE orders ADD COLUMN source_mall TEXT NOT NULL DEFAULT ''"),
+            ("source_url", "ALTER TABLE orders ADD COLUMN source_url TEXT NOT NULL DEFAULT ''"),
+            ("source_price", "ALTER TABLE orders ADD COLUMN source_price INTEGER NOT NULL DEFAULT 0"),
+            ("source_shipping", "ALTER TABLE orders ADD COLUMN source_shipping INTEGER NOT NULL DEFAULT 0"),
+            ("sale_amount", "ALTER TABLE orders ADD COLUMN sale_amount INTEGER NOT NULL DEFAULT 0"),
+            ("procurement_status", "ALTER TABLE orders ADD COLUMN procurement_status TEXT NOT NULL DEFAULT 'source_unlinked'"),
+            ("source_order_no", "ALTER TABLE orders ADD COLUMN source_order_no TEXT NOT NULL DEFAULT ''"),
+            ("tracking_no", "ALTER TABLE orders ADD COLUMN tracking_no TEXT NOT NULL DEFAULT ''"),
+            ("updated_at", "ALTER TABLE orders ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''"),
+        ]
+        for column, statement in order_column_migrations:
+            if column not in order_columns:
+                db.execute(statement)
+        db.execute("UPDATE orders SET updated_at = created_at WHERE updated_at = ''")
 
         for image_path in UPLOAD_DIR.iterdir():
             if not image_path.is_file():
@@ -439,6 +467,17 @@ class PriceSearchRequest(BaseModel):
 
 class InvoicePrintRequest(BaseModel):
     order_ids: list[str]
+
+
+class ProcurementUpdateRequest(BaseModel):
+    procurement_status: str
+    source_mall: str = ""
+    source_url: str = ""
+    source_price: int = 0
+    source_shipping: int = 0
+    source_order_no: str = ""
+    courier: str = ""
+    tracking_no: str = ""
 
 
 class ListingDraftPayload(BaseModel):
@@ -1822,6 +1861,63 @@ def toggle_exclude(item_id: str) -> dict[str, Any]:
 def orders() -> list[dict[str, Any]]:
     with connect() as db:
         return [row_to_dict(row) or {} for row in db.execute("SELECT * FROM orders ORDER BY created_at DESC").fetchall()]
+
+
+@app.put("/orders/{order_id}/procurement", dependencies=[Depends(require_admin)])
+def update_procurement(order_id: str, payload: ProcurementUpdateRequest) -> dict[str, Any]:
+    allowed_statuses = {
+        "source_unlinked",
+        "source_check",
+        "approval_required",
+        "purchase_approved",
+        "ordered",
+        "tracking_pending",
+        "shipped",
+        "purchase_failed",
+        "cancelled",
+    }
+    if payload.procurement_status not in allowed_statuses:
+        raise HTTPException(status_code=400, detail="Unsupported procurement status")
+
+    timestamp = now()
+    with connect() as db:
+        current = db.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+        if not current:
+            raise HTTPException(status_code=404, detail="Order not found")
+
+        next_order_status = current["status"]
+        if payload.procurement_status == "ordered":
+            next_order_status = "purchase_complete"
+        elif payload.procurement_status == "shipped":
+            next_order_status = "shipped"
+        elif payload.procurement_status == "purchase_failed":
+            next_order_status = "exception"
+
+        db.execute(
+            """
+            UPDATE orders
+            SET source_mall = ?, source_url = ?, source_price = ?, source_shipping = ?,
+                procurement_status = ?, source_order_no = ?, courier = ?, tracking_no = ?,
+                status = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                payload.source_mall.strip() or current["source_mall"],
+                payload.source_url.strip() or current["source_url"],
+                max(payload.source_price, 0) or current["source_price"],
+                max(payload.source_shipping, 0) or current["source_shipping"],
+                payload.procurement_status,
+                payload.source_order_no.strip() or current["source_order_no"],
+                payload.courier.strip() or current["courier"],
+                payload.tracking_no.strip() or current["tracking_no"],
+                next_order_status,
+                timestamp,
+                order_id,
+            ),
+        )
+        row = db.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+    log_event(f"procurement updated: {order_id} -> {payload.procurement_status}")
+    return row_to_dict(row) or {}
 
 
 @app.post("/invoices/print", dependencies=[Depends(require_admin)])

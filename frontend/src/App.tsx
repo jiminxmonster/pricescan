@@ -272,7 +272,19 @@ type Order = {
   recipient: string;
   courier: string;
   status: string;
+  source_mall: string;
+  source_url: string;
+  source_price: number;
+  source_shipping: number;
+  sale_amount: number;
+  procurement_status: string;
+  source_order_no: string;
+  tracking_no: string;
+  created_at: string;
+  updated_at: string;
 };
+
+type MonitoringView = "overview" | "prepared" | "selling" | "procurement" | "shipping" | "settlement";
 
 type Channel = {
   name: string;
@@ -461,6 +473,17 @@ function statusLabel(status: string): string {
     published: "등록완료",
     prepared: "예비상품",
     drafting: "등록폼 작성중",
+    source_unlinked: "원소스 미연결",
+    source_check: "가격·재고 확인",
+    approval_required: "구매승인 필요",
+    purchase_approved: "구매 승인됨",
+    ordered: "원소스 구매완료",
+    tracking_pending: "송장 대기",
+    shipped: "배송중",
+    purchase_failed: "구매 실패",
+    cancelled: "취소",
+    purchase_complete: "구매완료",
+    exception: "예외 확인",
   };
   return labels[status] || status;
 }
@@ -499,9 +522,9 @@ function isSmartstoreActive(apiKeys: ApiKey[]): boolean {
 }
 
 function pillClass(status: string): string {
-  if (["baseline", "ready", "connected", "printed", "validated", "publish_ready", "published", "protected_ready"].includes(status)) return "pill green";
-  if (["abnormal", "warning", "address_check"].includes(status)) return "pill orange";
-  if (["excluded", "not_configured", "validation_failed", "publish_failed"].includes(status)) return "pill red";
+  if (["baseline", "ready", "connected", "printed", "validated", "publish_ready", "published", "protected_ready", "ordered", "shipped", "purchase_complete"].includes(status)) return "pill green";
+  if (["abnormal", "warning", "address_check", "source_check", "approval_required", "tracking_pending"].includes(status)) return "pill orange";
+  if (["excluded", "not_configured", "validation_failed", "publish_failed", "purchase_failed", "exception", "cancelled"].includes(status)) return "pill red";
   return "pill blue";
 }
 
@@ -1577,6 +1600,33 @@ export default function App() {
     await refreshLogs();
   };
 
+  const updateProcurement = async (order: Order, procurementStatus: string, source?: PreparedProduct, updates?: Partial<Order>) => {
+    const currentOrder = { ...order, ...updates };
+    const sourceUrl = source?.source_url || currentOrder.source_url;
+    const requiresSource = ["source_check", "approval_required", "purchase_approved", "ordered"].includes(procurementStatus);
+    if (requiresSource && !sourceUrl) {
+      setNotice("원소스 링크가 연결되지 않았습니다. 주문을 구매승인하기 전에 원소스 상품을 연결하세요.");
+      return;
+    }
+    if (procurementStatus === "purchase_approved" && !window.confirm("현재 원소스 가격과 재고를 확인했고 구매를 승인할까요? 결제는 아직 자동 실행되지 않습니다.")) return;
+    const updated = await request<Order>(`/orders/${order.id}/procurement`, token, {
+      method: "PUT",
+      body: JSON.stringify({
+        procurement_status: procurementStatus,
+        source_mall: source?.mall || currentOrder.source_mall,
+        source_url: sourceUrl,
+        source_price: source?.display_price || currentOrder.source_price,
+        source_shipping: source?.shipping_fee || currentOrder.source_shipping,
+        source_order_no: currentOrder.source_order_no,
+        courier: currentOrder.courier,
+        tracking_no: currentOrder.tracking_no,
+      }),
+    });
+    setOrders((current) => current.map((item) => item.id === updated.id ? updated : item));
+    setNotice(`주문 ${currentOrder.id}: ${statusLabel(procurementStatus)}`);
+    await refreshLogs();
+  };
+
   const toggleFeature = (feature: FeatureKey) => {
     setSettings((current) => ({
       ...current,
@@ -1750,7 +1800,7 @@ export default function App() {
             <div className="section-head">
               <div>
                 <h2>상품 모니터링</h2>
-                <p>왼쪽 예비상품과 오른쪽 스마트스토어 판매상품을 한 화면에서 관리합니다.</p>
+                <p>예비상품부터 판매, 주문, 원소스 구매, 배송까지 순서대로 관리합니다.</p>
               </div>
               <button className="btn" onClick={() => refreshMonitoring().catch((error) => setNotice(error.message))} disabled={smartstoreLoading}>
                 {smartstoreLoading ? "불러오는 중" : "새로고침"}
@@ -1759,6 +1809,7 @@ export default function App() {
             <MonitoringBoard
               preparedProducts={preparedProducts}
               drafts={listingDrafts}
+              orders={orders}
               smartstorePayload={smartstorePayload}
               smartstoreActive={isSmartstoreActive(apiKeys)}
               smartstoreLoading={smartstoreLoading}
@@ -1768,6 +1819,7 @@ export default function App() {
               onValidateDraft={validateDraft}
               onDeletePrepared={deletePreparedProduct}
               onCopySmartstore={copySmartstoreToPrepared}
+              onUpdateProcurement={updateProcurement}
               onOpenApi={() => {
                 selectApiPlatform("smartstore");
                 setTab("api");
@@ -2020,6 +2072,7 @@ function StatCard({ label, value }: { label: string; value: number }) {
 function MonitoringBoard({
   preparedProducts,
   drafts,
+  orders,
   smartstorePayload,
   smartstoreActive,
   smartstoreLoading,
@@ -2029,10 +2082,12 @@ function MonitoringBoard({
   onValidateDraft,
   onDeletePrepared,
   onCopySmartstore,
+  onUpdateProcurement,
   onOpenApi,
 }: {
   preparedProducts: PreparedProduct[];
   drafts: ListingDraft[];
+  orders: Order[];
   smartstorePayload: SmartstorePayload;
   smartstoreActive: boolean;
   smartstoreLoading: boolean;
@@ -2042,83 +2097,186 @@ function MonitoringBoard({
   onValidateDraft: (draftId: string) => void;
   onDeletePrepared: (id: string) => void;
   onCopySmartstore: (item: SmartstoreProduct) => void;
+  onUpdateProcurement: (order: Order, status: string, source?: PreparedProduct, updates?: Partial<Order>) => void;
   onOpenApi: () => void;
 }) {
-  return (
-    <div className="monitoring-board">
-      <section className="monitoring-panel">
-        <div className="monitoring-panel-head">
-          <div><strong>예비상품</strong><span>검색 결과에서 준비한 상품</span></div>
-          <b>{preparedProducts.length}</b>
-        </div>
-        <div className="monitoring-list">
-          {preparedProducts.map((item) => {
-            const draft = drafts.find((candidate) => candidate.id === item.listing_draft_id);
-            const missing = draft ? draftMissingLabels(draft) : "";
-            return (
-            <article className="monitoring-item" key={item.id}>
-              <div className="monitoring-item-title">
-                {item.source_url ? <a href={item.source_url} target="_blank" rel="noreferrer">{item.title}</a> : <strong>{item.title}</strong>}
-                <span className={pillClass(item.status)}>{statusLabel(item.status)}</span>
+  const [view, setView] = useState<MonitoringView>("overview");
+  const procurementOrders = orders.filter((order) => !["shipped", "cancelled"].includes(order.procurement_status));
+  const shippingOrders = orders.filter((order) => ["ordered", "tracking_pending", "shipped"].includes(order.procurement_status));
+  const workflow = [
+    { key: "overview" as MonitoringView, step: "전체", label: "운영현황", count: preparedProducts.length + smartstorePayload.count + orders.length },
+    { key: "prepared" as MonitoringView, step: "1", label: "예비·등록", count: preparedProducts.length },
+    { key: "selling" as MonitoringView, step: "2", label: "판매상품", count: smartstorePayload.count },
+    { key: "procurement" as MonitoringView, step: "3", label: "주문·발주", count: procurementOrders.length },
+    { key: "shipping" as MonitoringView, step: "4", label: "배송·클레임", count: shippingOrders.length },
+    { key: "settlement" as MonitoringView, step: "5", label: "정산", count: 0 },
+  ];
+
+  const preparedPanel = (
+    <section className="monitoring-panel">
+      <div className="monitoring-panel-head">
+        <div><strong>예비상품</strong><span>검색 결과 저장 → 원소스 확인 → 등록검사</span></div>
+        <b>{preparedProducts.length}</b>
+      </div>
+      <div className="monitoring-list">
+        {preparedProducts.map((item) => {
+          const draft = drafts.find((candidate) => candidate.id === item.listing_draft_id);
+          const missing = draft ? draftMissingLabels(draft) : "";
+          return (
+          <article className="monitoring-item" key={item.id}>
+            <div className="monitoring-item-title">
+              {item.source_url ? <a href={item.source_url} target="_blank" rel="noreferrer">{item.title}</a> : <strong>{item.title}</strong>}
+              <span className={pillClass(item.status)}>{statusLabel(item.status)}</span>
+            </div>
+            <p>{sourceLabel(item.source)} · {item.mall || "판매처 미확인"}</p>
+            <div className="source-health-row">
+              <span className={`source-grade ${item.source_url ? "manual" : "reference"}`}>{item.source_url ? "구매승인형" : "가격참조형"}</span>
+              <span>{item.source_url ? "원소스 링크 연결됨" : "실구매 전 원소스 연결 필요"}</span>
+            </div>
+            <div className="monitoring-price"><strong>{money(item.display_price)}</strong><span>배송비 {money(item.shipping_fee)}</span></div>
+            {draft?.validation?.checked_at && (
+              <div className={`monitoring-validation ${draft.validation.ready ? "ready" : "warning"}`}>
+                <strong>{draft.validation.ready ? "등록검사 통과" : "등록검사 보완 필요"}</strong>
+                {!draft.validation.ready && <span>{missing || "필수 항목을 확인하세요."}</span>}
               </div>
-              <p>{sourceLabel(item.source)} · {item.mall || "판매처 미확인"}</p>
-              <div className="monitoring-price"><strong>{money(item.display_price)}</strong><span>배송비 {money(item.shipping_fee)}</span></div>
-              {draft?.validation?.checked_at && (
-                <div className={`monitoring-validation ${draft.validation.ready ? "ready" : "warning"}`}>
-                  <strong>{draft.validation.ready ? "등록검사 통과" : "등록검사 보완 필요"}</strong>
-                  {!draft.validation.ready && <span>{missing || "필수 항목을 확인하세요."}</span>}
-                </div>
+            )}
+            <div className="monitoring-actions">
+              {item.source_url && <a className="btn small" href={item.source_url} target="_blank" rel="noreferrer">원소스 확인</a>}
+              {draft ? (
+                <>
+                  <button className="btn small primary" onClick={() => onEditDraft(draft)}>등록폼 열기</button>
+                  <button className="btn small" onClick={() => onValidateDraft(draft.id)}>등록검사</button>
+                </>
+              ) : (
+                <button className="btn small primary" onClick={() => onOpenDraft(item)}>등록 준비</button>
               )}
+              <button className="btn small danger" onClick={() => onDeletePrepared(item.id)}>삭제</button>
+            </div>
+          </article>
+        )})}
+        {preparedProducts.length === 0 && <div className="monitoring-empty">상품검색 결과에서 `상품준비`를 눌러 추가하세요.</div>}
+      </div>
+    </section>
+  );
+
+  const sellingPanel = (
+    <section className="monitoring-panel">
+      <div className="monitoring-panel-head">
+        <div><strong>스마트스토어 판매상품</strong><span>판매상태 · 가격 · 재고 · 원소스 연결 관리</span></div>
+        <b>{smartstorePayload.count}</b>
+      </div>
+      {!smartstoreActive && (
+        <div className="monitoring-empty">
+          <p>네이버 셀러 API 연결이 필요합니다.</p>
+          <button className="btn small primary" onClick={onOpenApi}>검색설정으로 이동</button>
+        </div>
+      )}
+      {smartstoreActive && smartstoreError && <div className="source-warning"><span>{smartstoreError}</span></div>}
+      {smartstoreActive && smartstoreLoading && <div className="monitoring-empty">판매상품 조회 중...</div>}
+      {smartstoreActive && !smartstoreLoading && (
+        <div className="monitoring-list">
+          {smartstorePayload.items.map((item) => (
+            <article className="monitoring-item" key={item.channel_product_no || item.id}>
+              <div className="monitoring-item-title">
+                {item.url ? <a href={item.url} target="_blank" rel="noreferrer">{item.name}</a> : <strong>{item.name}</strong>}
+                <span className="pill green">{item.status || "판매중"}</span>
+              </div>
+              <p>채널상품번호 {item.channel_product_no || "-"} · 재고 {item.stock_quantity.toLocaleString("ko-KR")}</p>
+              <div className="source-health-row warning"><span>원소스 매핑 확인</span><span>가격·재고 자동감시는 원소스 연결 후 시작</span></div>
+              <div className="monitoring-price"><strong>{money(item.discounted_price || item.sale_price)}</strong><span>배송비 {money(item.delivery_fee)}</span></div>
               <div className="monitoring-actions">
-                {draft ? (
-                  <>
-                    <button className="btn small primary" onClick={() => onEditDraft(draft)}>등록폼 열기</button>
-                    <button className="btn small" onClick={() => onValidateDraft(draft.id)}>등록검사</button>
-                  </>
-                ) : (
-                  <button className="btn small primary" onClick={() => onOpenDraft(item)}>등록 준비</button>
-                )}
-                <button className="btn small danger" onClick={() => onDeletePrepared(item.id)}>삭제</button>
+                <button className="btn small" onClick={() => onCopySmartstore(item)}>예비로 복사</button>
+                {item.url && <a className="btn small" href={item.url} target="_blank" rel="noreferrer">상품 보기</a>}
               </div>
             </article>
-          )})}
-          {preparedProducts.length === 0 && <div className="monitoring-empty">상품검색 결과에서 `상품준비`를 눌러 추가하세요.</div>}
+          ))}
+          {smartstorePayload.items.length === 0 && !smartstoreError && <div className="monitoring-empty">조회된 스마트스토어 판매상품이 없습니다.</div>}
         </div>
-      </section>
+      )}
+    </section>
+  );
 
-      <section className="monitoring-panel">
+  const orderPanel = (shippingOnly = false) => {
+    const visibleOrders = shippingOnly ? shippingOrders : procurementOrders;
+    return (
+      <section className="monitoring-panel operation-panel">
         <div className="monitoring-panel-head">
-          <div><strong>스마트스토어 판매상품</strong><span>커머스API로 조회한 내 스토어 상품</span></div>
-          <b>{smartstorePayload.count}</b>
+          <div><strong>{shippingOnly ? "배송·클레임" : "주문·원소스 발주"}</strong><span>{shippingOnly ? "송장 반영과 배송 예외를 확인합니다." : "결제 전 원소스 가격·재고를 반드시 다시 확인합니다."}</span></div>
+          <b>{visibleOrders.length}</b>
         </div>
-        {!smartstoreActive && (
-          <div className="monitoring-empty">
-            <p>네이버 셀러 API 연결이 필요합니다.</p>
-            <button className="btn small primary" onClick={onOpenApi}>검색설정으로 이동</button>
-          </div>
-        )}
-        {smartstoreActive && smartstoreError && <div className="source-warning"><span>{smartstoreError}</span></div>}
-        {smartstoreActive && smartstoreLoading && <div className="monitoring-empty">판매상품 조회 중...</div>}
-        {smartstoreActive && !smartstoreLoading && (
-          <div className="monitoring-list">
-            {smartstorePayload.items.map((item) => (
-              <article className="monitoring-item" key={item.channel_product_no || item.id}>
+        <div className="monitoring-list">
+          {visibleOrders.map((order) => {
+            const sourceTotal = order.source_price + order.source_shipping;
+            const expectedMargin = order.sale_amount > 0 && sourceTotal > 0 ? order.sale_amount - sourceTotal : 0;
+            return (
+              <article className="monitoring-item procurement-item" key={order.id}>
                 <div className="monitoring-item-title">
-                  {item.url ? <a href={item.url} target="_blank" rel="noreferrer">{item.name}</a> : <strong>{item.name}</strong>}
-                  <span className="pill green">{item.status || "판매중"}</span>
+                  <strong>{order.product}</strong>
+                  <span className={pillClass(order.procurement_status)}>{statusLabel(order.procurement_status)}</span>
                 </div>
-                <p>채널상품번호 {item.channel_product_no || "-"} · 재고 {item.stock_quantity.toLocaleString("ko-KR")}</p>
-                <div className="monitoring-price"><strong>{money(item.discounted_price || item.sale_price)}</strong><span>배송비 {money(item.delivery_fee)}</span></div>
+                <p>{order.channel} · 주문 {order.id} · 수령인 {order.recipient}</p>
+                <div className="procurement-grid">
+                  <div><span>원소스</span><strong>{order.source_mall || "미연결"}</strong></div>
+                  <div><span>원가+배송</span><strong>{sourceTotal ? money(sourceTotal) : "확인 필요"}</strong></div>
+                  <div><span>예상마진</span><strong>{expectedMargin ? money(expectedMargin) : "계산 대기"}</strong></div>
+                  <div><span>송장</span><strong>{order.tracking_no || "대기"}</strong></div>
+                </div>
+                {!order.source_url && !shippingOnly && (
+                  <label className="source-link-select">
+                    <span>원소스 상품 연결</span>
+                    <select defaultValue="" onChange={(event) => {
+                      const source = preparedProducts.find((item) => item.id === event.target.value);
+                      if (source) onUpdateProcurement(order, "source_check", source);
+                    }}>
+                      <option value="">예비상품에서 선택</option>
+                      {preparedProducts.filter((item) => item.source_url).map((item) => <option key={item.id} value={item.id}>{item.mall} · {item.title}</option>)}
+                    </select>
+                  </label>
+                )}
                 <div className="monitoring-actions">
-                  <button className="btn small" onClick={() => onCopySmartstore(item)}>예비로 복사</button>
-                  {item.url && <a className="btn small" href={item.url} target="_blank" rel="noreferrer">상품 보기</a>}
+                  {order.source_url && <a className="btn small" href={order.source_url} target="_blank" rel="noreferrer">원소스 열기</a>}
+                  {!shippingOnly && order.source_url && order.procurement_status === "source_check" && <button className="btn small" onClick={() => onUpdateProcurement(order, "approval_required")}>재고·가격 확인완료</button>}
+                  {!shippingOnly && order.procurement_status === "approval_required" && <button className="btn small primary" onClick={() => onUpdateProcurement(order, "purchase_approved")}>구매 승인</button>}
+                  {!shippingOnly && order.procurement_status === "purchase_approved" && <button className="btn small primary" onClick={() => {
+                    const sourceOrderNo = window.prompt("원소스 쇼핑몰 주문번호를 입력하세요.", order.source_order_no);
+                    if (sourceOrderNo) onUpdateProcurement(order, "ordered", undefined, { source_order_no: sourceOrderNo });
+                  }}>구매완료 기록</button>}
+                  {order.procurement_status === "ordered" && <button className="btn small" onClick={() => {
+                    const trackingNo = window.prompt("원소스에서 발급된 송장번호를 입력하세요.", order.tracking_no);
+                    if (trackingNo) onUpdateProcurement(order, "tracking_pending", undefined, { tracking_no: trackingNo });
+                  }}>송장번호 등록</button>}
+                  {order.procurement_status === "tracking_pending" && order.tracking_no && <button className="btn small primary" onClick={() => onUpdateProcurement(order, "shipped")}>배송 시작</button>}
                 </div>
               </article>
-            ))}
-            {smartstorePayload.items.length === 0 && !smartstoreError && <div className="monitoring-empty">조회된 스마트스토어 판매상품이 없습니다.</div>}
-          </div>
-        )}
+            );
+          })}
+          {visibleOrders.length === 0 && <div className="monitoring-empty">현재 이 단계에서 처리할 주문이 없습니다.</div>}
+        </div>
       </section>
+    );
+  };
+
+  return (
+    <div className="monitoring-workspace">
+      <nav className="workflow-rail" aria-label="상품 운영 순서">
+        {workflow.map((item) => (
+          <button key={item.key} className={view === item.key ? "active" : ""} onClick={() => setView(item.key)}>
+            <span>{item.step}</span><strong>{item.label}</strong><b>{item.count}</b>
+          </button>
+        ))}
+      </nav>
+      <div className="workflow-rule">
+        <strong>자동화 원칙</strong>
+        <span>일반 쇼핑몰은 구매승인형</span>
+        <span>공급처 API만 자동발주</span>
+        <span>결제 전 가격·재고 재확인</span>
+      </div>
+      {view === "overview" && <div className="monitoring-board">{preparedPanel}{sellingPanel}</div>}
+      {view === "prepared" && preparedPanel}
+      {view === "selling" && sellingPanel}
+      {view === "procurement" && orderPanel(false)}
+      {view === "shipping" && orderPanel(true)}
+      {view === "settlement" && <div className="monitoring-empty settlement-empty">정산 연동은 판매채널 주문·발주 흐름이 안정화된 다음 단계에서 연결합니다.</div>}
     </div>
   );
 }
