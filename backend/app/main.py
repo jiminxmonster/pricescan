@@ -349,6 +349,31 @@ def init_db() -> None:
             if column not in listing_columns:
                 db.execute(statement)
 
+        prepared_columns = {
+            row["name"] for row in db.execute("PRAGMA table_info(prepared_products)").fetchall()
+        }
+        prepared_column_migrations = [
+            ("product_type", "ALTER TABLE prepared_products ADD COLUMN product_type TEXT NOT NULL DEFAULT ''"),
+            ("model_name", "ALTER TABLE prepared_products ADD COLUMN model_name TEXT NOT NULL DEFAULT ''"),
+            ("fee_rate", "ALTER TABLE prepared_products ADD COLUMN fee_rate REAL NOT NULL DEFAULT 0"),
+            ("seller_sale_price", "ALTER TABLE prepared_products ADD COLUMN seller_sale_price INTEGER NOT NULL DEFAULT 0"),
+            ("seller_display_price", "ALTER TABLE prepared_products ADD COLUMN seller_display_price INTEGER NOT NULL DEFAULT 0"),
+            ("monitoring_enabled", "ALTER TABLE prepared_products ADD COLUMN monitoring_enabled INTEGER NOT NULL DEFAULT 0"),
+            ("auto_discount_enabled", "ALTER TABLE prepared_products ADD COLUMN auto_discount_enabled INTEGER NOT NULL DEFAULT 0"),
+            ("auto_discount_type", "ALTER TABLE prepared_products ADD COLUMN auto_discount_type TEXT NOT NULL DEFAULT 'amount'"),
+            ("auto_discount_value", "ALTER TABLE prepared_products ADD COLUMN auto_discount_value REAL NOT NULL DEFAULT 0"),
+        ]
+        for column, statement in prepared_column_migrations:
+            if column not in prepared_columns:
+                db.execute(statement)
+        db.execute(
+            """
+            UPDATE prepared_products
+            SET seller_sale_price = CASE WHEN seller_sale_price = 0 THEN sale_price ELSE seller_sale_price END,
+                seller_display_price = CASE WHEN seller_display_price = 0 THEN display_price ELSE seller_display_price END
+            """
+        )
+
         order_columns = {
             row["name"] for row in db.execute("PRAGMA table_info(orders)").fetchall()
         }
@@ -569,6 +594,20 @@ class PreparedProductPayload(BaseModel):
     display_price: int = 0
     shipping_fee: int = 0
     image_url: str = ""
+    product_type: str = ""
+    model_name: str = ""
+
+
+class PreparedMonitoringPayload(BaseModel):
+    monitoring_enabled: bool = False
+    fee_rate: float = Field(default=0, ge=0, le=100)
+    seller_sale_price: int = Field(default=0, ge=0)
+    seller_display_price: int = Field(default=0, ge=0)
+    auto_discount_enabled: bool = False
+    auto_discount_type: str = "amount"
+    auto_discount_value: float = Field(default=0, ge=0)
+    product_type: str = ""
+    model_name: str = ""
 
 
 def prepared_product_dedupe_key(payload: PreparedProductPayload) -> str:
@@ -2132,7 +2171,10 @@ def prepare_product(payload: PreparedProductPayload) -> dict[str, Any]:
                 """
                 UPDATE prepared_products
                 SET source_item_id = ?, source = ?, mall = ?, source_url = ?, title = ?,
-                    sale_price = ?, display_price = ?, shipping_fee = ?, image_url = ?, updated_at = ?
+                    sale_price = ?, display_price = ?, shipping_fee = ?, image_url = ?,
+                    product_type = CASE WHEN ? != '' THEN ? ELSE product_type END,
+                    model_name = CASE WHEN ? != '' THEN ? ELSE model_name END,
+                    updated_at = ?
                 WHERE id = ?
                 """,
                 (
@@ -2145,6 +2187,10 @@ def prepare_product(payload: PreparedProductPayload) -> dict[str, Any]:
                     max(payload.display_price, 0),
                     max(payload.shipping_fee, 0),
                     payload.image_url.strip(),
+                    payload.product_type.strip(),
+                    payload.product_type.strip(),
+                    payload.model_name.strip(),
+                    payload.model_name.strip(),
                     timestamp,
                     existing["id"],
                 ),
@@ -2157,9 +2203,10 @@ def prepare_product(payload: PreparedProductPayload) -> dict[str, Any]:
                 INSERT INTO prepared_products (
                     id, dedupe_key, source_item_id, source, mall, source_url, title,
                     sale_price, display_price, shipping_fee, image_url, status,
-                    listing_draft_id, created_at, updated_at
+                    listing_draft_id, product_type, model_name, seller_sale_price,
+                    seller_display_price, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'prepared', '', ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'prepared', '', ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     prepared_id,
@@ -2173,12 +2220,54 @@ def prepare_product(payload: PreparedProductPayload) -> dict[str, Any]:
                     max(payload.display_price, 0),
                     max(payload.shipping_fee, 0),
                     payload.image_url.strip(),
+                    payload.product_type.strip(),
+                    payload.model_name.strip(),
+                    max(payload.sale_price, 0),
+                    max(payload.display_price, 0),
                     timestamp,
                     timestamp,
                 ),
             )
         row = db.execute("SELECT * FROM prepared_products WHERE id = ?", (prepared_id,)).fetchone()
     log_event(f"product prepared: {payload.title}")
+    return row_to_dict(row) or {}
+
+
+@app.patch("/prepared-products/{prepared_id}/monitoring", dependencies=[Depends(require_admin)])
+def update_prepared_monitoring(prepared_id: str, payload: PreparedMonitoringPayload) -> dict[str, Any]:
+    discount_type = payload.auto_discount_type.strip().lower()
+    if discount_type not in {"amount", "percent"}:
+        raise HTTPException(status_code=422, detail="auto_discount_type must be amount or percent")
+    timestamp = now()
+    with connect() as db:
+        existing = db.execute("SELECT id, title FROM prepared_products WHERE id = ?", (prepared_id,)).fetchone()
+        if not existing:
+            raise HTTPException(status_code=404, detail="Prepared product not found")
+        db.execute(
+            """
+            UPDATE prepared_products
+            SET monitoring_enabled = ?, fee_rate = ?, seller_sale_price = ?, seller_display_price = ?,
+                auto_discount_enabled = ?, auto_discount_type = ?, auto_discount_value = ?,
+                product_type = ?, model_name = ?, status = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                int(payload.monitoring_enabled),
+                payload.fee_rate,
+                payload.seller_sale_price,
+                payload.seller_display_price,
+                int(payload.auto_discount_enabled),
+                discount_type,
+                payload.auto_discount_value,
+                payload.product_type.strip(),
+                payload.model_name.strip(),
+                "monitoring" if payload.monitoring_enabled else "prepared",
+                timestamp,
+                prepared_id,
+            ),
+        )
+        row = db.execute("SELECT * FROM prepared_products WHERE id = ?", (prepared_id,)).fetchone()
+    log_event(f"monitoring {'enabled' if payload.monitoring_enabled else 'disabled'}: {existing['title']}")
     return row_to_dict(row) or {}
 
 

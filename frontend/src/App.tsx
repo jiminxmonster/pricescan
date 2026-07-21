@@ -236,6 +236,15 @@ type PreparedProduct = {
   display_price: number;
   shipping_fee: number;
   image_url: string;
+  product_type: string;
+  model_name: string;
+  fee_rate: number;
+  seller_sale_price: number;
+  seller_display_price: number;
+  monitoring_enabled: number;
+  auto_discount_enabled: number;
+  auto_discount_type: "amount" | "percent";
+  auto_discount_value: number;
   status: string;
   listing_draft_id: string;
   created_at: string;
@@ -296,7 +305,7 @@ type Order = {
   updated_at: string;
 };
 
-type MonitoringView = "overview" | "prepared" | "selling" | "procurement" | "shipping" | "settlement";
+type MonitoringView = "waiting" | "active" | "selling" | "procurement" | "shipping" | "settlement";
 
 type Channel = {
   name: string;
@@ -605,6 +614,19 @@ function inferProductIdentity(title: string): InferredProductIdentity {
     manufacturerName: brand?.[2] || "",
     modelName,
   };
+}
+
+function inferProductType(title: string): string {
+  const rules: Array<[RegExp, string]> = [
+    [/노트북|랩탑|맥북|갤럭시북|그램/i, "노트북"],
+    [/모니터|디스플레이/i, "모니터"],
+    [/스마트\s*tv|텔레비전|\btv\b/i, "TV"],
+    [/태블릿|아이패드|갤럭시탭/i, "태블릿"],
+    [/스마트폰|휴대폰|아이폰|갤럭시\s*s\d/i, "스마트폰"],
+    [/냉장고/i, "냉장고"],
+    [/세탁기|건조기/i, "생활가전"],
+  ];
+  return rules.find(([pattern]) => pattern.test(title))?.[1] || "기타";
 }
 
 function productOnlyDescription(title: string, identity: InferredProductIdentity): string {
@@ -1314,6 +1336,8 @@ export default function App() {
     display_price: item.displayPrice,
     shipping_fee: item.shippingFee,
     image_url: "",
+    product_type: inferProductType(item.name),
+    model_name: inferProductIdentity(item.name).modelName,
   });
 
   const prepareProduct = async (item: DraftSourceItem) => {
@@ -1322,7 +1346,7 @@ export default function App() {
       body: JSON.stringify(preparedPayload(item)),
     });
     setPreparedProducts((current) => [prepared, ...current.filter((entry) => entry.id !== prepared.id)]);
-    setNotice("예비상품으로 저장했습니다. 모니터링에서 확인하세요.");
+    setNotice("모니터링 대기에 등록했습니다.");
     await refreshLogs();
   };
 
@@ -1332,6 +1356,26 @@ export default function App() {
     setPreparedProducts((current) => current.filter((item) => item.id !== preparedId));
     setNotice("예비상품 삭제 완료");
     await refreshLogs();
+  };
+
+  const updatePreparedMonitoring = async (item: PreparedProduct, updates: Partial<PreparedProduct>) => {
+    const payload = {
+      monitoring_enabled: Boolean(updates.monitoring_enabled ?? item.monitoring_enabled),
+      fee_rate: updates.fee_rate ?? item.fee_rate ?? 0,
+      seller_sale_price: updates.seller_sale_price ?? item.seller_sale_price ?? item.sale_price,
+      seller_display_price: updates.seller_display_price ?? item.seller_display_price ?? item.display_price,
+      auto_discount_enabled: Boolean(updates.auto_discount_enabled ?? item.auto_discount_enabled),
+      auto_discount_type: updates.auto_discount_type ?? item.auto_discount_type ?? "amount",
+      auto_discount_value: updates.auto_discount_value ?? item.auto_discount_value ?? 0,
+      product_type: updates.product_type ?? item.product_type ?? inferProductType(item.title),
+      model_name: updates.model_name ?? item.model_name ?? inferProductIdentity(item.title).modelName,
+    };
+    const saved = await request<PreparedProduct>(`/prepared-products/${item.id}/monitoring`, token, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    });
+    setPreparedProducts((current) => current.map((entry) => entry.id === saved.id ? saved : entry));
+    setNotice(payload.monitoring_enabled ? "모니터링을 시작했습니다." : "모니터링 대기로 이동했습니다.");
   };
 
   const preparedToDraftSource = (item: PreparedProduct): DraftSourceItem => ({
@@ -1856,6 +1900,7 @@ export default function App() {
               onEditDraft={openDraftEditor}
               onValidateDraft={validateDraft}
               onDeletePrepared={deletePreparedProduct}
+              onUpdateMonitoring={updatePreparedMonitoring}
               onCopySmartstore={copySmartstoreToPrepared}
               onUpdateProcurement={updateProcurement}
               onOpenApi={() => {
@@ -2155,6 +2200,87 @@ function StatCard({ label, value }: { label: string; value: number }) {
   );
 }
 
+function monitoringMetrics(item: PreparedProduct, feeRate: number, sellerDisplayPrice: number) {
+  const sourceCost = Math.max(item.display_price, 0) + Math.max(item.shipping_fee, 0);
+  const fee = Math.round(Math.max(sellerDisplayPrice, 0) * Math.max(feeRate, 0) / 100);
+  const margin = Math.max(sellerDisplayPrice, 0) - sourceCost - fee;
+  const compareRate = sourceCost > 0 ? ((Math.max(sellerDisplayPrice, 0) - sourceCost) / sourceCost) * 100 : 0;
+  return { sourceCost, fee, margin, compareRate };
+}
+
+function MonitoringWaitingRow({ item, onUpdate, onDelete }: {
+  item: PreparedProduct;
+  onUpdate: (item: PreparedProduct, updates: Partial<PreparedProduct>) => Promise<void>;
+  onDelete: (id: string) => void;
+}) {
+  const [feeRate, setFeeRate] = useState(item.fee_rate || 0);
+  const sellerDisplayPrice = item.seller_display_price || item.display_price;
+  const metrics = monitoringMetrics(item, feeRate, sellerDisplayPrice);
+  const identity = inferProductIdentity(item.title);
+  const enableMonitoring = () => onUpdate(item, {
+    monitoring_enabled: 1,
+    fee_rate: feeRate,
+    seller_sale_price: item.seller_sale_price || item.sale_price,
+    seller_display_price: sellerDisplayPrice,
+    product_type: item.product_type || inferProductType(item.title),
+    model_name: item.model_name || identity.modelName,
+  });
+  return (
+    <tr>
+      <td>{item.product_type || inferProductType(item.title)}</td>
+      <td className="monitoring-model">{item.source_url ? <a href={item.source_url} target="_blank" rel="noreferrer">{item.model_name || identity.modelName || item.title}</a> : (item.model_name || identity.modelName || item.title)}</td>
+      <td>{item.mall || sourceLabel(item.source)}</td>
+      <td>{money(item.sale_price)}</td>
+      <td>{money(item.display_price)}</td>
+      <td><label className="inline-number"><input type="number" min="0" max="100" step="0.1" value={feeRate} onChange={(event) => setFeeRate(Number(event.target.value))} /><span>%</span></label></td>
+      <td>{money(metrics.sourceCost)}</td>
+      <td className={metrics.margin >= 0 ? "positive-value" : "negative-value"}>{money(metrics.margin)}</td>
+      <td><button className="monitoring-toggle" aria-pressed="false" onClick={enableMonitoring}><span />OFF</button></td>
+      <td><button className="btn small danger" onClick={() => onDelete(item.id)}>삭제</button></td>
+    </tr>
+  );
+}
+
+function MonitoringActiveRow({ item, onUpdate }: {
+  item: PreparedProduct;
+  onUpdate: (item: PreparedProduct, updates: Partial<PreparedProduct>) => Promise<void>;
+}) {
+  const [feeRate, setFeeRate] = useState(item.fee_rate || 0);
+  const [sellerSalePrice, setSellerSalePrice] = useState(item.seller_sale_price || item.sale_price);
+  const [sellerDisplayPrice, setSellerDisplayPrice] = useState(item.seller_display_price || item.display_price);
+  const [discountType, setDiscountType] = useState<"amount" | "percent">(item.auto_discount_type || "amount");
+  const [discountValue, setDiscountValue] = useState(item.auto_discount_value || 0);
+  const [autoDiscount, setAutoDiscount] = useState(Boolean(item.auto_discount_enabled));
+  const metrics = monitoringMetrics(item, feeRate, sellerDisplayPrice);
+  const identity = inferProductIdentity(item.title);
+  const save = (enabled = true) => onUpdate(item, {
+    monitoring_enabled: enabled ? 1 : 0,
+    fee_rate: feeRate,
+    seller_sale_price: sellerSalePrice,
+    seller_display_price: sellerDisplayPrice,
+    auto_discount_enabled: autoDiscount ? 1 : 0,
+    auto_discount_type: discountType,
+    auto_discount_value: discountValue,
+    product_type: item.product_type || inferProductType(item.title),
+    model_name: item.model_name || identity.modelName,
+  });
+  return (
+    <tr>
+      <td>{item.product_type || inferProductType(item.title)}</td>
+      <td className="monitoring-model">{item.source_url ? <a href={item.source_url} target="_blank" rel="noreferrer">{item.model_name || identity.modelName || item.title}</a> : (item.model_name || identity.modelName || item.title)}</td>
+      <td>{item.mall || sourceLabel(item.source)}</td>
+      <td><span className="stacked-price">판매 {money(item.sale_price)}<b>노출 {money(item.display_price)}</b></span></td>
+      <td><span className="price-inputs"><input type="number" step="1000" min="0" value={sellerSalePrice} onChange={(event) => setSellerSalePrice(Number(event.target.value))} /><input type="number" step="1000" min="0" value={sellerDisplayPrice} onChange={(event) => setSellerDisplayPrice(Number(event.target.value))} /></span></td>
+      <td className={metrics.compareRate >= 0 ? "positive-value" : "negative-value"}>{metrics.compareRate.toFixed(1)}%</td>
+      <td><label className="inline-number"><input type="number" min="0" max="100" step="0.1" value={feeRate} onChange={(event) => setFeeRate(Number(event.target.value))} /><span>%</span></label><small>{money(metrics.fee)}</small></td>
+      <td>{money(metrics.sourceCost)}</td>
+      <td className={metrics.margin >= 0 ? "positive-value" : "negative-value"}>{money(metrics.margin)}</td>
+      <td><div className="auto-discount-control"><label><input type="checkbox" checked={autoDiscount} onChange={(event) => setAutoDiscount(event.target.checked)} /> 자동인하</label><span>최저가 대비</span><input type="number" min="0" step={discountType === "amount" ? 1000 : 0.1} value={discountValue} onChange={(event) => setDiscountValue(Number(event.target.value))} /><select value={discountType} onChange={(event) => setDiscountType(event.target.value as "amount" | "percent")}><option value="amount">원</option><option value="percent">%</option></select></div></td>
+      <td><div className="monitoring-row-actions"><button className="btn small primary" onClick={() => save(true)}>저장</button><button className="monitoring-toggle on" aria-pressed="true" onClick={() => save(false)}><span />ON</button></div></td>
+    </tr>
+  );
+}
+
 function MonitoringBoard({
   preparedProducts,
   drafts,
@@ -2167,6 +2293,7 @@ function MonitoringBoard({
   onEditDraft,
   onValidateDraft,
   onDeletePrepared,
+  onUpdateMonitoring,
   onCopySmartstore,
   onUpdateProcurement,
   onOpenApi,
@@ -2182,65 +2309,48 @@ function MonitoringBoard({
   onEditDraft: (draft: ListingDraft) => void;
   onValidateDraft: (draftId: string) => void;
   onDeletePrepared: (id: string) => void;
+  onUpdateMonitoring: (item: PreparedProduct, updates: Partial<PreparedProduct>) => Promise<void>;
   onCopySmartstore: (item: SmartstoreProduct) => void;
   onUpdateProcurement: (order: Order, status: string, source?: PreparedProduct, updates?: Partial<Order>) => void;
   onOpenApi: () => void;
 }) {
-  const [view, setView] = useState<MonitoringView>("overview");
+  const [view, setView] = useState<MonitoringView>("waiting");
+  const waitingProducts = preparedProducts.filter((item) => !Boolean(item.monitoring_enabled));
+  const activeProducts = preparedProducts.filter((item) => Boolean(item.monitoring_enabled));
   const procurementOrders = orders.filter((order) => !["shipped", "cancelled"].includes(order.procurement_status));
   const shippingOrders = orders.filter((order) => ["ordered", "tracking_pending", "shipped"].includes(order.procurement_status));
   const workflow = [
-    { key: "overview" as MonitoringView, step: "전체", label: "운영현황", count: preparedProducts.length + smartstorePayload.count + orders.length },
-    { key: "prepared" as MonitoringView, step: "1", label: "예비·등록", count: preparedProducts.length },
-    { key: "selling" as MonitoringView, step: "2", label: "판매상품", count: smartstorePayload.count },
-    { key: "procurement" as MonitoringView, step: "3", label: "주문·발주", count: procurementOrders.length },
-    { key: "shipping" as MonitoringView, step: "4", label: "배송·클레임", count: shippingOrders.length },
-    { key: "settlement" as MonitoringView, step: "5", label: "정산", count: 0 },
+    { key: "waiting" as MonitoringView, step: "2", label: "모니터링 대기", count: waitingProducts.length },
+    { key: "active" as MonitoringView, step: "3", label: "모니터링 중", count: activeProducts.length },
+    { key: "selling" as MonitoringView, step: "4", label: "판매상품", count: smartstorePayload.count },
+    { key: "procurement" as MonitoringView, step: "5", label: "주문·발주", count: procurementOrders.length },
+    { key: "shipping" as MonitoringView, step: "6", label: "배송·클레임", count: shippingOrders.length },
+    { key: "settlement" as MonitoringView, step: "7", label: "정산", count: 0 },
   ];
 
-  const preparedPanel = (
+  const waitingPanel = (
     <section className="monitoring-panel">
       <div className="monitoring-panel-head">
-        <div><strong>예비상품</strong><span>검색 결과 저장 → 원소스 확인 → 등록검사</span></div>
-        <b>{preparedProducts.length}</b>
+        <div><strong>모니터링 대기</strong><span>검색에서 등록한 상품을 검토하고 ON으로 전환합니다.</span></div>
+        <b>{waitingProducts.length}</b>
       </div>
-      <div className="monitoring-list">
-        {preparedProducts.map((item) => {
-          const draft = drafts.find((candidate) => candidate.id === item.listing_draft_id);
-          const missing = draft ? draftMissingLabels(draft) : "";
-          return (
-          <article className="monitoring-item" key={item.id}>
-            <div className="monitoring-item-title">
-              {item.source_url ? <a href={item.source_url} target="_blank" rel="noreferrer">{item.title}</a> : <strong>{item.title}</strong>}
-              <span className={pillClass(item.status)}>{statusLabel(item.status)}</span>
-            </div>
-            <p>{sourceLabel(item.source)} · {item.mall || "판매처 미확인"}</p>
-            <div className="source-health-row">
-              <span className={`source-grade ${item.source_url ? "manual" : "reference"}`}>{item.source_url ? "구매승인형" : "가격참조형"}</span>
-              <span>{item.source_url ? "원소스 링크 연결됨" : "실구매 전 원소스 연결 필요"}</span>
-            </div>
-            <div className="monitoring-price"><strong>{money(item.display_price)}</strong><span>배송비 {money(item.shipping_fee)}</span></div>
-            {draft?.validation?.checked_at && (
-              <div className={`monitoring-validation ${draft.validation.ready ? "ready" : "warning"}`}>
-                <strong>{draft.validation.ready ? "등록검사 통과" : "등록검사 보완 필요"}</strong>
-                {!draft.validation.ready && <span>{missing || "필수 항목을 확인하세요."}</span>}
-              </div>
-            )}
-            <div className="monitoring-actions">
-              {item.source_url && <a className="btn small" href={item.source_url} target="_blank" rel="noreferrer">원소스 확인</a>}
-              {draft ? (
-                <>
-                  <button className="btn small primary" onClick={() => onEditDraft(draft)}>등록폼 열기</button>
-                  <button className="btn small" onClick={() => onValidateDraft(draft.id)}>등록검사</button>
-                </>
-              ) : (
-                <button className="btn small primary" onClick={() => onOpenDraft(item)}>등록 준비</button>
-              )}
-              <button className="btn small danger" onClick={() => onDeletePrepared(item.id)}>삭제</button>
-            </div>
-          </article>
-        )})}
-        {preparedProducts.length === 0 && <div className="monitoring-empty">상품검색 결과에서 `상품준비`를 눌러 추가하세요.</div>}
+      <div className="monitoring-table-wrap">
+        <table className="monitoring-data-table"><thead><tr><th>상품종류</th><th>모델명</th><th>쇼핑몰</th><th>판매가</th><th>노출가</th><th>수수료</th><th>예상정산</th><th>최저가 대비 마진</th><th>모니터링</th><th>관리</th></tr></thead><tbody>
+          {waitingProducts.map((item) => <MonitoringWaitingRow key={item.id} item={item} onUpdate={onUpdateMonitoring} onDelete={onDeletePrepared} />)}
+        </tbody></table>
+        {waitingProducts.length === 0 && <div className="monitoring-empty">상품검색에서 `모니터링 등록`을 눌러 추가하세요.</div>}
+      </div>
+    </section>
+  );
+
+  const activePanel = (
+    <section className="monitoring-panel">
+      <div className="monitoring-panel-head"><div><strong>모니터링 중</strong><span>ON 상태 상품의 원소스 가격과 셀러 대응가를 함께 관리합니다.</span></div><b>{activeProducts.length}</b></div>
+      <div className="monitoring-table-wrap">
+        <table className="monitoring-data-table active-table"><thead><tr><th>상품종류</th><th>모델명</th><th>쇼핑몰</th><th>상대방<br />판매가/노출가</th><th>셀러대응<br />판매가/노출가</th><th>비교율</th><th>수수료</th><th>예상정산</th><th>마진</th><th>자동인하</th><th>관리</th></tr></thead><tbody>
+          {activeProducts.map((item) => <MonitoringActiveRow key={item.id} item={item} onUpdate={onUpdateMonitoring} />)}
+        </tbody></table>
+        {activeProducts.length === 0 && <div className="monitoring-empty">대기 목록에서 모니터링을 ON으로 전환하세요.</div>}
       </div>
     </section>
   );
@@ -2352,13 +2462,13 @@ function MonitoringBoard({
         ))}
       </nav>
       <div className="workflow-rule">
-        <strong>자동화 원칙</strong>
-        <span>일반 쇼핑몰은 구매승인형</span>
-        <span>공급처 API만 자동발주</span>
-        <span>결제 전 가격·재고 재확인</span>
+        <strong>운영 순서</strong>
+        <span>1. 상품검색·모니터링 등록</span>
+        <span>2. 모니터링 대기에서 ON</span>
+        <span>3. 모니터링 중 가격관리</span>
       </div>
-      {view === "overview" && <div className="monitoring-board">{preparedPanel}{sellingPanel}</div>}
-      {view === "prepared" && preparedPanel}
+      {view === "waiting" && waitingPanel}
+      {view === "active" && activePanel}
       {view === "selling" && sellingPanel}
       {view === "procurement" && orderPanel(false)}
       {view === "shipping" && orderPanel(true)}
@@ -3223,6 +3333,7 @@ function SearchResultList({
     const marginRate = row.displayPrice ? (margin / row.displayPrice) * 100 : 0;
     return (
       <div className={`result-row ${isLowest ? "lowest-row" : ""} ${row.status === "baseline" ? "baseline-row" : ""}`} key={row.id}>
+        <span className="result-product-type">{inferProductType(row.name)}</span>
         <a className="result-model" href={row.url} target="_blank" rel="noreferrer">{row.name}</a>
         <span className="result-colon">:</span>
         <span className="source-chip">{sourceLabel(row.collectionSource)}</span>
@@ -3246,7 +3357,7 @@ function SearchResultList({
               displayPrice: row.displayPrice,
               shippingFee: row.shippingFee,
               url: row.url,
-            })}>상품준비</button>
+            })}>모니터링 등록</button>
           </span>
         )}
       </div>
