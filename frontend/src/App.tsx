@@ -265,6 +265,18 @@ type ApiKey = {
   last_tested_at: string | null;
 };
 
+type CollectionQuota = {
+  source: string;
+  label: string;
+  daily_limit: number;
+  enabled: boolean;
+  used: number;
+  remaining: number;
+  usage_date: string;
+  last_status: string;
+  last_requested_at: string | null;
+};
+
 type Order = {
   id: string;
   channel: string;
@@ -967,6 +979,8 @@ export default function App() {
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [searchPayload, setSearchPayload] = useState<SearchPayload>({ run: null, items: [], summary: { collected_count: 0, lowest_count: 0, excluded_count: 0 } });
   const [apiKeys, setApiKeys] = useState<ApiKey[]>([]);
+  const [collectionQuotas, setCollectionQuotas] = useState<CollectionQuota[]>([]);
+  const [quotaDrafts, setQuotaDrafts] = useState<Record<string, { dailyLimit: number; enabled: boolean }>>({});
   const [orders, setOrders] = useState<Order[]>([]);
   const [channels, setChannels] = useState<Channel[]>([]);
   const [logs, setLogs] = useState<LogItem[]>([]);
@@ -1038,10 +1052,11 @@ export default function App() {
 
   const loadAll = async () => {
     if (!token) return;
-    const [dashboardData, latestSearch, keyData, orderData, channelData, logData, draftData, imageData, preparedData] = await Promise.all([
+    const [dashboardData, latestSearch, keyData, quotaData, orderData, channelData, logData, draftData, imageData, preparedData] = await Promise.all([
       request<Dashboard>("/dashboard", token),
       request<SearchPayload>("/price-search/latest", token),
       request<ApiKey[]>("/api-keys", token),
+      request<CollectionQuota[]>("/collection-quotas", token),
       request<Order[]>("/orders", token),
       request<Channel[]>("/channels", token),
       request<LogItem[]>("/logs", token),
@@ -1052,6 +1067,8 @@ export default function App() {
     setDashboard(dashboardData);
     setSearchPayload(latestSearch);
     setApiKeys(keyData);
+    setCollectionQuotas(quotaData);
+    setQuotaDrafts(Object.fromEntries(quotaData.map((quota) => [quota.source, { dailyLimit: quota.daily_limit, enabled: quota.enabled }])));
     setOrders(orderData);
     setChannels(channelData);
     setLogs(logData);
@@ -1082,6 +1099,26 @@ export default function App() {
 
   const refreshLogs = async () => {
     setLogs(await request<LogItem[]>("/logs", token));
+  };
+
+  const refreshCollectionQuotas = async () => {
+    const data = await request<CollectionQuota[]>("/collection-quotas", token);
+    setCollectionQuotas(data);
+    setQuotaDrafts(Object.fromEntries(data.map((quota) => [quota.source, { dailyLimit: quota.daily_limit, enabled: quota.enabled }])));
+  };
+
+  const saveCollectionQuota = async (source: string) => {
+    const draft = quotaDrafts[source];
+    if (!draft || !Number.isFinite(draft.dailyLimit) || draft.dailyLimit < 1) {
+      setNotice("일일 요청 한도는 1건 이상이어야 합니다.");
+      return;
+    }
+    await request<CollectionQuota>(`/collection-quotas/${source}`, token, {
+      method: "PUT",
+      body: JSON.stringify({ daily_limit: Math.floor(draft.dailyLimit), enabled: draft.enabled }),
+    });
+    await refreshCollectionQuotas();
+    setNotice("일일 수집 한도를 저장했습니다.");
   };
 
   const refreshPublishData = async () => {
@@ -1176,6 +1213,7 @@ export default function App() {
       setTab("search");
     } finally {
       setCollecting(false);
+      await refreshCollectionQuotas().catch(() => undefined);
     }
   };
 
@@ -1742,7 +1780,7 @@ export default function App() {
                 </button>
                 {showSourcePanel && (
                   <div className="source-popover">
-                    <SourceSelector groups={searchSourceGroups} selected={selectedSources} onToggle={toggleSearchSource} />
+                    <SourceSelector groups={searchSourceGroups} selected={selectedSources} quotas={collectionQuotas} onToggle={toggleSearchSource} />
                   </div>
                 )}
               </div>
@@ -1974,6 +2012,54 @@ export default function App() {
                   </label>
                 ))}
                 <p>꺼진 기능은 상단 메뉴와 좌측 메뉴에서 모두 숨깁니다.</p>
+              </div>
+              <div className="box settings-box quota-settings-box">
+                <strong>소스별 일일 요청 한도</strong>
+                <p>한국시간 자정에 사용량이 초기화됩니다. 한도를 초과한 소스만 건너뛰고 나머지 소스는 계속 수집합니다.</p>
+                <div className="quota-list">
+                  {collectionQuotas.map((quota) => {
+                    const draft = quotaDrafts[quota.source] || { dailyLimit: quota.daily_limit, enabled: quota.enabled };
+                    const usagePercent = Math.min((quota.used / Math.max(quota.daily_limit, 1)) * 100, 100);
+                    return (
+                      <div className="quota-row" key={quota.source}>
+                        <div className="quota-summary">
+                          <strong>{quota.label}</strong>
+                          <span>오늘 {quota.used.toLocaleString()} / {quota.daily_limit.toLocaleString()}건</span>
+                        </div>
+                        <div className="quota-meter" aria-label={`${quota.label} 일일 요청 사용량`}>
+                          <span style={{ width: `${usagePercent}%` }} />
+                        </div>
+                        <label>
+                          <span>일일 한도</span>
+                          <input
+                            className="input"
+                            type="number"
+                            min="1"
+                            max="10000"
+                            step="10"
+                            value={draft.dailyLimit}
+                            onChange={(event) => setQuotaDrafts((current) => ({
+                              ...current,
+                              [quota.source]: { ...draft, dailyLimit: Number(event.target.value) },
+                            }))}
+                          />
+                        </label>
+                        <label className="quota-enabled">
+                          <input
+                            type="checkbox"
+                            checked={draft.enabled}
+                            onChange={(event) => setQuotaDrafts((current) => ({
+                              ...current,
+                              [quota.source]: { ...draft, enabled: event.target.checked },
+                            }))}
+                          />
+                          <span>수집 사용</span>
+                        </label>
+                        <button className="btn small" onClick={() => saveCollectionQuota(quota.source)}>저장</button>
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
             </div>
             <div className="box mt">
@@ -2310,12 +2396,15 @@ function PublishStatusBar({ apiKeys }: { apiKeys: ApiKey[] }) {
 function SourceSelector({
   groups,
   selected,
+  quotas,
   onToggle,
 }: {
   groups: SearchSourceGroup[];
   selected: string[];
+  quotas: CollectionQuota[];
   onToggle: (source: string) => void;
 }) {
+  const quotaBySource = new Map(quotas.map((quota) => [quota.source, quota]));
   return (
     <div className="box source-selector">
       <div className="source-selector-head">
@@ -2328,18 +2417,22 @@ function SourceSelector({
             <strong>{group.title}</strong>
             <div className="source-options">
               {group.options.map((option) => (
-                <label className={`source-option ${option.enabled ? "" : "disabled"}`} key={option.key}>
+                <label className={`source-option ${option.enabled && quotaBySource.get(option.key)?.enabled !== false ? "" : "disabled"}`} key={option.key}>
                   <input
                     type="checkbox"
                     checked={selected.includes(option.key)}
-                    disabled={!option.enabled}
+                    disabled={!option.enabled || quotaBySource.get(option.key)?.enabled === false}
                     onChange={() => onToggle(option.key)}
                   />
                   <span>
                     <b>{option.label}</b>
                     <em>{option.description}</em>
                   </span>
-                  <small>{option.badge}</small>
+                  <small>
+                    {quotaBySource.has(option.key)
+                      ? `오늘 ${quotaBySource.get(option.key)?.used}/${quotaBySource.get(option.key)?.daily_limit}`
+                      : option.badge}
+                  </small>
                 </label>
               ))}
             </div>

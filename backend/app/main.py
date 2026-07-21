@@ -17,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import bcrypt
 import httpx
@@ -47,6 +48,12 @@ NAVER_LIVE_PUBLISH_CONFIRMATION = "NAVER_LIVE_PUBLISH"
 NAVER_PRODUCT_IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/bmp"}
 SMARTSTORE_CATEGORY_CACHE_TTL = 6 * 60 * 60
 smartstore_category_cache: dict[str, Any] = {"fetched_at": 0.0, "items": []}
+KST = ZoneInfo("Asia/Seoul")
+DEFAULT_COLLECTION_LIMITS = {
+    "naver": int(os.getenv("NAVER_DAILY_REQUEST_LIMIT", "200")),
+    "danawa": int(os.getenv("DANAWA_DAILY_REQUEST_LIMIT", "100")),
+    "enuri": int(os.getenv("ENURI_DAILY_REQUEST_LIMIT", "60")),
+}
 
 
 app = FastAPI(title="PriceScan API", version="0.1.0")
@@ -61,6 +68,10 @@ app.add_middleware(
 
 def now() -> str:
     return datetime.now().isoformat(timespec="microseconds")
+
+
+def usage_date() -> str:
+    return datetime.now(KST).date().isoformat()
 
 
 @contextmanager
@@ -236,6 +247,22 @@ def init_db() -> None:
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS collection_limits (
+                source TEXT PRIMARY KEY,
+                daily_limit INTEGER NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS collection_usage (
+                source TEXT NOT NULL,
+                usage_date TEXT NOT NULL,
+                request_count INTEGER NOT NULL DEFAULT 0,
+                last_status TEXT NOT NULL DEFAULT '',
+                last_requested_at TEXT,
+                PRIMARY KEY (source, usage_date)
+            );
+
             CREATE TABLE IF NOT EXISTS image_assets (
                 id TEXT PRIMARY KEY,
                 filename TEXT NOT NULL,
@@ -392,6 +419,14 @@ def init_db() -> None:
                 (platform, label),
             )
             db.execute("UPDATE api_keys SET label = ? WHERE platform = ?", (label, platform))
+        for source, daily_limit in DEFAULT_COLLECTION_LIMITS.items():
+            db.execute(
+                """
+                INSERT OR IGNORE INTO collection_limits (source, daily_limit, enabled, updated_at)
+                VALUES (?, ?, 1, ?)
+                """,
+                (source, max(daily_limit, 1), now()),
+            )
         db.execute(
             """
             UPDATE api_keys
@@ -446,6 +481,11 @@ class ApiKeyPayload(BaseModel):
     client_id: str = ""
     client_secret: str = ""
     extra_json: str = "{}"
+
+
+class CollectionLimitPayload(BaseModel):
+    daily_limit: int = Field(ge=1, le=10000)
+    enabled: bool = True
 
 
 class PriceSearchRequest(BaseModel):
@@ -1431,11 +1471,96 @@ def dedupe_products(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 READY_SEARCH_SOURCES = {"naver", "danawa"}
+COLLECTION_SOURCE_LABELS = {
+    "naver": "네이버 쇼핑검색",
+    "danawa": "다나와",
+    "enuri": "에누리",
+}
+
+
+class CollectionQuotaExceeded(RuntimeError):
+    pass
 
 
 def normalize_sources(sources: list[str]) -> list[str]:
     selected = [source for source in sources if source in READY_SEARCH_SOURCES]
     return selected or ["naver", "danawa"]
+
+
+def collection_quota_rows(db: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = db.execute(
+        """
+        SELECT limits.source, limits.daily_limit, limits.enabled, limits.updated_at,
+               COALESCE(usage.request_count, 0) AS used,
+               COALESCE(usage.last_status, '') AS last_status,
+               usage.last_requested_at
+        FROM collection_limits AS limits
+        LEFT JOIN collection_usage AS usage
+          ON usage.source = limits.source AND usage.usage_date = ?
+        ORDER BY CASE limits.source WHEN 'naver' THEN 1 WHEN 'danawa' THEN 2 WHEN 'enuri' THEN 3 ELSE 9 END,
+                 limits.source
+        """,
+        (usage_date(),),
+    ).fetchall()
+    return [
+        {
+            **(row_to_dict(row) or {}),
+            "label": COLLECTION_SOURCE_LABELS.get(row["source"], row["source"]),
+            "enabled": bool(row["enabled"]),
+            "remaining": max(int(row["daily_limit"]) - int(row["used"]), 0),
+            "usage_date": usage_date(),
+        }
+        for row in rows
+    ]
+
+
+def reserve_collection_request(db: sqlite3.Connection, source: str) -> None:
+    quota = db.execute(
+        "SELECT daily_limit, enabled FROM collection_limits WHERE source = ?",
+        (source,),
+    ).fetchone()
+    if not quota:
+        raise CollectionQuotaExceeded(f"{COLLECTION_SOURCE_LABELS.get(source, source)} 수집 한도가 설정되지 않음")
+    if not quota["enabled"]:
+        raise CollectionQuotaExceeded(f"{COLLECTION_SOURCE_LABELS.get(source, source)} 일일 수집이 관리자설정에서 꺼져 있음")
+
+    today = usage_date()
+    requested_at = now()
+    db.execute(
+        """
+        INSERT OR IGNORE INTO collection_usage
+        (source, usage_date, request_count, last_status, last_requested_at)
+        VALUES (?, ?, 0, '', NULL)
+        """,
+        (source, today),
+    )
+    cursor = db.execute(
+        """
+        UPDATE collection_usage
+        SET request_count = request_count + 1,
+            last_status = 'running',
+            last_requested_at = ?
+        WHERE source = ? AND usage_date = ? AND request_count < ?
+        """,
+        (requested_at, source, today, int(quota["daily_limit"])),
+    )
+    db.commit()
+    if cursor.rowcount == 0:
+        raise CollectionQuotaExceeded(
+            f"{COLLECTION_SOURCE_LABELS.get(source, source)} 오늘 요청 한도 {quota['daily_limit']}건을 모두 사용함"
+        )
+
+
+def complete_collection_request(db: sqlite3.Connection, source: str, status: str) -> None:
+    db.execute(
+        """
+        UPDATE collection_usage
+        SET last_status = ?
+        WHERE source = ? AND usage_date = ?
+        """,
+        (status, source, usage_date()),
+    )
+    db.commit()
 
 
 def collect_price_products(db: sqlite3.Connection, query: str, sort_mode: str, sources: list[str]) -> tuple[list[dict[str, Any]], list[str]]:
@@ -1447,16 +1572,24 @@ def collect_price_products(db: sqlite3.Connection, query: str, sort_mode: str, s
         naver_key = db.execute("SELECT * FROM api_keys WHERE platform = 'naver'").fetchone()
         if naver_key and naver_key["client_id"] and naver_key["client_secret"]:
             try:
+                reserve_collection_request(db, "naver")
                 products.extend(fetch_naver_products(query, sort_mode, naver_key["client_id"], naver_key["client_secret"]))
+                complete_collection_request(db, "naver", "success")
             except Exception as error:
+                if not isinstance(error, CollectionQuotaExceeded):
+                    complete_collection_request(db, "naver", "error")
                 warnings.append(str(error))
         else:
             warnings.append("네이버 쇼핑 API 키가 없어 네이버 수집을 건너뜀")
 
     if "danawa" in selected_sources:
         try:
+            reserve_collection_request(db, "danawa")
             products.extend(fetch_danawa_products(query))
+            complete_collection_request(db, "danawa", "success")
         except Exception as error:
+            if not isinstance(error, CollectionQuotaExceeded):
+                complete_collection_request(db, "danawa", "error")
             warnings.append(str(error))
 
     unique_products = dedupe_products(products)
@@ -1606,6 +1739,33 @@ def api_keys() -> list[dict[str, Any]]:
         return [row_to_dict(row) or {} for row in db.execute("SELECT * FROM api_keys ORDER BY platform").fetchall()]
 
 
+@app.get("/collection-quotas", dependencies=[Depends(require_admin)])
+def collection_quotas() -> list[dict[str, Any]]:
+    with connect() as db:
+        return collection_quota_rows(db)
+
+
+@app.put("/collection-quotas/{source}", dependencies=[Depends(require_admin)])
+def save_collection_quota(source: str, payload: CollectionLimitPayload) -> dict[str, Any]:
+    with connect() as db:
+        row = db.execute("SELECT source FROM collection_limits WHERE source = ?", (source,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Unknown collection source")
+        db.execute(
+            """
+            UPDATE collection_limits
+            SET daily_limit = ?, enabled = ?, updated_at = ?
+            WHERE source = ?
+            """,
+            (payload.daily_limit, int(payload.enabled), now(), source),
+        )
+        quota = next(item for item in collection_quota_rows(db) if item["source"] == source)
+    log_event(
+        f"{COLLECTION_SOURCE_LABELS.get(source, source)} daily request limit saved: {payload.daily_limit} / enabled={payload.enabled}"
+    )
+    return quota
+
+
 @app.put("/api-keys/{platform}", dependencies=[Depends(require_admin)])
 def save_api_key(platform: str, payload: ApiKeyPayload) -> dict[str, Any]:
     with connect() as db:
@@ -1639,10 +1799,14 @@ def test_api_key(platform: str) -> dict[str, Any]:
         if platform == "naver":
             if key["client_id"] and key["client_secret"]:
                 try:
+                    reserve_collection_request(db, "naver")
                     fetch_naver_products("노트북", "lowest", key["client_id"], key["client_secret"], display=1)
+                    complete_collection_request(db, "naver", "success")
                     connected = True
                     message = "네이버 쇼핑 검색 API 실제 호출 성공"
                 except Exception as error:
+                    if not isinstance(error, CollectionQuotaExceeded):
+                        complete_collection_request(db, "naver", "error")
                     message = str(error)
             else:
                 message = "네이버 Client ID/Secret 입력 필요"
@@ -1658,17 +1822,25 @@ def test_api_key(platform: str) -> dict[str, Any]:
                 message = "스마트스토어 Application ID/Secret 입력 필요"
         elif platform == "danawa":
             try:
+                reserve_collection_request(db, "danawa")
                 fetch_danawa_products("노트북", display=1)
+                complete_collection_request(db, "danawa", "success")
                 connected = True
                 message = "다나와 검색 페이지 수집/파싱 성공"
             except Exception as error:
+                if not isinstance(error, CollectionQuotaExceeded):
+                    complete_collection_request(db, "danawa", "error")
                 message = str(error)
         elif platform == "enuri":
             try:
+                reserve_collection_request(db, "enuri")
                 fetch_enuri_products("노트북", display=1)
+                complete_collection_request(db, "enuri", "success")
                 connected = True
                 message = "에누리 검색 페이지 수집/파싱 성공"
             except Exception as error:
+                if not isinstance(error, CollectionQuotaExceeded):
+                    complete_collection_request(db, "enuri", "error")
                 message = str(error)
         else:
             connected = bool(key["client_id"] and key["client_secret"])
