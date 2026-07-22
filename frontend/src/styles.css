@@ -662,8 +662,11 @@ td { font-size: 14px; }
   color: var(--brand);
 }
 .search-results-table-wrap {
+  position: relative;
   width: 100%;
-  overflow-x: auto;
+  max-height: min(68vh, 760px);
+  overflow: auto;
+  overscroll-behavior: contain;
 }
 .search-results-table {
   width: 100%;
@@ -687,8 +690,9 @@ td { font-size: 14px; }
 .search-results-table th {
   position: sticky;
   top: 0;
-  z-index: 1;
+  z-index: 3;
   background: #f5f7fa;
+  box-shadow: 0 1px 0 var(--line), 0 4px 10px rgba(20, 34, 56, 0.06);
   color: var(--muted);
   font-size: 12px;
   white-space: nowrap;
