@@ -218,7 +218,14 @@ def init_db() -> None:
                 url TEXT NOT NULL,
                 is_baseline INTEGER NOT NULL DEFAULT 0,
                 is_excluded INTEGER NOT NULL DEFAULT 0,
+                exclusion_reason TEXT NOT NULL DEFAULT '',
                 collected_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS search_exceptions (
+                id TEXT PRIMARY KEY,
+                terms_json TEXT NOT NULL DEFAULT '[]',
+                updated_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS orders (
@@ -315,6 +322,16 @@ def init_db() -> None:
                 updated_at TEXT NOT NULL
             );
             """
+        )
+
+        price_item_columns = {
+            row["name"] for row in db.execute("PRAGMA table_info(price_items)").fetchall()
+        }
+        if "exclusion_reason" not in price_item_columns:
+            db.execute("ALTER TABLE price_items ADD COLUMN exclusion_reason TEXT NOT NULL DEFAULT ''")
+        db.execute(
+            "INSERT OR IGNORE INTO search_exceptions (id, terms_json, updated_at) VALUES ('default', '[]', ?)",
+            (now(),),
         )
 
         listing_columns = {
@@ -518,6 +535,10 @@ class PriceSearchRequest(BaseModel):
     sort_mode: str = "lowest"
     filters: list[str] = []
     sources: list[str] = []
+
+
+class SearchExceptionsPayload(BaseModel):
+    terms: list[str] = Field(default_factory=list)
 
 
 class InvoicePrintRequest(BaseModel):
@@ -1678,6 +1699,66 @@ def sample_products(query: str) -> list[dict[str, Any]]:
     return items
 
 
+ACCESSORY_EXCEPTION_TERMS = {
+    "케이스", "파우치", "보호필름", "강화유리", "키스킨", "스킨", "커버", "스트랩",
+    "거치대", "충전기", "케이블", "어댑터", "리필", "교체용", "호환용", "부품",
+}
+
+
+def normalize_exception_terms(values: list[str]) -> list[str]:
+    terms: list[str] = []
+    for value in values:
+        for candidate in str(value).split(","):
+            term = " ".join(candidate.strip().lower().split())
+            if term and term not in terms:
+                terms.append(term)
+    return terms[:200]
+
+
+def get_search_exception_terms(db: sqlite3.Connection) -> list[str]:
+    row = db.execute("SELECT terms_json FROM search_exceptions WHERE id = 'default'").fetchone()
+    return normalize_exception_terms(parse_json_text(row["terms_json"] if row else "[]", []))
+
+
+def automatic_exclusion_reasons(
+    query: str,
+    items: list[dict[str, Any]],
+    custom_terms: list[str],
+) -> list[str]:
+    query_text = normalize_title(query).lower()
+    reasons = ["" for _ in items]
+    accessory_terms = [term for term in ACCESSORY_EXCEPTION_TERMS if term not in query_text]
+
+    for index, item in enumerate(items):
+        title = normalize_title(item.get("name", "")).lower()
+        matched_custom = next((term for term in custom_terms if term in title), "")
+        matched_accessory = next((term for term in accessory_terms if term in title), "")
+        if matched_custom:
+            reasons[index] = f"검색 예외어: {matched_custom}"
+        elif matched_accessory:
+            reasons[index] = f"관련 없는 부가상품: {matched_accessory}"
+
+    relevant_prices = sorted(
+        int(item.get("total", 0))
+        for index, item in enumerate(items)
+        if not reasons[index] and int(item.get("total", 0)) > 0
+    )
+    if len(relevant_prices) >= 4:
+        middle = len(relevant_prices) // 2
+        median = (
+            relevant_prices[middle]
+            if len(relevant_prices) % 2
+            else (relevant_prices[middle - 1] + relevant_prices[middle]) / 2
+        )
+        lower_bound = median * 0.35
+        upper_bound = median * 3.0
+        for index, item in enumerate(items):
+            total = int(item.get("total", 0))
+            if not reasons[index] and total > 0 and (total < lower_bound or total > upper_bound):
+                reasons[index] = "중앙 가격대에서 크게 벗어난 가격"
+    return reasons
+
+
 def get_run_payload(db: sqlite3.Connection, run_id: str) -> dict[str, Any]:
     run = db.execute("SELECT * FROM search_runs WHERE id = ?", (run_id,)).fetchone()
     if not run:
@@ -1725,7 +1806,7 @@ def get_run_payload(db: sqlite3.Connection, run_id: str) -> dict[str, Any]:
         "summary": {
             "collected_count": len(rows),
             "lowest_count": len([item for item in items if item["status"] == "baseline"]),
-            "excluded_count": len([item for item in items if item["is_excluded"]]),
+            "excluded_count": len([item for item in items if item["status"] in {"excluded", "abnormal"}]),
             "baseline_total": baseline_total,
         },
     }
@@ -1734,6 +1815,25 @@ def get_run_payload(db: sqlite3.Connection, run_id: str) -> dict[str, Any]:
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "service": "pricescan"}
+
+
+@app.get("/search-exceptions", dependencies=[Depends(require_admin)])
+def search_exceptions() -> dict[str, Any]:
+    with connect() as db:
+        terms = get_search_exception_terms(db)
+    return {"terms": terms, "text": ", ".join(terms)}
+
+
+@app.put("/search-exceptions", dependencies=[Depends(require_admin)])
+def update_search_exceptions(payload: SearchExceptionsPayload) -> dict[str, Any]:
+    terms = normalize_exception_terms(payload.terms)
+    with connect() as db:
+        db.execute(
+            "UPDATE search_exceptions SET terms_json = ?, updated_at = ? WHERE id = 'default'",
+            (json.dumps(terms, ensure_ascii=False), now()),
+        )
+    log_event(f"search exceptions updated: {len(terms)} terms")
+    return {"terms": terms, "text": ", ".join(terms)}
 
 
 @app.post("/auth/login")
@@ -1903,16 +2003,11 @@ def price_search(payload: PriceSearchRequest) -> dict[str, Any]:
     selected_sources = normalize_sources(payload.sources)
     with connect() as db:
         items, warnings = collect_price_products(db, payload.query, payload.sort_mode, selected_sources)
+        exception_terms = get_search_exception_terms(db)
 
-    average = sum(item["total"] for item in items) / len(items) if items else 0
-    baseline_item = next(
-        (
-            item
-            for item in items
-            if not (average and (item["total"] < average * 0.45 or item["total"] > average * 1.75))
-        ),
-        items[0] if items else None,
-    )
+    exclusion_reasons = automatic_exclusion_reasons(payload.query, items, exception_terms)
+    baseline_candidates = [item for index, item in enumerate(items) if not exclusion_reasons[index]]
+    baseline_item = min(baseline_candidates, key=lambda item: item["total"], default=None)
     baseline_total = baseline_item["total"] if baseline_item else 0
 
     with connect() as db:
@@ -1930,14 +2025,15 @@ def price_search(payload: PriceSearchRequest) -> dict[str, Any]:
                 now(),
             ),
         )
-        for item in items:
+        for index, item in enumerate(items):
             total = item["total"]
-            is_baseline = 1 if total == baseline_total and baseline_item and item["name"] == baseline_item["name"] else 0
+            exclusion_reason = exclusion_reasons[index]
+            is_baseline = 1 if not exclusion_reason and total == baseline_total and baseline_item and item["name"] == baseline_item["name"] else 0
             db.execute(
                 """
                 INSERT INTO price_items
-                (id, run_id, source, mall, name, price, shipping, total, url, is_baseline, is_excluded, collected_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (id, run_id, source, mall, name, price, shipping, total, url, is_baseline, is_excluded, exclusion_reason, collected_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     new_id("price"),
@@ -1950,7 +2046,8 @@ def price_search(payload: PriceSearchRequest) -> dict[str, Any]:
                     item["total"],
                     item["url"],
                     is_baseline,
-                    0,
+                    1 if exclusion_reason else 0,
+                    exclusion_reason,
                     now(),
                 ),
             )
@@ -2040,7 +2137,11 @@ def toggle_exclude(item_id: str) -> dict[str, Any]:
         if not item:
             raise HTTPException(status_code=404, detail="Price item not found")
         next_value = 0 if item["is_excluded"] else 1
-        db.execute("UPDATE price_items SET is_excluded = ?, is_baseline = 0 WHERE id = ?", (next_value, item_id))
+        reason = "" if not next_value else "사용자 제외"
+        db.execute(
+            "UPDATE price_items SET is_excluded = ?, is_baseline = 0, exclusion_reason = ? WHERE id = ?",
+            (next_value, reason, item_id),
+        )
         baseline = db.execute(
             """
             SELECT id FROM price_items

@@ -191,7 +191,13 @@ type PriceItem = {
   margin: number;
   status: "baseline" | "candidate" | "abnormal" | "excluded";
   is_excluded: number;
+  exclusion_reason?: string;
   collected_at: string;
+};
+
+type SearchExceptions = {
+  terms: string[];
+  text: string;
 };
 
 type SmartstoreProduct = {
@@ -1024,6 +1030,10 @@ export default function App() {
   const [smartstoreLoading, setSmartstoreLoading] = useState(false);
   const [smartstoreError, setSmartstoreError] = useState("");
   const [showSourcePanel, setShowSourcePanel] = useState(false);
+  const [searchResultView, setSearchResultView] = useState<"active" | "excluded">("active");
+  const [showSearchExceptions, setShowSearchExceptions] = useState(false);
+  const [searchExceptionTerms, setSearchExceptionTerms] = useState<string[]>([]);
+  const [searchExceptionDraft, setSearchExceptionDraft] = useState("");
   const [draftSourceItem, setDraftSourceItem] = useState<DraftSourceItem | null>(null);
   const [editingDraft, setEditingDraft] = useState<ListingDraft | null>(null);
   const [editingDraftForm, setEditingDraftForm] = useState<DraftForm | null>(null);
@@ -1074,7 +1084,7 @@ export default function App() {
 
   const loadAll = async () => {
     if (!token) return;
-    const [dashboardData, latestSearch, keyData, quotaData, orderData, channelData, logData, draftData, imageData, preparedData] = await Promise.all([
+    const [dashboardData, latestSearch, keyData, quotaData, orderData, channelData, logData, draftData, imageData, preparedData, exceptionData] = await Promise.all([
       request<Dashboard>("/dashboard", token),
       request<SearchPayload>("/price-search/latest", token),
       request<ApiKey[]>("/api-keys", token),
@@ -1085,6 +1095,7 @@ export default function App() {
       request<ListingDraft[]>("/listing-drafts", token),
       request<ImageAsset[]>("/image-assets", token),
       request<PreparedProduct[]>("/prepared-products", token),
+      request<SearchExceptions>("/search-exceptions", token),
     ]);
     setDashboard(dashboardData);
     setSearchPayload(latestSearch);
@@ -1097,6 +1108,8 @@ export default function App() {
     setListingDrafts(draftData);
     setImageAssets(imageData);
     setPreparedProducts(preparedData);
+    setSearchExceptionTerms(exceptionData.terms);
+    setSearchExceptionDraft(exceptionData.text);
     const visibleKeyData = keyData.filter((item) => item.platform !== "naver_datalab");
     const selected = visibleKeyData.find((item) => item.platform === apiPlatform) || visibleKeyData.find((item) => item.platform === "naver") || visibleKeyData[0];
     if (selected) {
@@ -1255,14 +1268,21 @@ export default function App() {
     await refreshLogs();
   };
 
-  const selectBaseline = async (id: string) => {
-    setSearchPayload(await request<SearchPayload>(`/price-items/${id}/baseline`, token, { method: "POST" }));
-    await refreshLogs();
-  };
-
   const toggleExclude = async (id: string) => {
     setSearchPayload(await request<SearchPayload>(`/price-items/${id}/exclude`, token, { method: "POST" }));
     await refreshLogs();
+  };
+
+  const saveSearchExceptions = async () => {
+    const terms = searchExceptionDraft.split(",").map((term) => term.trim()).filter(Boolean);
+    const saved = await request<SearchExceptions>("/search-exceptions", token, {
+      method: "PUT",
+      body: JSON.stringify({ terms }),
+    });
+    setSearchExceptionTerms(saved.terms);
+    setSearchExceptionDraft(saved.text);
+    setShowSearchExceptions(false);
+    setNotice(`검색 예외어 ${saved.terms.length}개를 저장했습니다. 다음 스캔부터 적용됩니다.`);
   };
 
   const selectApiPlatform = (platform: string) => {
@@ -1852,7 +1872,10 @@ export default function App() {
               <span className={collecting ? "pill orange" : "pill green"}>{collecting ? "수집 중" : "대기/완료"}</span>
             </div>
             <div className="toolbar">
-              <input className="input" value={keyword} onChange={(event) => setKeyword(event.target.value)} aria-label="상품 검색어" />
+              <div className="search-input-actions">
+                <input className="input" value={keyword} onChange={(event) => setKeyword(event.target.value)} aria-label="상품 검색어" />
+                <button className="btn" onClick={() => setShowSearchExceptions(true)}>검색예외</button>
+              </div>
               <select value={sortMode} onChange={(event) => changeSortMode(event.target.value)} aria-label="정렬">
                 <option value="lowest">최저가순</option>
                 <option value="margin">마진높은순</option>
@@ -1866,11 +1889,20 @@ export default function App() {
                 {searchPayload.warnings?.map((warning) => <span key={warning}>{warning}</span>)}
               </div>
             )}
+            <div className="result-view-tabs" aria-label="상품검색 결과 메뉴">
+              <button className={searchResultView === "active" ? "active" : ""} onClick={() => setSearchResultView("active")}>
+                검색결과 {searchPayload.items.filter((item) => !item.is_excluded && item.status !== "abnormal").length}
+              </button>
+              <button className={searchResultView === "excluded" ? "active" : ""} onClick={() => setSearchResultView("excluded")}>
+                제외된 항목 {searchPayload.summary.excluded_count}
+              </button>
+            </div>
             <SearchResultList
               payload={filteredSearchPayload}
               keyword={filterKeyword}
               sortMode={sortMode}
-              onBaseline={selectBaseline}
+              view={searchResultView}
+              preparedProducts={preparedProducts}
               onExclude={toggleExclude}
               onPrepare={prepareProduct}
             />
@@ -1984,7 +2016,8 @@ export default function App() {
               payload={filteredSearchPayload}
               keyword={filterKeyword}
               sortMode={sortMode}
-              onBaseline={selectBaseline}
+              view="active"
+              preparedProducts={preparedProducts}
               onExclude={toggleExclude}
               onPrepare={prepareProduct}
             />
@@ -2118,6 +2151,33 @@ export default function App() {
               {logs.length === 0 && <div className="log-item"><span>작업 로그가 없습니다.</span><span>-</span></div>}
             </div>
           </section>
+        )}
+
+        {showSearchExceptions && (
+          <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setShowSearchExceptions(false);
+          }}>
+            <div className="search-exception-modal" role="dialog" aria-modal="true" aria-label="검색 예외어 설정">
+              <div className="section-head">
+                <div>
+                  <h2>검색 예외어</h2>
+                  <p>상품명에 포함되면 자동으로 제외할 단어를 쉼표로 구분해 입력하세요.</p>
+                </div>
+                <button className="btn modal-close-button" onClick={() => setShowSearchExceptions(false)} aria-label="닫기">×</button>
+              </div>
+              <textarea
+                className="input exception-textarea"
+                value={searchExceptionDraft}
+                onChange={(event) => setSearchExceptionDraft(event.target.value)}
+                placeholder="파우치, 보호필름, 케이스, 키스킨"
+              />
+              <p className="hint">현재 저장: {searchExceptionTerms.length}개 · 저장 후 다음 스캔부터 적용됩니다.</p>
+              <div className="modal-actions">
+                <button className="btn" onClick={() => setShowSearchExceptions(false)}>취소</button>
+                <button className="btn primary" onClick={saveSearchExceptions}>저장</button>
+              </div>
+            </div>
+          </div>
         )}
 
         {draftSourceItem && (
@@ -3273,6 +3333,7 @@ type SearchResultRow = {
   source: "price" | "smartstore";
   status?: PriceItem["status"];
   isExcluded?: number;
+  exclusionReason?: string;
 };
 
 function sortResultRows(rows: SearchResultRow[], sortMode: string, lowestTotal: number): SearchResultRow[] {
@@ -3294,14 +3355,16 @@ function SearchResultList({
   payload,
   keyword,
   sortMode,
-  onBaseline,
+  view,
+  preparedProducts,
   onExclude,
   onPrepare,
 }: {
   payload: SearchPayload;
   keyword: string;
   sortMode: string;
-  onBaseline: (id: string) => void;
+  view: "active" | "excluded";
+  preparedProducts: PreparedProduct[];
   onExclude: (id: string) => void;
   onPrepare: (item: DraftSourceItem) => void;
 }) {
@@ -3319,36 +3382,43 @@ function SearchResultList({
     source: "price",
     status: item.status,
     isExcluded: item.is_excluded,
+    exclusionReason: item.exclusion_reason,
   }));
-  const rawRows = priceRows;
-  const positivePrices = rawRows.map((row) => row.displayPrice).filter((value) => value > 0);
+  const activeRows = priceRows.filter((row) => !row.isExcluded && row.status !== "abnormal");
+  const excludedRows = priceRows.filter((row) => Boolean(row.isExcluded) || row.status === "abnormal");
+  const positivePrices = activeRows.map((row) => row.displayPrice).filter((value) => value > 0);
   const lowestTotal = positivePrices.length ? Math.min(...positivePrices) : 0;
-  const rows = sortResultRows(rawRows, sortMode, lowestTotal);
+  const rows = sortResultRows(view === "excluded" ? excludedRows : activeRows, sortMode, lowestTotal);
   const lowestRows = lowestTotal ? sortResultRows(rows.filter((row) => row.displayPrice === lowestTotal), "lowest", lowestTotal) : [];
   const comparisonRows = lowestTotal ? sortResultRows(rows.filter((row) => row.displayPrice !== lowestTotal), sortMode, lowestTotal) : rows;
+  const preparedSourceIds = new Set(preparedProducts.map((item) => item.source_item_id).filter(Boolean));
 
   const renderResultRow = (row: SearchResultRow, isLowest: boolean) => {
     const margin = lowestTotal ? row.displayPrice - lowestTotal : 0;
     const compareRate = lowestTotal ? (margin / lowestTotal) * 100 : 0;
     const marginRate = row.displayPrice ? (margin / row.displayPrice) * 100 : 0;
+    const isPrepared = preparedSourceIds.has(row.sourceItemId);
     return (
-      <div className={`result-row ${isLowest ? "lowest-row" : ""} ${row.status === "baseline" ? "baseline-row" : ""}`} key={row.id}>
-        <span className="result-product-type">{inferProductType(row.name)}</span>
-        <a className="result-model" href={row.url} target="_blank" rel="noreferrer">{row.name}</a>
-        <span className="result-colon">:</span>
-        <span className="source-chip">{sourceLabel(row.collectionSource)}</span>
-        <span>판매처 {row.mall}</span>
-        <span>/ 판매가 {money(row.salePrice)}</span>
-        <span>/ 노출가 {money(row.displayPrice)}</span>
-        <span>/ 비교율 {percent(compareRate)}</span>
-        <span>/ 마진율 {percent(marginRate)}</span>
-        {isLowest && <span className="pill green">최저가</span>}
-        {row.source === "price" && row.status && <span className={pillClass(row.status)}>{statusLabel(row.status)}</span>}
-        {row.source === "price" && (
+      <tr className={`${isLowest ? "lowest-row" : ""} ${isPrepared ? "registered-row" : ""}`} key={row.id}>
+        <td><span className="result-product-type">{inferProductType(row.name)}</span></td>
+        <td className="model-cell"><a className="result-model" href={row.url} target="_blank" rel="noreferrer">{row.name}</a></td>
+        <td><span className="source-chip">{sourceLabel(row.collectionSource)}</span></td>
+        <td>{row.mall}</td>
+        <td className="number-cell">{money(row.salePrice)}</td>
+        <td className="number-cell">{money(row.shippingFee)}</td>
+        <td className={`number-cell ${isLowest ? "lowest-price-cell" : ""}`}>{money(row.displayPrice)}</td>
+        <td className="number-cell">{percent(compareRate)}</td>
+        <td className="number-cell">{percent(marginRate)}</td>
+        <td>
+          {view === "excluded"
+            ? <span className="exclusion-reason">{row.exclusionReason || (row.status === "abnormal" ? "가격 이상치" : "제외됨")}</span>
+            : isLowest ? <span className="pill orange">최저가</span> : <span className="pill blue">비교대상</span>}
+        </td>
+        <td>
           <span className="result-actions">
-            <button className="btn small" onClick={() => onBaseline(row.id)}>기준</button>
             <button className="btn small danger" onClick={() => onExclude(row.id)}>{row.isExcluded ? "복구" : "제외"}</button>
-            <button className="btn small orange" onClick={() => onPrepare({
+            {view === "active" && (
+              <button className={`btn small ${isPrepared ? "monitor-registered" : "orange"}`} disabled={isPrepared} onClick={() => onPrepare({
               sourceItemId: row.sourceItemId,
               source: row.collectionSource,
               mall: row.mall,
@@ -3357,25 +3427,37 @@ function SearchResultList({
               displayPrice: row.displayPrice,
               shippingFee: row.shippingFee,
               url: row.url,
-            })}>모니터링 등록</button>
+              })}>{isPrepared ? "모니터등록" : "모니터링 등록"}</button>
+            )}
           </span>
-        )}
-      </div>
+        </td>
+      </tr>
     );
   };
 
   return (
     <div className="result-list">
       <div className="result-list-head">
-        <strong>({keyword || "검색 상품"} 모델명)</strong>
+        <strong>{view === "excluded" ? "제외된 항목" : `(${keyword || "검색 상품"} 모델명)`}</strong>
         <span>{rows.length}개 결과</span>
       </div>
-      {lowestRows.map((row) => renderResultRow(row, true))}
-      {lowestRows.length > 0 && comparisonRows.length > 0 && (
-        <div className="result-divider">비교 대상 리스트</div>
-      )}
-      {comparisonRows.map((row) => renderResultRow(row, false))}
-      {rows.length === 0 && <div className="result-row muted-row">검색 결과가 없습니다.</div>}
+      <div className="search-results-table-wrap">
+        <table className="search-results-table">
+          <thead>
+            <tr>
+              <th>상품종류</th><th>모델명</th><th>소스</th><th>쇼핑몰</th><th>판매가</th><th>배송비</th><th>노출가</th><th>비교율</th><th>마진율</th><th>상태</th><th>작업</th>
+            </tr>
+          </thead>
+          <tbody>
+            {view === "active" && lowestRows.map((row) => renderResultRow(row, true))}
+            {view === "active" && lowestRows.length > 0 && comparisonRows.length > 0 && (
+              <tr className="result-divider"><td colSpan={11}>최저가 외 비교 대상</td></tr>
+            )}
+            {(view === "excluded" ? rows : comparisonRows).map((row) => renderResultRow(row, false))}
+            {rows.length === 0 && <tr><td className="empty-result-cell" colSpan={11}>표시할 상품이 없습니다.</td></tr>}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
