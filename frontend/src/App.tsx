@@ -192,6 +192,7 @@ type PriceItem = {
   status: "baseline" | "candidate" | "abnormal" | "excluded";
   is_excluded: number;
   exclusion_reason?: string;
+  extraction_methods?: string[];
   collected_at: string;
 };
 
@@ -3334,7 +3335,33 @@ type SearchResultRow = {
   status?: PriceItem["status"];
   isExcluded?: number;
   exclusionReason?: string;
+  extractionMethods: string[];
 };
+
+const EXTRACTION_METHOD_META: Record<string, { icon: string; label: string }> = {
+  api: { icon: "(a)", label: "API" },
+  crawl: { icon: "(c)", label: "크롤링" },
+  playwright: { icon: "(p)", label: "Playwright" },
+  scrapling: { icon: "(s)", label: "Scrapling" },
+};
+
+function extractionMethods(item: PriceItem): string[] {
+  if (item.extraction_methods?.length) return item.extraction_methods;
+  if (item.source === "naver") return ["api"];
+  if (item.source === "danawa" || item.source === "enuri") return ["crawl"];
+  return [];
+}
+
+function ExtractionMethodBadges({ methods }: { methods: string[] }) {
+  return (
+    <span className="extraction-methods" aria-label={`추출방식 ${methods.map((method) => EXTRACTION_METHOD_META[method]?.label || method).join(", ")}`}>
+      {methods.map((method) => {
+        const meta = EXTRACTION_METHOD_META[method] || { icon: `(${method.slice(0, 1)})`, label: method };
+        return <span className={`extraction-method-badge method-${method}`} title={meta.label} key={method}>{meta.icon}</span>;
+      })}
+    </span>
+  );
+}
 
 function sortResultRows(rows: SearchResultRow[], sortMode: string, lowestTotal: number): SearchResultRow[] {
   const sorted = [...rows];
@@ -3383,6 +3410,7 @@ function SearchResultList({
     status: item.status,
     isExcluded: item.is_excluded,
     exclusionReason: item.exclusion_reason,
+    extractionMethods: extractionMethods(item),
   }));
   const activeRows = priceRows.filter((row) => !row.isExcluded && row.status !== "abnormal");
   const excludedRows = priceRows.filter((row) => Boolean(row.isExcluded) || row.status === "abnormal");
@@ -3403,6 +3431,7 @@ function SearchResultList({
         <td><span className="result-product-type">{inferProductType(row.name)}</span></td>
         <td className="model-cell"><a className="result-model" href={row.url} target="_blank" rel="noreferrer">{row.name}</a></td>
         <td><span className="source-chip">{sourceLabel(row.collectionSource)}</span></td>
+        <td><ExtractionMethodBadges methods={row.extractionMethods} /></td>
         <td>{row.mall}</td>
         <td className="number-cell">{money(row.salePrice)}</td>
         <td className="number-cell">{money(row.shippingFee)}</td>
@@ -3439,22 +3468,25 @@ function SearchResultList({
     <div className="result-list">
       <div className="result-list-head">
         <strong>{view === "excluded" ? "제외된 항목" : `(${keyword || "검색 상품"} 모델명)`}</strong>
-        <span>{rows.length}개 결과</span>
+        <span className="result-list-meta">
+          <span className="extraction-legend"><ExtractionMethodBadges methods={["api", "crawl", "playwright", "scrapling"]} /> API · 크롤링 · Playwright · Scrapling</span>
+          <span>{rows.length}개 결과</span>
+        </span>
       </div>
       <div className="search-results-table-wrap">
         <table className="search-results-table">
           <thead>
             <tr>
-              <th>상품종류</th><th>모델명</th><th>소스</th><th>쇼핑몰</th><th>판매가</th><th>배송비</th><th>노출가</th><th>비교율</th><th>마진율</th><th>상태</th><th>작업</th>
+              <th>상품종류</th><th>모델명</th><th>소스</th><th>추출방식</th><th>쇼핑몰</th><th>판매가</th><th>배송비</th><th>노출가</th><th>비교율</th><th>마진율</th><th>상태</th><th>작업</th>
             </tr>
           </thead>
           <tbody>
             {view === "active" && lowestRows.map((row) => renderResultRow(row, true))}
             {view === "active" && lowestRows.length > 0 && comparisonRows.length > 0 && (
-              <tr className="result-divider"><td colSpan={11}>최저가 외 비교 대상</td></tr>
+              <tr className="result-divider"><td colSpan={12}>최저가 외 비교 대상</td></tr>
             )}
             {(view === "excluded" ? rows : comparisonRows).map((row) => renderResultRow(row, false))}
-            {rows.length === 0 && <tr><td className="empty-result-cell" colSpan={11}>표시할 상품이 없습니다.</td></tr>}
+            {rows.length === 0 && <tr><td className="empty-result-cell" colSpan={12}>표시할 상품이 없습니다.</td></tr>}
           </tbody>
         </table>
       </div>

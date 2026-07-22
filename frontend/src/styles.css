@@ -670,7 +670,7 @@ td { font-size: 14px; }
 }
 .search-results-table {
   width: 100%;
-  min-width: 1120px;
+  min-width: 1210px;
   border-collapse: collapse;
   table-layout: fixed;
   font-size: 13px;
@@ -700,14 +700,15 @@ td { font-size: 14px; }
 .search-results-table th:nth-child(1) { width: 82px; }
 .search-results-table th:nth-child(2) { width: 300px; }
 .search-results-table th:nth-child(3) { width: 100px; }
-.search-results-table th:nth-child(4) { width: 110px; }
-.search-results-table th:nth-child(5),
+.search-results-table th:nth-child(4) { width: 92px; }
+.search-results-table th:nth-child(5) { width: 110px; }
 .search-results-table th:nth-child(6),
 .search-results-table th:nth-child(7),
 .search-results-table th:nth-child(8),
-.search-results-table th:nth-child(9) { width: 92px; }
-.search-results-table th:nth-child(10) { width: 150px; }
-.search-results-table th:nth-child(11) { width: 185px; }
+.search-results-table th:nth-child(9),
+.search-results-table th:nth-child(10) { width: 92px; }
+.search-results-table th:nth-child(11) { width: 150px; }
+.search-results-table th:nth-child(12) { width: 185px; }
 .search-results-table .number-cell {
   text-align: right;
   white-space: nowrap;
@@ -758,6 +759,46 @@ td { font-size: 14px; }
   font-size: 12px;
   font-weight: 850;
   line-height: 1.35;
+}
+.result-list-meta {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.extraction-legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 750;
+}
+.extraction-methods {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+}
+.extraction-method-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 27px;
+  height: 24px;
+  border: 1px solid #c8d4e2;
+  border-radius: 4px;
+  background: #f7f9fc;
+  color: #263a54;
+  font-size: 11px;
+  font-weight: 950;
+  line-height: 1;
+}
+.extraction-method-badge.method-api { border-color: #8fc8aa; background: #edf9f2; color: #176d42; }
+.extraction-method-badge.method-crawl { border-color: #9db8dc; background: #edf4ff; color: #194f8c; }
+.extraction-method-badge.method-playwright { border-color: #e2b37d; background: #fff5e8; color: #8d4b08; }
+.extraction-method-badge.method-scrapling { border-color: #c4afd9; background: #f7f1fb; color: #62407f; }
+@media (max-width: 720px) {
+  .extraction-legend { display: none; }
 }
 .empty-result-cell {
   padding: 34px !important;

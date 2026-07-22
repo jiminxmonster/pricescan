@@ -21,6 +21,14 @@ from zoneinfo import ZoneInfo
 
 import bcrypt
 import httpx
+try:
+    from playwright.sync_api import sync_playwright
+except ImportError:  # Local tooling can run without browser dependencies.
+    sync_playwright = None
+try:
+    from scrapling.fetchers import Fetcher as ScraplingFetcher
+except ImportError:  # The production image installs Scrapling.
+    ScraplingFetcher = None
 from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -35,6 +43,9 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 DATABASE_PATH = Path(os.getenv("DATABASE_PATH", DATA_DIR / "pricescan.db"))
 ADMIN_TOKEN = "pricescan-admin-token"
 HTTP_TIMEOUT_SECONDS = 8
+PLAYWRIGHT_TIMEOUT_MS = int(os.getenv("PLAYWRIGHT_TIMEOUT_MS", "18000"))
+PLAYWRIGHT_SEARCH_ENABLED = os.getenv("PLAYWRIGHT_SEARCH_ENABLED", "1") == "1"
+SCRAPLING_SEARCH_ENABLED = os.getenv("SCRAPLING_SEARCH_ENABLED", "1") == "1"
 CRAWLER_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 NAVER_COMMERCE_API_BASE = "https://api.commerce.naver.com/external"
 MAX_IMAGE_UPLOAD_BYTES = 8 * 1024 * 1024
@@ -219,6 +230,7 @@ def init_db() -> None:
                 is_baseline INTEGER NOT NULL DEFAULT 0,
                 is_excluded INTEGER NOT NULL DEFAULT 0,
                 exclusion_reason TEXT NOT NULL DEFAULT '',
+                extraction_methods_json TEXT NOT NULL DEFAULT '[]',
                 collected_at TEXT NOT NULL
             );
 
@@ -329,6 +341,8 @@ def init_db() -> None:
         }
         if "exclusion_reason" not in price_item_columns:
             db.execute("ALTER TABLE price_items ADD COLUMN exclusion_reason TEXT NOT NULL DEFAULT ''")
+        if "extraction_methods_json" not in price_item_columns:
+            db.execute("ALTER TABLE price_items ADD COLUMN extraction_methods_json TEXT NOT NULL DEFAULT '[]'")
         db.execute(
             "INSERT OR IGNORE INTO search_exceptions (id, terms_json, updated_at) VALUES ('default', '[]', ?)",
             (now(),),
@@ -1183,6 +1197,7 @@ def fetch_naver_products(query: str, sort_mode: str, client_id: str, client_secr
                 "shipping": 0,
                 "total": price,
                 "url": html.unescape(item.get("link") or "https://shopping.naver.com/"),
+                "extraction_methods": ["api"],
             }
         )
     return products
@@ -1426,7 +1441,7 @@ def parse_danawa_products(document: str, limit: int = 30) -> list[dict[str, Any]
     return products
 
 
-def fetch_danawa_products(query: str, display: int = 30) -> list[dict[str, Any]]:
+def danawa_search_url(query: str, display: int = 30) -> str:
     params = urllib.parse.urlencode(
         {
             "query": query,
@@ -1436,13 +1451,70 @@ def fetch_danawa_products(query: str, display: int = 30) -> list[dict[str, Any]]
             "limit": min(max(display, 1), 100),
         }
     )
-    status, body = read_url(f"https://search.danawa.com/dsearch.php?{params}")
+    return f"https://search.danawa.com/dsearch.php?{params}"
+
+
+def mark_extraction_method(products: list[dict[str, Any]], method: str) -> list[dict[str, Any]]:
+    return [{**product, "extraction_methods": [method]} for product in products]
+
+
+def fetch_danawa_products(query: str, display: int = 30) -> list[dict[str, Any]]:
+    status, body = read_url(danawa_search_url(query, display))
     if status != 200:
         raise RuntimeError(f"다나와 검색 페이지 수집 오류: HTTP {status}")
     products = parse_danawa_products(body, limit=display)
     if not products:
         raise RuntimeError("다나와 검색 결과 파싱 실패 또는 결과 없음")
-    return products
+    return mark_extraction_method(products, "crawl")
+
+
+def fetch_danawa_playwright_products(query: str, display: int = 30) -> list[dict[str, Any]]:
+    if not PLAYWRIGHT_SEARCH_ENABLED:
+        return []
+    if sync_playwright is None:
+        raise RuntimeError("Playwright 검색 모듈이 설치되지 않음")
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        try:
+            page = browser.new_page(locale="ko-KR", user_agent=CRAWLER_USER_AGENT)
+            page.goto(
+                danawa_search_url(query, display),
+                wait_until="domcontentloaded",
+                timeout=PLAYWRIGHT_TIMEOUT_MS,
+            )
+            try:
+                page.wait_for_selector("li[id^='productItem']", timeout=min(PLAYWRIGHT_TIMEOUT_MS, 8000))
+            except Exception:
+                pass
+            products = parse_danawa_products(page.content(), limit=display)
+        finally:
+            browser.close()
+    if not products:
+        raise RuntimeError("다나와 Playwright 렌더링 결과 파싱 실패 또는 결과 없음")
+    return mark_extraction_method(products, "playwright")
+
+
+def fetch_danawa_scrapling_products(query: str, display: int = 30) -> list[dict[str, Any]]:
+    if not SCRAPLING_SEARCH_ENABLED:
+        return []
+    if ScraplingFetcher is None:
+        raise RuntimeError("Scrapling 검색 모듈이 설치되지 않음")
+    response = ScraplingFetcher.get(
+        danawa_search_url(query, display),
+        timeout=HTTP_TIMEOUT_SECONDS,
+        impersonate="chrome",
+        headers={"Accept-Language": "ko-KR,ko;q=0.9,en;q=0.8"},
+    )
+    if int(response.status) != 200:
+        raise RuntimeError(f"다나와 Scrapling 수집 오류: HTTP {response.status}")
+    document = response.body.decode("utf-8", errors="replace")
+    products = parse_danawa_products(document, limit=display)
+    if not products:
+        raise RuntimeError("다나와 Scrapling 결과 파싱 실패 또는 결과 없음")
+    return mark_extraction_method(products, "scrapling")
 
 
 def parse_enuri_products(document: str, limit: int = 30) -> list[dict[str, Any]]:
@@ -1514,18 +1586,23 @@ def fetch_enuri_products(query: str, display: int = 30) -> list[dict[str, Any]]:
 
 
 def dedupe_products(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    seen: set[str] = set()
+    indexes: dict[str, int] = {}
     unique_items: list[dict[str, Any]] = []
     for item in items:
         total = parse_price(item.get("total"))
-        key = f"{item.get('source')}:{item.get('mall')}:{normalize_title(str(item.get('name', '')))}:{total}"
-        if key in seen:
+        key = f"{item.get('mall')}:{normalize_title(str(item.get('name', '')))}:{total}"
+        methods = [str(method) for method in item.get("extraction_methods", []) if method]
+        if key in indexes:
+            existing = unique_items[indexes[key]]
+            existing_methods = list(existing.get("extraction_methods", []))
+            existing["extraction_methods"] = list(dict.fromkeys([*existing_methods, *methods]))
             continue
-        seen.add(key)
         normalized = dict(item)
         normalized["price"] = parse_price(normalized.get("price"))
         normalized["shipping"] = parse_price(normalized.get("shipping"))
         normalized["total"] = normalized["price"] + normalized["shipping"]
+        normalized["extraction_methods"] = list(dict.fromkeys(methods))
+        indexes[key] = len(unique_items)
         unique_items.append(normalized)
     return unique_items
 
@@ -1645,8 +1722,23 @@ def collect_price_products(db: sqlite3.Connection, query: str, sort_mode: str, s
     if "danawa" in selected_sources:
         try:
             reserve_collection_request(db, "danawa")
-            products.extend(fetch_danawa_products(query))
-            complete_collection_request(db, "danawa", "success")
+            method_successes = 0
+            collectors = (
+                ("크롤링", fetch_danawa_products),
+                ("Playwright", fetch_danawa_playwright_products),
+                ("Scrapling", fetch_danawa_scrapling_products),
+            )
+            for label, collector in collectors:
+                try:
+                    collected = collector(query)
+                    products.extend(collected)
+                    if collected:
+                        method_successes += 1
+                except Exception as error:
+                    warnings.append(f"다나와 {label}: {error}")
+            complete_collection_request(db, "danawa", "success" if method_successes else "error")
+            if method_successes == 0:
+                warnings.append("다나와의 모든 추출 방식이 실패함")
         except Exception as error:
             if not isinstance(error, CollectionQuotaExceeded):
                 complete_collection_request(db, "danawa", "error")
@@ -1795,6 +1887,10 @@ def get_run_payload(db: sqlite3.Connection, run_id: str) -> dict[str, Any]:
         else:
             status = "candidate"
         item = row_to_dict(row) or {}
+        try:
+            item["extraction_methods"] = json.loads(item.pop("extraction_methods_json", "[]"))
+        except (TypeError, json.JSONDecodeError):
+            item["extraction_methods"] = []
         item["margin"] = total - baseline_total if baseline_total else 0
         item["status"] = status
         item["abnormal"] = abnormal
@@ -2032,8 +2128,8 @@ def price_search(payload: PriceSearchRequest) -> dict[str, Any]:
             db.execute(
                 """
                 INSERT INTO price_items
-                (id, run_id, source, mall, name, price, shipping, total, url, is_baseline, is_excluded, exclusion_reason, collected_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (id, run_id, source, mall, name, price, shipping, total, url, is_baseline, is_excluded, exclusion_reason, extraction_methods_json, collected_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     new_id("price"),
@@ -2048,6 +2144,7 @@ def price_search(payload: PriceSearchRequest) -> dict[str, Any]:
                     is_baseline,
                     1 if exclusion_reason else 0,
                     exclusion_reason,
+                    json.dumps(item.get("extraction_methods", []), ensure_ascii=False),
                     now(),
                 ),
             )

@@ -5,6 +5,8 @@ services:
       dockerfile: Dockerfile
     container_name: pricescan-backend
     restart: unless-stopped
+    init: true
+    ipc: host
     working_dir: /app
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     ports:
@@ -17,6 +19,9 @@ services:
       NAVER_DAILY_REQUEST_LIMIT: ${NAVER_DAILY_REQUEST_LIMIT:-200}
       DANAWA_DAILY_REQUEST_LIMIT: ${DANAWA_DAILY_REQUEST_LIMIT:-100}
       ENURI_DAILY_REQUEST_LIMIT: ${ENURI_DAILY_REQUEST_LIMIT:-60}
+      PLAYWRIGHT_SEARCH_ENABLED: ${PLAYWRIGHT_SEARCH_ENABLED:-1}
+      SCRAPLING_SEARCH_ENABLED: ${SCRAPLING_SEARCH_ENABLED:-1}
+      PLAYWRIGHT_TIMEOUT_MS: ${PLAYWRIGHT_TIMEOUT_MS:-18000}
     volumes:
       - pricescan_data:/app/data
 
