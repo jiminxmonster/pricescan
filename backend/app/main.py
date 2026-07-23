@@ -1989,8 +1989,151 @@ def sample_products(query: str) -> list[dict[str, Any]]:
 ACCESSORY_EXCEPTION_TERMS = {
     "케이스", "파우치", "보호필름", "강화유리", "키스킨", "스킨", "커버", "스트랩",
     "거치대", "충전기", "케이블", "어댑터", "리필", "교체용", "호환용", "부품",
-    "액세서리", "주변기기", "보호용품",
+    "액세서리", "보호용품",
 }
+
+PRODUCT_FAMILY_RULES = {
+    "노트북": {
+        "query": ("노트북", "랩탑", "그램", "갤럭시북", "맥북", "울트라북"),
+        "item": ("노트북", "랩탑", "그램", "갤럭시북", "맥북", "울트라북"),
+    },
+    "스마트폰": {
+        "query": ("스마트폰", "휴대폰", "핸드폰", "아이폰", "갤럭시s", "갤럭시z"),
+        "item": ("스마트폰", "휴대폰", "핸드폰", "아이폰", "갤럭시s", "갤럭시z"),
+    },
+    "태블릿": {
+        "query": ("태블릿", "아이패드", "갤럭시탭", "서피스프로"),
+        "item": ("태블릿", "아이패드", "갤럭시탭", "서피스프로"),
+    },
+    "모니터": {
+        "query": ("모니터", "게이밍모니터"),
+        "item": ("모니터", "게이밍모니터"),
+    },
+    "TV": {
+        "query": ("텔레비전", "스마트tv", "올레드tv", "oledtv", "qledtv"),
+        "item": ("텔레비전", "스마트tv", "올레드tv", "oledtv", "qledtv"),
+    },
+    "냉장고": {"query": ("냉장고", "김치냉장고"), "item": ("냉장고", "김치냉장고")},
+    "세탁기": {"query": ("세탁기", "워시타워"), "item": ("세탁기", "워시타워")},
+    "건조기": {"query": ("건조기", "의류건조기"), "item": ("건조기", "의류건조기")},
+    "청소기": {
+        "query": ("청소기", "로봇청소기", "무선청소기"),
+        "item": ("청소기", "로봇청소기", "무선청소기"),
+    },
+    "에어컨": {"query": ("에어컨", "냉난방기"), "item": ("에어컨", "냉난방기")},
+    "카메라": {
+        "query": ("카메라", "미러리스", "dslr"),
+        "item": ("카메라", "미러리스", "dslr"),
+    },
+    "프린터": {
+        "query": ("프린터", "복합기", "레이저프린터"),
+        "item": ("프린터", "복합기", "레이저프린터"),
+    },
+    "이어폰": {
+        "query": ("이어폰", "에어팟", "버즈"),
+        "item": ("이어폰", "에어팟", "버즈"),
+    },
+    "헤드폰": {"query": ("헤드폰", "헤드셋"), "item": ("헤드폰", "헤드셋")},
+    "스피커": {"query": ("스피커", "사운드바"), "item": ("스피커", "사운드바")},
+    "신발": {
+        "query": ("운동화", "스니커즈", "런닝화", "러닝화", "구두"),
+        "item": ("운동화", "스니커즈", "런닝화", "러닝화", "구두"),
+    },
+}
+
+MODEL_OPTION_SUFFIXES = (
+    "gb", "tb", "mb", "hz", "khz", "mhz", "ghz", "mah", "wh", "inch", "인치",
+)
+
+
+def compact_alnum(value: str) -> str:
+    return re.sub(r"[^a-z0-9가-힣]", "", clean_text(value).lower())
+
+
+def search_tokens(value: str) -> list[str]:
+    return [
+        compact_alnum(token)
+        for token in re.findall(r"[A-Za-z0-9가-힣][A-Za-z0-9가-힣._/+()-]*", clean_text(value))
+        if compact_alnum(token)
+    ]
+
+
+def strong_model_tokens(value: str) -> list[str]:
+    models: list[str] = []
+    for token in search_tokens(value):
+        if not re.search(r"[a-z]", token) or not re.search(r"\d", token):
+            continue
+        if token.endswith(MODEL_OPTION_SUFFIXES):
+            continue
+        if len(token) < 4 and not re.fullmatch(r"[a-z]\d{2,}", token):
+            continue
+        if token not in models:
+            models.append(token)
+    return models
+
+
+def detect_product_families(value: str, field: str = "item") -> set[str]:
+    compact = compact_alnum(value)
+    return {
+        family
+        for family, rules in PRODUCT_FAMILY_RULES.items()
+        if any(compact_alnum(alias) in compact for alias in rules[field])
+    }
+
+
+def build_search_intent(query: str, items: list[dict[str, Any]]) -> dict[str, Any]:
+    query_compact = compact_alnum(query)
+    models = strong_model_tokens(query)
+    families = detect_product_families(query, "query")
+    accessory_intent = any(compact_alnum(term) in query_compact for term in ACCESSORY_EXCEPTION_TERMS)
+
+    # Exact model searches often omit the product family. Infer it only from
+    # model-matching results so unrelated cheap accessories cannot dominate.
+    if not families and models:
+        family_counts: dict[str, int] = {}
+        for item in items:
+            item_text = f"{item.get('name', '')} {item.get('category', '')}"
+            item_compact = compact_alnum(item_text)
+            if not all(model in item_compact for model in models):
+                continue
+            for family in detect_product_families(item_text):
+                family_counts[family] = family_counts.get(family, 0) + 1
+        if family_counts:
+            top_family, top_count = max(family_counts.items(), key=lambda entry: entry[1])
+            if top_count >= 2:
+                families = {top_family}
+
+    query_terms = [
+        token
+        for token in search_tokens(query)
+        if len(token) >= 2 and token not in models and not token.isdigit()
+    ]
+    return {
+        "compact": query_compact,
+        "models": models,
+        "families": families,
+        "accessory_intent": accessory_intent,
+        "terms": query_terms,
+    }
+
+
+def search_relevance(item: dict[str, Any], intent: dict[str, Any]) -> int:
+    title = compact_alnum(str(item.get("name", "")))
+    category = compact_alnum(str(item.get("category", "")))
+    combined = f"{title}{category}"
+    score = 0
+    if intent["compact"] and intent["compact"] in title:
+        score += 100
+    score += sum(80 for model in intent["models"] if model in combined)
+    if intent["terms"]:
+        matched_terms = sum(1 for term in intent["terms"] if term in combined)
+        score += round(40 * matched_terms / len(intent["terms"]))
+    item_families = detect_product_families(combined)
+    if intent["families"] & item_families:
+        score += 50
+    if intent["families"] and item_families and not intent["families"] & item_families:
+        score -= 80
+    return score
 
 
 def normalize_exception_terms(values: list[str]) -> list[str]:
@@ -2013,22 +2156,48 @@ def automatic_exclusion_reasons(
     items: list[dict[str, Any]],
     custom_terms: list[str],
 ) -> list[str]:
-    query_text = normalize_title(query).lower()
+    intent = build_search_intent(query, items)
     reasons = ["" for _ in items]
-    accessory_terms = [term for term in ACCESSORY_EXCEPTION_TERMS if term not in query_text]
+    accessory_terms = [] if intent["accessory_intent"] else list(ACCESSORY_EXCEPTION_TERMS)
 
     for index, item in enumerate(items):
-        title = normalize_title(item.get("name", "")).lower()
-        category = normalize_title(item.get("category", "")).lower()
-        matched_custom = next((term for term in custom_terms if term in title), "")
-        matched_accessory = next((term for term in accessory_terms if term in title), "")
-        matched_accessory_category = next((term for term in accessory_terms if term in category), "")
+        title = compact_alnum(str(item.get("name", "")))
+        category = compact_alnum(str(item.get("category", "")))
+        combined = f"{title}{category}"
+        item["relevance_score"] = search_relevance(item, intent)
+        matched_custom = next(
+            (term for term in custom_terms if compact_alnum(term) in title),
+            "",
+        )
+        matched_accessory = next(
+            (term for term in accessory_terms if compact_alnum(term) in title),
+            "",
+        )
+        matched_accessory_category = next(
+            (term for term in accessory_terms if compact_alnum(term) in category),
+            "",
+        )
+        missing_model = next(
+            (model for model in intent["models"] if model not in combined),
+            "",
+        )
+        item_families = detect_product_families(combined)
+        conflicting_family = bool(
+            intent["families"]
+            and item_families
+            and not intent["families"] & item_families
+        )
         if matched_custom:
             reasons[index] = f"검색 예외어: {matched_custom}"
         elif matched_accessory:
             reasons[index] = f"관련 없는 부가상품: {matched_accessory}"
         elif matched_accessory_category:
             reasons[index] = f"관련 없는 상품 카테고리: {matched_accessory_category}"
+        elif missing_model:
+            reasons[index] = f"검색 모델 불일치: {missing_model}"
+        elif conflicting_family:
+            detected = ", ".join(sorted(item_families))
+            reasons[index] = f"상품군 불일치: {detected}"
 
     relevant_prices = sorted(
         int(item.get("total", 0))
