@@ -1183,12 +1183,12 @@ def safe_upload_filename(filename: str) -> str:
 def naver_sort(sort_mode: str) -> str:
     if sort_mode == "recent":
         return "date"
-    if sort_mode in {"lowest", "margin"}:
-        return "asc"
+    # Fetch relevant products first. Price sorting happens after accessories
+    # and category mismatches have been removed from the candidate set.
     return "sim"
 
 
-def fetch_naver_products(query: str, sort_mode: str, client_id: str, client_secret: str, display: int = 30) -> list[dict[str, Any]]:
+def fetch_naver_products(query: str, sort_mode: str, client_id: str, client_secret: str, display: int = 100) -> list[dict[str, Any]]:
     params = urllib.parse.urlencode(
         {
             "query": query,
@@ -1219,6 +1219,11 @@ def fetch_naver_products(query: str, sort_mode: str, client_id: str, client_secr
         price = parse_price(item.get("lprice"))
         if price <= 0:
             continue
+        category_path = " > ".join(
+            clean_text(item.get(key) or "")
+            for key in ("category1", "category2", "category3", "category4")
+            if clean_text(item.get(key) or "")
+        )
         products.append(
             {
                 "source": "naver",
@@ -1228,6 +1233,8 @@ def fetch_naver_products(query: str, sort_mode: str, client_id: str, client_secr
                 "shipping": 0,
                 "total": price,
                 "url": html.unescape(item.get("link") or "https://shopping.naver.com/"),
+                "category": category_path,
+                "product_type": clean_text(str(item.get("productType") or "")),
                 "extraction_methods": ["api"],
             }
         )
@@ -1982,6 +1989,7 @@ def sample_products(query: str) -> list[dict[str, Any]]:
 ACCESSORY_EXCEPTION_TERMS = {
     "케이스", "파우치", "보호필름", "강화유리", "키스킨", "스킨", "커버", "스트랩",
     "거치대", "충전기", "케이블", "어댑터", "리필", "교체용", "호환용", "부품",
+    "액세서리", "주변기기", "보호용품",
 }
 
 
@@ -2011,12 +2019,16 @@ def automatic_exclusion_reasons(
 
     for index, item in enumerate(items):
         title = normalize_title(item.get("name", "")).lower()
+        category = normalize_title(item.get("category", "")).lower()
         matched_custom = next((term for term in custom_terms if term in title), "")
         matched_accessory = next((term for term in accessory_terms if term in title), "")
+        matched_accessory_category = next((term for term in accessory_terms if term in category), "")
         if matched_custom:
             reasons[index] = f"검색 예외어: {matched_custom}"
         elif matched_accessory:
             reasons[index] = f"관련 없는 부가상품: {matched_accessory}"
+        elif matched_accessory_category:
+            reasons[index] = f"관련 없는 상품 카테고리: {matched_accessory_category}"
 
     relevant_prices = sorted(
         int(item.get("total", 0))
