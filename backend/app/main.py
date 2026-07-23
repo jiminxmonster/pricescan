@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import ipaddress
 import mimetypes
 import os
 import re
 import html
 import json
+import socket
 import sqlite3
 import time
 import urllib.error
@@ -231,6 +233,16 @@ def init_db() -> None:
                 is_excluded INTEGER NOT NULL DEFAULT 0,
                 exclusion_reason TEXT NOT NULL DEFAULT '',
                 extraction_methods_json TEXT NOT NULL DEFAULT '[]',
+                benefit_status TEXT NOT NULL DEFAULT 'not_checked',
+                coupon_price INTEGER NOT NULL DEFAULT 0,
+                event_price INTEGER NOT NULL DEFAULT 0,
+                card_price INTEGER NOT NULL DEFAULT 0,
+                benefit_price INTEGER NOT NULL DEFAULT 0,
+                benefit_shipping INTEGER NOT NULL DEFAULT 0,
+                benefit_summary TEXT NOT NULL DEFAULT '',
+                benefit_condition TEXT NOT NULL DEFAULT '',
+                detail_methods_json TEXT NOT NULL DEFAULT '[]',
+                benefit_checked_at TEXT,
                 collected_at TEXT NOT NULL
             );
 
@@ -343,6 +355,21 @@ def init_db() -> None:
             db.execute("ALTER TABLE price_items ADD COLUMN exclusion_reason TEXT NOT NULL DEFAULT ''")
         if "extraction_methods_json" not in price_item_columns:
             db.execute("ALTER TABLE price_items ADD COLUMN extraction_methods_json TEXT NOT NULL DEFAULT '[]'")
+        benefit_column_migrations = [
+            ("benefit_status", "ALTER TABLE price_items ADD COLUMN benefit_status TEXT NOT NULL DEFAULT 'not_checked'"),
+            ("coupon_price", "ALTER TABLE price_items ADD COLUMN coupon_price INTEGER NOT NULL DEFAULT 0"),
+            ("event_price", "ALTER TABLE price_items ADD COLUMN event_price INTEGER NOT NULL DEFAULT 0"),
+            ("card_price", "ALTER TABLE price_items ADD COLUMN card_price INTEGER NOT NULL DEFAULT 0"),
+            ("benefit_price", "ALTER TABLE price_items ADD COLUMN benefit_price INTEGER NOT NULL DEFAULT 0"),
+            ("benefit_shipping", "ALTER TABLE price_items ADD COLUMN benefit_shipping INTEGER NOT NULL DEFAULT 0"),
+            ("benefit_summary", "ALTER TABLE price_items ADD COLUMN benefit_summary TEXT NOT NULL DEFAULT ''"),
+            ("benefit_condition", "ALTER TABLE price_items ADD COLUMN benefit_condition TEXT NOT NULL DEFAULT ''"),
+            ("detail_methods_json", "ALTER TABLE price_items ADD COLUMN detail_methods_json TEXT NOT NULL DEFAULT '[]'"),
+            ("benefit_checked_at", "ALTER TABLE price_items ADD COLUMN benefit_checked_at TEXT"),
+        ]
+        for column, statement in benefit_column_migrations:
+            if column not in price_item_columns:
+                db.execute(statement)
         db.execute(
             "INSERT OR IGNORE INTO search_exceptions (id, terms_json, updated_at) VALUES ('default', '[]', ?)",
             (now(),),
@@ -549,6 +576,10 @@ class PriceSearchRequest(BaseModel):
     sort_mode: str = "lowest"
     filters: list[str] = []
     sources: list[str] = []
+
+
+class BenefitScanRequest(BaseModel):
+    item_ids: list[str] = Field(min_length=1, max_length=10)
 
 
 class SearchExceptionsPayload(BaseModel):
@@ -1607,6 +1638,163 @@ def dedupe_products(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return unique_items
 
 
+BENEFIT_KEYWORDS = {
+    "쿠폰": ("쿠폰적용가", "쿠폰 적용가", "쿠폰가", "쿠폰할인가", "쿠폰 할인가"),
+    "행사": ("행사가", "특가", "즉시할인가", "즉시 할인가", "할인판매가"),
+    "카드": ("카드할인가", "카드 할인가", "카드혜택가", "카드 혜택가"),
+}
+CONDITIONAL_BENEFIT_TERMS = (
+    "로그인", "회원가", "멤버십", "앱 전용", "앱전용", "특정 카드", "카드 결제",
+    "쿠폰받기", "쿠폰 받기", "다운로드 쿠폰", "첫 구매", "신규회원",
+)
+
+
+def assert_public_product_url(url: str) -> str:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise RuntimeError("상세조사할 수 없는 상품 URL")
+    try:
+        addresses = {entry[4][0] for entry in socket.getaddrinfo(parsed.hostname, parsed.port or 443)}
+    except socket.gaierror as error:
+        raise RuntimeError("상품 주소를 확인하지 못함") from error
+    if any(ipaddress.ip_address(address).is_private or ipaddress.ip_address(address).is_loopback for address in addresses):
+        raise RuntimeError("내부 네트워크 상품 주소는 조사할 수 없음")
+    return url
+
+
+def benefit_visible_text(document: str) -> str:
+    without_scripts = re.sub(
+        r"<(?:script|style|noscript)[^>]*>.*?</(?:script|style|noscript)>",
+        " ",
+        document,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    return clean_text(without_scripts)[:500_000]
+
+
+def benefit_price_near_keywords(text: str, keywords: tuple[str, ...], reference_price: int) -> int:
+    candidates: list[int] = []
+    keyword_pattern = "|".join(re.escape(keyword) for keyword in keywords)
+    amount_pattern = r"(\d{1,3}(?:,\d{3})+|\d{3,9})\s*원"
+    patterns = (
+        rf"(?:{keyword_pattern})[^\d]{{0,70}}{amount_pattern}",
+        rf"{amount_pattern}[^\d가-힣]{{0,35}}(?:{keyword_pattern})",
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            value = parse_price(match.group(1))
+            if value <= 0:
+                continue
+            if reference_price and not (reference_price * 0.15 <= value <= reference_price * 1.25):
+                continue
+            candidates.append(value)
+    return min(candidates, default=0)
+
+
+def parse_benefit_detail(text: str, reference_price: int, fallback_shipping: int) -> dict[str, Any]:
+    coupon_price = benefit_price_near_keywords(text, BENEFIT_KEYWORDS["쿠폰"], reference_price)
+    event_price = benefit_price_near_keywords(text, BENEFIT_KEYWORDS["행사"], reference_price)
+    card_price = benefit_price_near_keywords(text, BENEFIT_KEYWORDS["카드"], reference_price)
+    detected_labels = [
+        label
+        for label, keywords in BENEFIT_KEYWORDS.items()
+        if any(keyword.lower() in text.lower() for keyword in keywords)
+    ]
+    condition_terms = [term for term in CONDITIONAL_BENEFIT_TERMS if term.lower() in text.lower()]
+    shipping = 0 if "무료배송" in text.replace(" ", "") else fallback_shipping
+    shipping_match = re.search(r"배송비[^\d]{0,30}(\d{1,3}(?:,\d{3})+|\d{3,7})\s*원", text)
+    if shipping_match:
+        parsed_shipping = parse_price(shipping_match.group(1))
+        if 0 < parsed_shipping <= 100_000 and parsed_shipping != reference_price:
+            shipping = parsed_shipping
+
+    price_candidates = [price for price in (coupon_price, event_price, card_price) if price > 0]
+    benefit_price = min(price_candidates, default=0)
+    if benefit_price:
+        status = "conditional" if condition_terms or card_price == benefit_price else "confirmed"
+    elif detected_labels or condition_terms:
+        status = "conditional"
+    else:
+        status = "none"
+    summary_parts = [label for label in detected_labels]
+    if "상품권" in text:
+        summary_parts.append("상품권")
+    if "적립" in text:
+        summary_parts.append("적립")
+    return {
+        "benefit_status": status,
+        "coupon_price": coupon_price,
+        "event_price": event_price,
+        "card_price": card_price,
+        "benefit_price": benefit_price,
+        "benefit_shipping": shipping,
+        "benefit_summary": " · ".join(dict.fromkeys(summary_parts)),
+        "benefit_condition": " · ".join(dict.fromkeys(condition_terms)),
+    }
+
+
+def fetch_benefit_detail(url: str, reference_price: int, fallback_shipping: int) -> dict[str, Any]:
+    safe_url = assert_public_product_url(url)
+    texts: list[str] = []
+    methods: list[str] = []
+    errors: list[str] = []
+
+    if SCRAPLING_SEARCH_ENABLED and ScraplingFetcher is not None:
+        try:
+            response = ScraplingFetcher.get(
+                safe_url,
+                timeout=HTTP_TIMEOUT_SECONDS,
+                impersonate="chrome",
+                headers={"Accept-Language": "ko-KR,ko;q=0.9,en;q=0.8"},
+            )
+            if int(response.status) == 200:
+                texts.append(benefit_visible_text(response.body.decode("utf-8", errors="replace")))
+                methods.append("scrapling")
+            else:
+                errors.append(f"Scrapling HTTP {response.status}")
+        except Exception as error:
+            errors.append(f"Scrapling {error}")
+    else:
+        try:
+            status, document = read_url(safe_url)
+            if status == 200:
+                texts.append(benefit_visible_text(document))
+                methods.append("crawl")
+        except Exception as error:
+            errors.append(f"크롤링 {error}")
+
+    if PLAYWRIGHT_SEARCH_ENABLED and sync_playwright is not None:
+        try:
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+                try:
+                    page = browser.new_page(locale="ko-KR", user_agent=CRAWLER_USER_AGENT)
+                    page.goto(safe_url, wait_until="domcontentloaded", timeout=PLAYWRIGHT_TIMEOUT_MS)
+                    page.wait_for_timeout(1200)
+                    texts.append(page.locator("body").inner_text(timeout=5000)[:500_000])
+                    methods.append("playwright")
+                finally:
+                    browser.close()
+        except Exception as error:
+            errors.append(f"Playwright {error}")
+
+    if not texts:
+        return {
+            "benefit_status": "failed",
+            "coupon_price": 0,
+            "event_price": 0,
+            "card_price": 0,
+            "benefit_price": 0,
+            "benefit_shipping": fallback_shipping,
+            "benefit_summary": "",
+            "benefit_condition": " · ".join(errors)[:500] or "상세페이지 확인 실패",
+            "detail_methods": methods,
+        }
+    parsed = parse_benefit_detail(" ".join(texts), reference_price, fallback_shipping)
+    parsed["detail_methods"] = list(dict.fromkeys(methods))
+    return parsed
+
+
 READY_SEARCH_SOURCES = {"naver", "danawa"}
 COLLECTION_SOURCE_LABELS = {
     "naver": "네이버 쇼핑검색",
@@ -1891,6 +2079,10 @@ def get_run_payload(db: sqlite3.Connection, run_id: str) -> dict[str, Any]:
             item["extraction_methods"] = json.loads(item.pop("extraction_methods_json", "[]"))
         except (TypeError, json.JSONDecodeError):
             item["extraction_methods"] = []
+        try:
+            item["detail_methods"] = json.loads(item.pop("detail_methods_json", "[]"))
+        except (TypeError, json.JSONDecodeError):
+            item["detail_methods"] = []
         item["margin"] = total - baseline_total if baseline_total else 0
         item["status"] = status
         item["abnormal"] = abnormal
@@ -2167,6 +2359,68 @@ def latest_price_search() -> dict[str, Any]:
         if not latest:
             return {"run": None, "items": [], "summary": {"collected_count": 0, "lowest_count": 0, "excluded_count": 0}}
         return get_run_payload(db, latest["id"])
+
+
+@app.post("/price-search/benefits", dependencies=[Depends(require_admin)])
+def scan_price_search_benefits(payload: BenefitScanRequest) -> dict[str, Any]:
+    item_ids = list(dict.fromkeys(payload.item_ids))
+    with connect() as db:
+        placeholders = ",".join("?" for _ in item_ids)
+        rows = db.execute(
+            f"SELECT * FROM price_items WHERE id IN ({placeholders})",
+            item_ids,
+        ).fetchall()
+    if len(rows) != len(item_ids):
+        raise HTTPException(status_code=404, detail="일부 검색 결과를 찾지 못했습니다.")
+
+    warnings: list[str] = []
+    for row in rows:
+        try:
+            detail = fetch_benefit_detail(row["url"], int(row["total"]), int(row["shipping"]))
+        except Exception as error:
+            detail = {
+                "benefit_status": "failed",
+                "coupon_price": 0,
+                "event_price": 0,
+                "card_price": 0,
+                "benefit_price": 0,
+                "benefit_shipping": int(row["shipping"]),
+                "benefit_summary": "",
+                "benefit_condition": str(error)[:500],
+                "detail_methods": [],
+            }
+        if detail["benefit_status"] == "failed":
+            warnings.append(f"{row['mall']} · {row['name'][:36]}: {detail['benefit_condition']}")
+        with connect() as db:
+            db.execute(
+                """
+                UPDATE price_items
+                SET benefit_status = ?, coupon_price = ?, event_price = ?, card_price = ?,
+                    benefit_price = ?, benefit_shipping = ?, benefit_summary = ?,
+                    benefit_condition = ?, detail_methods_json = ?, benefit_checked_at = ?
+                WHERE id = ?
+                """,
+                (
+                    detail["benefit_status"],
+                    detail["coupon_price"],
+                    detail["event_price"],
+                    detail["card_price"],
+                    detail["benefit_price"],
+                    detail["benefit_shipping"],
+                    detail["benefit_summary"],
+                    detail["benefit_condition"],
+                    json.dumps(detail["detail_methods"], ensure_ascii=False),
+                    now(),
+                    row["id"],
+                ),
+            )
+
+    run_id = rows[0]["run_id"]
+    with connect() as db:
+        result = get_run_payload(db, run_id)
+    result["warnings"] = warnings
+    log_event(f"benefit detail scan completed: {len(rows)} items", "warning" if warnings else "info")
+    return result
 
 
 @app.get("/smartstore/products", dependencies=[Depends(require_admin)])

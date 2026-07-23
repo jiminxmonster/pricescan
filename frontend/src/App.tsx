@@ -193,6 +193,16 @@ type PriceItem = {
   is_excluded: number;
   exclusion_reason?: string;
   extraction_methods?: string[];
+  benefit_status?: "not_checked" | "confirmed" | "conditional" | "none" | "failed";
+  coupon_price?: number;
+  event_price?: number;
+  card_price?: number;
+  benefit_price?: number;
+  benefit_shipping?: number;
+  benefit_summary?: string;
+  benefit_condition?: string;
+  detail_methods?: string[];
+  benefit_checked_at?: string;
   collected_at: string;
 };
 
@@ -1019,6 +1029,8 @@ export default function App() {
   const [keyword, setKeyword] = useState("노트북");
   const [sortMode, setSortMode] = useState("lowest");
   const [collecting, setCollecting] = useState(false);
+  const [benefitScanning, setBenefitScanning] = useState(false);
+  const [selectedBenefitIds, setSelectedBenefitIds] = useState<string[]>([]);
   const [apiPlatform, setApiPlatform] = useState("naver");
   const [apiClientId, setApiClientId] = useState("");
   const [apiClientSecret, setApiClientSecret] = useState("");
@@ -1223,6 +1235,7 @@ export default function App() {
     const detailSelection = mode === "detail" ? sanitizeSelectedFilters(selectedDetailFilters, templateFilters) : {};
     const query = mode === "detail" ? buildDetailSearchQuery(keywordValue, detailSelection) : keywordValue;
     setCollecting(true);
+    setSelectedBenefitIds([]);
     if (mode === "simple") {
       setSelectedDetailFilters({});
       setShowDetailScan(false);
@@ -1250,6 +1263,28 @@ export default function App() {
     } finally {
       setCollecting(false);
       await refreshCollectionQuotas().catch(() => undefined);
+    }
+  };
+
+  const scanBenefits = async (itemIds: string[]) => {
+    const uniqueIds = [...new Set(itemIds)].slice(0, 10);
+    if (uniqueIds.length === 0) {
+      setNotice("혜택을 상세조사할 상품을 선택하세요.");
+      return;
+    }
+    setBenefitScanning(true);
+    setNotice(`${uniqueIds.length}개 상품의 쿠폰·행사·카드·배송비를 상세조사 중...`);
+    try {
+      const data = await request<SearchPayload>("/price-search/benefits", token, {
+        method: "POST",
+        body: JSON.stringify({ item_ids: uniqueIds }),
+      });
+      setSearchPayload(data);
+      setSelectedBenefitIds([]);
+      const failedCount = data.items.filter((item) => uniqueIds.includes(item.id) && item.benefit_status === "failed").length;
+      setNotice(`혜택 상세조사 완료 · ${uniqueIds.length - failedCount}건 확인 · ${failedCount}건 확인 실패`);
+    } finally {
+      setBenefitScanning(false);
     }
   };
 
@@ -1906,6 +1941,10 @@ export default function App() {
               preparedProducts={preparedProducts}
               onExclude={toggleExclude}
               onPrepare={prepareProduct}
+              selectedBenefitIds={selectedBenefitIds}
+              benefitScanning={benefitScanning}
+              onBenefitSelectionChange={setSelectedBenefitIds}
+              onBenefitScan={scanBenefits}
             />
           </section>
         )}
@@ -2021,6 +2060,10 @@ export default function App() {
               preparedProducts={preparedProducts}
               onExclude={toggleExclude}
               onPrepare={prepareProduct}
+              selectedBenefitIds={selectedBenefitIds}
+              benefitScanning={benefitScanning}
+              onBenefitSelectionChange={setSelectedBenefitIds}
+              onBenefitScan={scanBenefits}
             />
           </section>
         )}
@@ -3336,6 +3379,15 @@ type SearchResultRow = {
   isExcluded?: number;
   exclusionReason?: string;
   extractionMethods: string[];
+  benefitStatus: NonNullable<PriceItem["benefit_status"]>;
+  couponPrice: number;
+  eventPrice: number;
+  cardPrice: number;
+  benefitPrice: number;
+  benefitShipping: number;
+  benefitSummary: string;
+  benefitCondition: string;
+  detailMethods: string[];
 };
 
 const EXTRACTION_METHOD_META: Record<string, { icon: string; label: string }> = {
@@ -3367,15 +3419,34 @@ function sortResultRows(rows: SearchResultRow[], sortMode: string, lowestTotal: 
   const sorted = [...rows];
   if (sortMode === "margin") {
     return sorted.sort((a, b) => {
-      const aMargin = lowestTotal ? a.displayPrice - lowestTotal : 0;
-      const bMargin = lowestTotal ? b.displayPrice - lowestTotal : 0;
-      return bMargin - aMargin || a.displayPrice - b.displayPrice || a.name.localeCompare(b.name, "ko");
+      const aPrice = effectivePurchasePrice(a);
+      const bPrice = effectivePurchasePrice(b);
+      const aMargin = lowestTotal ? aPrice - lowestTotal : 0;
+      const bMargin = lowestTotal ? bPrice - lowestTotal : 0;
+      return bMargin - aMargin || aPrice - bPrice || a.name.localeCompare(b.name, "ko");
     });
   }
   if (sortMode === "recent") {
-    return sorted.sort((a, b) => b.collectedAt.localeCompare(a.collectedAt) || a.displayPrice - b.displayPrice || a.name.localeCompare(b.name, "ko"));
+    return sorted.sort((a, b) => b.collectedAt.localeCompare(a.collectedAt) || effectivePurchasePrice(a) - effectivePurchasePrice(b) || a.name.localeCompare(b.name, "ko"));
   }
-  return sorted.sort((a, b) => a.displayPrice - b.displayPrice || a.salePrice - b.salePrice || a.name.localeCompare(b.name, "ko"));
+  return sorted.sort((a, b) => effectivePurchasePrice(a) - effectivePurchasePrice(b) || a.salePrice - b.salePrice || a.name.localeCompare(b.name, "ko"));
+}
+
+function effectivePurchasePrice(row: SearchResultRow): number {
+  if (row.benefitStatus === "confirmed" && row.benefitPrice > 0) {
+    return row.benefitPrice + row.benefitShipping;
+  }
+  return row.displayPrice;
+}
+
+function benefitStatusLabel(status: SearchResultRow["benefitStatus"]): string {
+  return {
+    not_checked: "미조사",
+    confirmed: "확인",
+    conditional: "조건부",
+    none: "혜택 없음",
+    failed: "확인 실패",
+  }[status];
 }
 
 function SearchResultList({
@@ -3386,6 +3457,10 @@ function SearchResultList({
   preparedProducts,
   onExclude,
   onPrepare,
+  selectedBenefitIds,
+  benefitScanning,
+  onBenefitSelectionChange,
+  onBenefitScan,
 }: {
   payload: SearchPayload;
   keyword: string;
@@ -3394,6 +3469,10 @@ function SearchResultList({
   preparedProducts: PreparedProduct[];
   onExclude: (id: string) => void;
   onPrepare: (item: DraftSourceItem) => void;
+  selectedBenefitIds: string[];
+  benefitScanning: boolean;
+  onBenefitSelectionChange: (ids: string[]) => void;
+  onBenefitScan: (ids: string[]) => void;
 }) {
   const priceRows: SearchResultRow[] = payload.items.map((item) => ({
     id: item.id,
@@ -3411,23 +3490,52 @@ function SearchResultList({
     isExcluded: item.is_excluded,
     exclusionReason: item.exclusion_reason,
     extractionMethods: extractionMethods(item),
+    benefitStatus: item.benefit_status || "not_checked",
+    couponPrice: item.coupon_price || 0,
+    eventPrice: item.event_price || 0,
+    cardPrice: item.card_price || 0,
+    benefitPrice: item.benefit_price || 0,
+    benefitShipping: item.benefit_shipping ?? item.shipping,
+    benefitSummary: item.benefit_summary || "",
+    benefitCondition: item.benefit_condition || "",
+    detailMethods: item.detail_methods || [],
   }));
   const activeRows = priceRows.filter((row) => !row.isExcluded && row.status !== "abnormal");
   const excludedRows = priceRows.filter((row) => Boolean(row.isExcluded) || row.status === "abnormal");
-  const positivePrices = activeRows.map((row) => row.displayPrice).filter((value) => value > 0);
+  const positivePrices = activeRows.map(effectivePurchasePrice).filter((value) => value > 0);
   const lowestTotal = positivePrices.length ? Math.min(...positivePrices) : 0;
   const rows = sortResultRows(view === "excluded" ? excludedRows : activeRows, sortMode, lowestTotal);
-  const lowestRows = lowestTotal ? sortResultRows(rows.filter((row) => row.displayPrice === lowestTotal), "lowest", lowestTotal) : [];
-  const comparisonRows = lowestTotal ? sortResultRows(rows.filter((row) => row.displayPrice !== lowestTotal), sortMode, lowestTotal) : rows;
+  const lowestRows = lowestTotal ? sortResultRows(rows.filter((row) => effectivePurchasePrice(row) === lowestTotal), "lowest", lowestTotal) : [];
+  const comparisonRows = lowestTotal ? sortResultRows(rows.filter((row) => effectivePurchasePrice(row) !== lowestTotal), sortMode, lowestTotal) : rows;
   const preparedSourceIds = new Set(preparedProducts.map((item) => item.source_item_id).filter(Boolean));
+  const selectableIds = rows.slice(0, 10).map((row) => row.id);
+  const selectedSet = new Set(selectedBenefitIds);
+  const allSelected = selectableIds.length > 0 && selectableIds.every((id) => selectedSet.has(id));
+
+  const toggleBenefitSelection = (id: string) => {
+    if (!selectedSet.has(id) && selectedBenefitIds.length >= 10) return;
+    onBenefitSelectionChange(selectedSet.has(id)
+      ? selectedBenefitIds.filter((selectedId) => selectedId !== id)
+      : [...selectedBenefitIds, id]);
+  };
 
   const renderResultRow = (row: SearchResultRow, isLowest: boolean) => {
-    const margin = lowestTotal ? row.displayPrice - lowestTotal : 0;
+    const finalPurchasePrice = effectivePurchasePrice(row);
+    const margin = lowestTotal ? finalPurchasePrice - lowestTotal : 0;
     const compareRate = lowestTotal ? (margin / lowestTotal) * 100 : 0;
-    const marginRate = row.displayPrice ? (margin / row.displayPrice) * 100 : 0;
+    const marginRate = finalPurchasePrice ? (margin / finalPurchasePrice) * 100 : 0;
     const isPrepared = preparedSourceIds.has(row.sourceItemId);
     return (
       <tr className={`${isLowest ? "lowest-row" : ""} ${isPrepared ? "registered-row" : ""}`} key={row.id}>
+        <td className="result-select-cell">
+          <input
+            type="checkbox"
+            checked={selectedSet.has(row.id)}
+            disabled={!selectedSet.has(row.id) && selectedBenefitIds.length >= 10}
+            onChange={() => toggleBenefitSelection(row.id)}
+            aria-label={`${row.name} 혜택 상세조사 선택`}
+          />
+        </td>
         <td><span className="result-product-type">{inferProductType(row.name)}</span></td>
         <td className="model-cell"><a className="result-model" href={row.url} target="_blank" rel="noreferrer">{row.name}</a></td>
         <td><span className="source-chip">{sourceLabel(row.collectionSource)}</span></td>
@@ -3438,6 +3546,24 @@ function SearchResultList({
         <td className={`number-cell ${isLowest ? "lowest-price-cell" : ""}`}>{money(row.displayPrice)}</td>
         <td className="number-cell">{percent(compareRate)}</td>
         <td className="number-cell">{percent(marginRate)}</td>
+        <td>
+          <span className="benefit-price-stack">
+            {row.couponPrice > 0 && <span>쿠폰 {money(row.couponPrice)}</span>}
+            {row.eventPrice > 0 && <span>행사 {money(row.eventPrice)}</span>}
+            {row.cardPrice > 0 && <span>카드 {money(row.cardPrice)}</span>}
+            {!row.couponPrice && !row.eventPrice && !row.cardPrice && <span>-</span>}
+          </span>
+        </td>
+        <td className="number-cell">
+          {row.benefitPrice > 0 ? money(row.benefitPrice + row.benefitShipping) : money(row.displayPrice)}
+          {row.benefitStatus === "conditional" && <small className="conditional-price">조건부</small>}
+        </td>
+        <td>
+          <span className={`benefit-status benefit-${row.benefitStatus}`}>{benefitStatusLabel(row.benefitStatus)}</span>
+          {row.detailMethods.length > 0 && <ExtractionMethodBadges methods={row.detailMethods} />}
+          {row.benefitSummary && <small className="benefit-summary">{row.benefitSummary}</small>}
+          {row.benefitCondition && <small className="benefit-condition" title={row.benefitCondition}>{row.benefitCondition}</small>}
+        </td>
         <td>
           {view === "excluded"
             ? <span className="exclusion-reason">{row.exclusionReason || (row.status === "abnormal" ? "가격 이상치" : "제외됨")}</span>
@@ -3473,20 +3599,52 @@ function SearchResultList({
           <span>{rows.length}개 결과</span>
         </span>
       </div>
+      {view === "active" && rows.length > 0 && (
+        <div className="benefit-scan-toolbar">
+          <div>
+            <strong>2차 혜택 상세조사</strong>
+            <span>선택한 상품 상세페이지에서 쿠폰·행사·카드·배송비를 확인합니다. 1회 최대 10개</span>
+          </div>
+          <span className="benefit-scan-actions">
+            <button
+              className="btn"
+              disabled={benefitScanning || selectedBenefitIds.length === 0}
+              onClick={() => onBenefitScan(selectedBenefitIds)}
+            >
+              {benefitScanning ? "조사 중..." : `선택 항목 조사 (${selectedBenefitIds.length})`}
+            </button>
+            <button
+              className="btn orange"
+              disabled={benefitScanning}
+              onClick={() => onBenefitScan(rows.slice(0, 10).map((row) => row.id))}
+            >
+              최저가 상위 10개 조사
+            </button>
+          </span>
+        </div>
+      )}
       <div className="search-results-table-wrap">
         <table className="search-results-table">
           <thead>
             <tr>
-              <th>상품종류</th><th>모델명</th><th>소스</th><th>추출방식</th><th>쇼핑몰</th><th>판매가</th><th>배송비</th><th>노출가</th><th>비교율</th><th>마진율</th><th>상태</th><th>작업</th>
+              <th className="result-select-cell">
+                <input
+                  type="checkbox"
+                  checked={allSelected}
+                  onChange={() => onBenefitSelectionChange(allSelected ? [] : selectableIds)}
+                  aria-label="혜택 상세조사 전체 선택"
+                />
+              </th>
+              <th>상품종류</th><th>모델명</th><th>소스</th><th>추출방식</th><th>쇼핑몰</th><th>판매가</th><th>배송비</th><th>노출가</th><th>비교율</th><th>마진율</th><th>혜택가</th><th>최종구매가</th><th>혜택상태</th><th>가격상태</th><th>작업</th>
             </tr>
           </thead>
           <tbody>
             {view === "active" && lowestRows.map((row) => renderResultRow(row, true))}
             {view === "active" && lowestRows.length > 0 && comparisonRows.length > 0 && (
-              <tr className="result-divider"><td colSpan={12}>최저가 외 비교 대상</td></tr>
+              <tr className="result-divider"><td colSpan={16}>최저가 외 비교 대상</td></tr>
             )}
             {(view === "excluded" ? rows : comparisonRows).map((row) => renderResultRow(row, false))}
-            {rows.length === 0 && <tr><td className="empty-result-cell" colSpan={12}>표시할 상품이 없습니다.</td></tr>}
+            {rows.length === 0 && <tr><td className="empty-result-cell" colSpan={16}>표시할 상품이 없습니다.</td></tr>}
           </tbody>
         </table>
       </div>
