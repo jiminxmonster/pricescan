@@ -1855,6 +1855,93 @@ textarea {
   align-items: center;
   gap: 5px;
 }
+.sell-channel-modal {
+  width: min(760px, calc(100vw - 52px));
+  max-height: calc(100vh - 52px);
+  overflow-y: auto;
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  border-radius: 8px;
+  background: #fff;
+  padding: 24px;
+  box-shadow: 0 28px 90px rgba(10, 22, 40, 0.34);
+  animation: modal-in 0.16s ease-out;
+}
+.sell-channel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  margin-bottom: 20px;
+}
+.sell-channel-head h3 {
+  margin: 5px 0 6px;
+  font-size: 21px;
+  line-height: 1.35;
+}
+.sell-channel-head p {
+  margin: 0;
+  color: var(--muted);
+}
+.sell-channel-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.sell-channel-card {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 5px 10px;
+  min-height: 92px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  padding: 15px;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.sell-channel-card:hover {
+  border-color: var(--brand);
+  background: #f7faff;
+}
+.sell-channel-card.connected {
+  border-color: #86d5ad;
+  background: #effaf4;
+}
+.sell-channel-card.disabled {
+  background: #f7f8fa;
+  color: #8b98a8;
+  cursor: not-allowed;
+}
+.sell-channel-card strong { font-size: 15px; }
+.sell-channel-card small {
+  grid-column: 2;
+  color: var(--muted);
+}
+.sell-channel-card b {
+  grid-column: 3;
+  grid-row: 1 / span 2;
+  color: var(--brand);
+  font-size: 12px;
+}
+.sell-channel-card.disabled b { color: #9ba7b5; }
+.channel-light {
+  grid-row: 1 / span 2;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #c7d2df;
+  box-shadow: 0 0 0 4px rgba(199, 210, 223, 0.2);
+}
+.sell-channel-card.connected .channel-light {
+  background: #0fa968;
+  box-shadow: 0 0 0 4px rgba(15, 169, 104, 0.14);
+}
+.sell-channel-modal .modal-actions {
+  justify-content: flex-end;
+  margin-top: 18px;
+}
 .monitoring-item {
   display: grid;
   gap: 8px;
@@ -2135,6 +2222,11 @@ textarea {
 }
 
 @media (max-width: 760px) {
+  .sell-channel-list { grid-template-columns: 1fr; }
+  .sell-channel-modal {
+    width: calc(100vw - 28px);
+    padding: 18px;
+  }
   .quota-row {
     grid-template-columns: 1fr auto;
   }

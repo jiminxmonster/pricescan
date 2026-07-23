@@ -1048,6 +1048,7 @@ export default function App() {
   const [searchExceptionTerms, setSearchExceptionTerms] = useState<string[]>([]);
   const [searchExceptionDraft, setSearchExceptionDraft] = useState("");
   const [draftSourceItem, setDraftSourceItem] = useState<DraftSourceItem | null>(null);
+  const [sellCandidate, setSellCandidate] = useState<PreparedProduct | null>(null);
   const [editingDraft, setEditingDraft] = useState<ListingDraft | null>(null);
   const [editingDraftForm, setEditingDraftForm] = useState<DraftForm | null>(null);
   const [draftImageUploading, setDraftImageUploading] = useState<Record<string, boolean>>({});
@@ -1078,11 +1079,12 @@ export default function App() {
   });
 
   useEffect(() => {
-    if (!draftSourceItem && !editingDraft) return undefined;
+    if (!draftSourceItem && !editingDraft && !sellCandidate) return undefined;
     const previousOverflow = document.body.style.overflow;
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         setDraftSourceItem(null);
+        setSellCandidate(null);
         setEditingDraft(null);
         setEditingDraftForm(null);
       }
@@ -1093,7 +1095,7 @@ export default function App() {
       document.body.style.overflow = previousOverflow;
       window.removeEventListener("keydown", closeOnEscape);
     };
-  }, [draftSourceItem, editingDraft]);
+  }, [draftSourceItem, editingDraft, sellCandidate]);
 
   const loadAll = async () => {
     if (!token) return;
@@ -1493,6 +1495,33 @@ export default function App() {
       description: productOnlyDescription(item.name, identity),
     });
     setNotice("상품등록 초안을 확인하고 초안 승인을 진행하세요.");
+  };
+
+  const openSellChannelSelector = (item: PreparedProduct) => {
+    setSellCandidate(item);
+    setNotice("판매할 쇼핑몰을 선택하세요.");
+  };
+
+  const continueSmartstoreSale = () => {
+    if (!sellCandidate) return;
+    if (!isSmartstoreActive(apiKeys)) {
+      setSellCandidate(null);
+      selectApiPlatform("smartstore");
+      setTab("api");
+      setNotice("네이버 스마트스토어 셀러 API를 먼저 연결하세요.");
+      return;
+    }
+    const existingDraft = listingDrafts.find((draft) =>
+      draft.id === sellCandidate.listing_draft_id
+      || (draft.source === sellCandidate.source && draft.source_item_id === sellCandidate.source_item_id)
+    );
+    setSellCandidate(null);
+    if (existingDraft) {
+      openDraftEditor(existingDraft);
+      setNotice("기존 스마트스토어 등록폼을 열었습니다.");
+      return;
+    }
+    openPublishDraft(preparedToDraftSource(sellCandidate));
   };
 
   const toggleDraftPlatform = (platform: string) => {
@@ -1969,6 +1998,7 @@ export default function App() {
               smartstoreLoading={smartstoreLoading}
               smartstoreError={smartstoreError}
               onOpenDraft={(item) => openPublishDraft(preparedToDraftSource(item))}
+              onSell={openSellChannelSelector}
               onEditDraft={openDraftEditor}
               onValidateDraft={validateDraft}
               onDeletePrepared={deletePreparedProduct}
@@ -2224,6 +2254,49 @@ export default function App() {
           </div>
         )}
 
+        {sellCandidate && (
+          <div
+            className="modal-backdrop"
+            role="presentation"
+            onMouseDown={(event) => {
+              if (event.target === event.currentTarget) setSellCandidate(null);
+            }}
+          >
+            <div className="sell-channel-modal" role="dialog" aria-modal="true" aria-label="판매 쇼핑몰 선택">
+              <div className="sell-channel-head">
+                <div>
+                  <span className="eyebrow">판매 채널 선택</span>
+                  <h3>{sellCandidate.model_name || inferProductIdentity(sellCandidate.title).modelName || sellCandidate.title}</h3>
+                  <p>등록할 쇼핑몰을 선택하면 해당 쇼핑몰 등록폼으로 이동합니다.</p>
+                </div>
+                <button className="btn modal-close-button" aria-label="닫기" onClick={() => setSellCandidate(null)}>×</button>
+              </div>
+              <div className="sell-channel-list">
+                <button
+                  className={`sell-channel-card ${isSmartstoreActive(apiKeys) ? "connected" : ""}`}
+                  onClick={continueSmartstoreSale}
+                >
+                  <span className="channel-light" />
+                  <strong>네이버 스마트스토어</strong>
+                  <small>{isSmartstoreActive(apiKeys) ? "API 연결됨 · 등록 가능" : "셀러 API 연결 필요"}</small>
+                  <b>{sellCandidate.listing_draft_id ? "기존 등록폼 열기" : "등록폼 작성"}</b>
+                </button>
+                {["쿠팡", "11번가", "G마켓", "옥션"].map((mall) => (
+                  <button className="sell-channel-card disabled" key={mall} disabled>
+                    <span className="channel-light" />
+                    <strong>{mall}</strong>
+                    <small>판매자 API 연동 준비 중</small>
+                    <b>선택 불가</b>
+                  </button>
+                ))}
+              </div>
+              <div className="modal-actions">
+                <button className="btn" onClick={() => setSellCandidate(null)}>취소</button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {draftSourceItem && (
           <div
             className="modal-backdrop"
@@ -2345,9 +2418,10 @@ function MonitoringWaitingRow({ item, onUpdate, onDelete }: {
   );
 }
 
-function MonitoringActiveRow({ item, onUpdate }: {
+function MonitoringActiveRow({ item, onUpdate, onSell }: {
   item: PreparedProduct;
   onUpdate: (item: PreparedProduct, updates: Partial<PreparedProduct>) => Promise<void>;
+  onSell: (item: PreparedProduct) => void;
 }) {
   const [feeRate, setFeeRate] = useState(item.fee_rate || 0);
   const [sellerSalePrice, setSellerSalePrice] = useState(item.seller_sale_price || item.sale_price);
@@ -2380,7 +2454,7 @@ function MonitoringActiveRow({ item, onUpdate }: {
       <td>{money(metrics.sourceCost)}</td>
       <td className={metrics.margin >= 0 ? "positive-value" : "negative-value"}>{money(metrics.margin)}</td>
       <td><div className="auto-discount-control"><label><input type="checkbox" checked={autoDiscount} onChange={(event) => setAutoDiscount(event.target.checked)} /> 자동인하</label><span>최저가 대비</span><input type="number" min="0" step={discountType === "amount" ? 1000 : 0.1} value={discountValue} onChange={(event) => setDiscountValue(Number(event.target.value))} /><select value={discountType} onChange={(event) => setDiscountType(event.target.value as "amount" | "percent")}><option value="amount">원</option><option value="percent">%</option></select></div></td>
-      <td><div className="monitoring-row-actions"><button className="btn small primary" onClick={() => save(true)}>저장</button><button className="monitoring-toggle on" aria-pressed="true" onClick={() => save(false)}><span />ON</button></div></td>
+      <td><div className="monitoring-row-actions"><button className="btn small orange" onClick={() => onSell(item)}>{item.listing_draft_id ? "등록폼" : "판매"}</button><button className="btn small primary" onClick={() => save(true)}>저장</button><button className="monitoring-toggle on" aria-pressed="true" onClick={() => save(false)}><span />ON</button></div></td>
     </tr>
   );
 }
@@ -2394,6 +2468,7 @@ function MonitoringBoard({
   smartstoreLoading,
   smartstoreError,
   onOpenDraft,
+  onSell,
   onEditDraft,
   onValidateDraft,
   onDeletePrepared,
@@ -2410,6 +2485,7 @@ function MonitoringBoard({
   smartstoreLoading: boolean;
   smartstoreError: string;
   onOpenDraft: (item: PreparedProduct) => void;
+  onSell: (item: PreparedProduct) => void;
   onEditDraft: (draft: ListingDraft) => void;
   onValidateDraft: (draftId: string) => void;
   onDeletePrepared: (id: string) => void;
@@ -2452,7 +2528,7 @@ function MonitoringBoard({
       <div className="monitoring-panel-head"><div><strong>모니터링 중</strong><span>ON 상태 상품의 원소스 가격과 셀러 대응가를 함께 관리합니다.</span></div><b>{activeProducts.length}</b></div>
       <div className="monitoring-table-wrap">
         <table className="monitoring-data-table active-table"><thead><tr><th>상품종류</th><th>모델명</th><th>쇼핑몰</th><th>상대방<br />판매가/노출가</th><th>셀러대응<br />판매가/노출가</th><th>비교율</th><th>수수료</th><th>예상정산</th><th>마진</th><th>자동인하</th><th>관리</th></tr></thead><tbody>
-          {activeProducts.map((item) => <MonitoringActiveRow key={item.id} item={item} onUpdate={onUpdateMonitoring} />)}
+          {activeProducts.map((item) => <MonitoringActiveRow key={item.id} item={item} onUpdate={onUpdateMonitoring} onSell={onSell} />)}
         </tbody></table>
         {activeProducts.length === 0 && <div className="monitoring-empty">대기 목록에서 모니터링을 ON으로 전환하세요.</div>}
       </div>
