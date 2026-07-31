@@ -758,6 +758,23 @@ td { font-size: 14px; }
 .lowest-line-table tr.registered-row td {
   background: #eefaf3;
 }
+.lowest-line-table tr.line-excluded-row td {
+  background: #f7f2eb;
+  color: #8a6a45;
+}
+.lowest-line-table tr.line-placeholder-row td {
+  background: #fbfcfe;
+  color: #96a1af;
+  font-weight: 800;
+}
+.line-exclusion-reason {
+  display: block;
+  margin-top: 3px;
+  color: #9a4b0b;
+  font-size: 10px;
+  font-weight: 900;
+  line-height: 1.25;
+}
 .search-results-table-wrap {
   position: relative;
   width: 100%;
@@ -987,7 +1004,6 @@ td { font-size: 14px; }
   font-weight: 950;
   line-height: 1;
 }
-.extraction-method-badge.method-api { border-color: #8fc8aa; background: #edf9f2; color: #176d42; }
 .extraction-method-badge.method-crawl { border-color: #9db8dc; background: #edf4ff; color: #194f8c; }
 .extraction-method-badge.method-playwright { border-color: #e2b37d; background: #fff5e8; color: #8d4b08; }
 .extraction-method-badge.method-scrapling { border-color: #c4afd9; background: #f7f1fb; color: #62407f; }
@@ -1348,6 +1364,25 @@ textarea {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
+}
+.crawler-source-note {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  border: 1px solid #d8e3f0;
+  border-radius: 4px;
+  background: #f7faff;
+  padding: 14px;
+}
+.crawler-source-note strong {
+  display: block;
+  color: var(--text);
+  font-size: 15px;
+}
+.crawler-source-note p {
+  margin: 5px 0 0;
+  color: var(--muted);
 }
 .naver-guide {
   display: grid;

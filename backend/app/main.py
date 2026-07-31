@@ -74,6 +74,7 @@ COMPARISON_PLATFORM_LABELS = {
     "enuri": "에누리",
 }
 MAX_COMPETITOR_SNAPSHOT_ROWS = 5
+SEARCH_LINE_SOURCE_LIMIT = 80
 
 
 app = FastAPI(title="PriceScan API", version="0.1.0")
@@ -526,7 +527,7 @@ def init_db() -> None:
             )
 
         platforms = [
-            ("naver", "네이버 쇼핑 검색 API"),
+            ("naver", "네이버쇼핑 크롤러"),
             ("smartstore", "네이버 스마트스토어 커머스API"),
             ("naver_datalab", "네이버 데이터랩"),
             ("coupang", "쿠팡"),
@@ -559,28 +560,9 @@ def init_db() -> None:
             """
             UPDATE api_keys
             SET status = 'ready'
-            WHERE platform = 'danawa' AND status = 'not_configured'
+            WHERE platform IN ('naver', 'danawa', 'enuri') AND status = 'not_configured'
             """
         )
-
-        naver = db.execute("SELECT client_id, client_secret FROM api_keys WHERE platform = 'naver'").fetchone()
-        legacy_naver = db.execute("SELECT client_id, client_secret FROM api_keys WHERE platform = 'naver_datalab'").fetchone()
-        if (
-            naver
-            and legacy_naver
-            and not naver["client_id"]
-            and legacy_naver["client_id"]
-            and legacy_naver["client_secret"]
-        ):
-            db.execute(
-                """
-                UPDATE api_keys
-                SET client_id = ?, client_secret = ?, status = 'configured'
-                WHERE platform = 'naver'
-                """,
-                (legacy_naver["client_id"], legacy_naver["client_secret"]),
-            )
-
         # Remove fixed recovery-demo orders so the operations board only shows
         # orders collected from a real sales channel.
         db.execute(
@@ -1347,67 +1329,6 @@ def safe_upload_filename(filename: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", name)[:80] or "image"
 
 
-def naver_sort(sort_mode: str) -> str:
-    if sort_mode == "recent":
-        return "date"
-    # Fetch relevant products first. Price sorting happens after accessories
-    # and category mismatches have been removed from the candidate set.
-    return "sim"
-
-
-def fetch_naver_products(query: str, sort_mode: str, client_id: str, client_secret: str, display: int = 100) -> list[dict[str, Any]]:
-    params = urllib.parse.urlencode(
-        {
-            "query": query,
-            "display": min(max(display, 1), 100),
-            "start": 1,
-            "sort": naver_sort(sort_mode),
-            "exclude": "used:rental:cbshop",
-        }
-    )
-    status, body = read_url(
-        f"https://openapi.naver.com/v1/search/shop.json?{params}",
-        {
-            "Accept": "application/json",
-            "X-Naver-Client-Id": client_id,
-            "X-Naver-Client-Secret": client_secret,
-        },
-    )
-    if status != 200:
-        detail = clean_text(body)[:160]
-        raise RuntimeError(f"네이버 쇼핑 API 오류: HTTP {status} · {detail}")
-
-    try:
-        data = json.loads(body)
-    except json.JSONDecodeError as error:
-        raise RuntimeError("스마트스토어 토큰 응답을 JSON으로 해석하지 못했습니다.") from error
-    products: list[dict[str, Any]] = []
-    for item in data.get("items", []):
-        price = parse_price(item.get("lprice"))
-        if price <= 0:
-            continue
-        category_path = " > ".join(
-            clean_text(item.get(key) or "")
-            for key in ("category1", "category2", "category3", "category4")
-            if clean_text(item.get(key) or "")
-        )
-        products.append(
-            {
-                "source": "naver",
-                "mall": clean_text(item.get("mallName") or "네이버"),
-                "name": clean_text(item.get("title") or ""),
-                "price": price,
-                "shipping": 0,
-                "total": price,
-                "url": html.unescape(item.get("link") or "https://shopping.naver.com/"),
-                "category": category_path,
-                "product_type": clean_text(str(item.get("productType") or "")),
-                "extraction_methods": ["api"],
-            }
-        )
-    return products
-
-
 def naver_shopping_search_url(query: str, sort_mode: str, display: int = 40) -> str:
     params = urllib.parse.urlencode(
         {
@@ -1420,6 +1341,19 @@ def naver_shopping_search_url(query: str, sort_mode: str, display: int = 40) -> 
         }
     )
     return f"https://search.shopping.naver.com/search/all?{params}"
+
+
+def naver_search_shopping_url(query: str, sort_mode: str, display: int = 40) -> str:
+    params = urllib.parse.urlencode(
+        {
+            "where": "shopping",
+            "query": query,
+            "sm": "tab_jum",
+            "sort": "price_asc" if sort_mode == "lowest" else "rel",
+            "pagingSize": min(max(display, 1), 80),
+        }
+    )
+    return f"https://search.naver.com/search.naver?{params}"
 
 
 def parse_naver_shopping_crawl_products(document: str, search_url: str, display: int = 40) -> list[dict[str, Any]]:
@@ -1445,14 +1379,26 @@ def parse_naver_shopping_crawl_products(document: str, search_url: str, display:
 
 
 def fetch_naver_shopping_crawl_products(query: str, sort_mode: str, display: int = 40) -> list[dict[str, Any]]:
-    search_url = naver_shopping_search_url(query, sort_mode, display)
-    status, body = read_url(search_url, {"Referer": "https://shopping.naver.com/"})
-    if status != 200:
-        raise RuntimeError(f"네이버쇼핑 검색 페이지 수집 오류: HTTP {status}")
-    products = parse_naver_shopping_crawl_products(body, search_url, display=display)
-    if not products:
-        raise RuntimeError("네이버쇼핑 검색 결과 파싱 실패 또는 결과 없음")
-    return products
+    attempts: list[str] = []
+    crawler_headers = {
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-origin",
+        "Upgrade-Insecure-Requests": "1",
+    }
+    for search_url, referer, label in (
+        (naver_shopping_search_url(query, sort_mode, display), "https://shopping.naver.com/", "네이버쇼핑"),
+        (naver_search_shopping_url(query, sort_mode, display), "https://www.naver.com/", "네이버 검색 쇼핑탭"),
+    ):
+        status, body = read_url(search_url, {"Referer": referer, **crawler_headers})
+        if status != 200:
+            attempts.append(f"{label} HTTP {status}")
+            continue
+        products = parse_naver_shopping_crawl_products(body, search_url, display=display)
+        if products:
+            return products
+        attempts.append(f"{label} 파싱 결과 없음")
+    raise RuntimeError(f"네이버쇼핑 검색 결과 수집 실패: {' · '.join(attempts)}")
 
 
 def smartstore_signature(client_id: str, client_secret: str, timestamp: int) -> str:
@@ -2249,7 +2195,7 @@ def fetch_benefit_detail(url: str, reference_price: int, fallback_shipping: int)
 
 READY_SEARCH_SOURCES = {"naver", "danawa", "enuri"}
 COLLECTION_SOURCE_LABELS = {
-    "naver": "네이버 쇼핑검색",
+    "naver": "네이버쇼핑",
     "danawa": "다나와",
     "enuri": "에누리",
 }
@@ -2346,32 +2292,14 @@ def collect_price_products(db: sqlite3.Connection, query: str, sort_mode: str, s
     selected_sources = normalize_sources(sources)
 
     if "naver" in selected_sources:
-        naver_collected = False
-        naver_key = db.execute("SELECT * FROM api_keys WHERE platform = 'naver'").fetchone()
-        if naver_key and naver_key["client_id"] and naver_key["client_secret"]:
-            try:
-                reserve_collection_request(db, "naver")
-                collected = fetch_naver_products(query, sort_mode, naver_key["client_id"], naver_key["client_secret"])
-                products.extend(collected)
-                complete_collection_request(db, "naver", "success")
-                naver_collected = bool(collected)
-            except Exception as error:
-                if not isinstance(error, CollectionQuotaExceeded):
-                    complete_collection_request(db, "naver", "error")
-                    warnings.append(str(error))
-                else:
-                    warnings.append(str(error))
-        else:
-            warnings.append("네이버 쇼핑 API 키가 없어 검색페이지 크롤링으로 시도")
-        if not naver_collected:
-            try:
-                reserve_collection_request(db, "naver")
-                products.extend(fetch_naver_shopping_crawl_products(query, sort_mode))
-                complete_collection_request(db, "naver", "success")
-            except Exception as error:
-                if not isinstance(error, CollectionQuotaExceeded):
-                    complete_collection_request(db, "naver", "error")
-                warnings.append(f"네이버 크롤링: {error}")
+        try:
+            reserve_collection_request(db, "naver")
+            products.extend(fetch_naver_shopping_crawl_products(query, sort_mode, display=SEARCH_LINE_SOURCE_LIMIT))
+            complete_collection_request(db, "naver", "success")
+        except Exception as error:
+            if not isinstance(error, CollectionQuotaExceeded):
+                complete_collection_request(db, "naver", "error")
+            warnings.append(f"네이버: {error}")
 
     if "danawa" in selected_sources:
         try:
@@ -2384,7 +2312,7 @@ def collect_price_products(db: sqlite3.Connection, query: str, sort_mode: str, s
             )
             for label, collector in collectors:
                 try:
-                    collected = collector(query)
+                    collected = collector(query, display=SEARCH_LINE_SOURCE_LIMIT)
                     products.extend(collected)
                     if collected:
                         method_successes += 1
@@ -2401,7 +2329,7 @@ def collect_price_products(db: sqlite3.Connection, query: str, sort_mode: str, s
     if "enuri" in selected_sources:
         try:
             reserve_collection_request(db, "enuri")
-            products.extend(mark_extraction_method(fetch_enuri_products(query), "crawl"))
+            products.extend(mark_extraction_method(fetch_enuri_products(query, display=SEARCH_LINE_SOURCE_LIMIT), "crawl"))
             complete_collection_request(db, "enuri", "success")
         except Exception as error:
             if not isinstance(error, CollectionQuotaExceeded):
@@ -2849,7 +2777,7 @@ def save_api_key(platform: str, payload: ApiKeyPayload) -> dict[str, Any]:
         row = db.execute("SELECT platform FROM api_keys WHERE platform = ?", (platform,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Unknown platform")
-        if platform == "danawa":
+        if platform in READY_SEARCH_SOURCES:
             status = "ready"
         else:
             status = "configured" if payload.client_id and payload.client_secret else "not_configured"
@@ -2861,7 +2789,7 @@ def save_api_key(platform: str, payload: ApiKeyPayload) -> dict[str, Any]:
             """,
             (payload.client_id, payload.client_secret, payload.extra_json, status, platform),
         )
-    log_event(f"{platform} API key saved")
+    log_event(f"{platform} connection setting saved")
     return {"status": status}
 
 
@@ -2874,19 +2802,16 @@ def test_api_key(platform: str) -> dict[str, Any]:
         connected = False
         message = "Client ID/Secret 입력 필요"
         if platform == "naver":
-            if key["client_id"] and key["client_secret"]:
-                try:
-                    reserve_collection_request(db, "naver")
-                    fetch_naver_products("노트북", "lowest", key["client_id"], key["client_secret"], display=1)
-                    complete_collection_request(db, "naver", "success")
-                    connected = True
-                    message = "네이버 쇼핑 검색 API 실제 호출 성공"
-                except Exception as error:
-                    if not isinstance(error, CollectionQuotaExceeded):
-                        complete_collection_request(db, "naver", "error")
-                    message = str(error)
-            else:
-                message = "네이버 Client ID/Secret 입력 필요"
+            try:
+                reserve_collection_request(db, "naver")
+                fetch_naver_shopping_crawl_products("노트북", "lowest", display=1)
+                complete_collection_request(db, "naver", "success")
+                connected = True
+                message = "네이버쇼핑 검색 페이지 수집/파싱 성공"
+            except Exception as error:
+                if not isinstance(error, CollectionQuotaExceeded):
+                    complete_collection_request(db, "naver", "error")
+                message = str(error)
         elif platform == "smartstore":
             if key["client_id"] and key["client_secret"]:
                 try:

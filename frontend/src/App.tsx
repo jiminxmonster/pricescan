@@ -26,9 +26,9 @@ const defaultSettings: AdminSettings = {
 };
 
 const primaryTabs: Array<{ key: Tab; label: string; description: string }> = [
-  { key: "search", label: "상품검색", description: "API 등을 통해 해당상품 가격 검색" },
+  { key: "search", label: "상품검색", description: "검색/크롤링으로 해당상품 가격 검색" },
   { key: "monitoring", label: "모니터링", description: "예비상품과 판매상품 관리" },
-  { key: "api", label: "검색설정", description: "쇼핑몰/API 키 등록과 연동 테스트" },
+  { key: "api", label: "검색설정", description: "판매자 API와 검색 크롤러 상태 관리" },
   { key: "settings", label: "관리자설정", description: "메뉴와 기능 사용여부 설정" },
 ];
 
@@ -54,9 +54,8 @@ type SearchSourceGroup = {
 
 const searchSourceGroups: SearchSourceGroup[] = [
   {
-    title: "검색엔진 / 검색 API",
+    title: "검색엔진 크롤링",
     options: [
-      { key: "naver", label: "네이버 쇼핑검색", description: "공식 쇼핑 검색 API", enabled: true, badge: "사용 가능" },
       { key: "google_search", label: "구글 검색 크롤링", description: "검색결과 파싱 미구현", enabled: false, badge: "준비 중" },
       { key: "naver_search", label: "네이버 일반검색 크롤링", description: "일반검색 파싱 미구현", enabled: false, badge: "준비 중" },
     ],
@@ -65,6 +64,7 @@ const searchSourceGroups: SearchSourceGroup[] = [
     title: "쇼핑몰 / 가격비교",
     options: [
       { key: "smartstore", label: "네이버 스마트스토어", description: "판매상품은 모니터링에서 조회", enabled: false, badge: "모니터링" },
+      { key: "naver", label: "네이버 쇼핑", description: "검색 페이지 크롤러", enabled: true, badge: "사용 가능" },
       { key: "danawa", label: "다나와", description: "검색 페이지 크롤러", enabled: true, badge: "사용 가능" },
       { key: "enuri", label: "에누리", description: "검색 페이지 크롤러", enabled: true, badge: "사용 가능" },
       { key: "elevenst", label: "11번가", description: "수집기 미구현", enabled: false, badge: "준비 중" },
@@ -76,7 +76,7 @@ const searchSourceGroups: SearchSourceGroup[] = [
 
 const readySourceKeys = new Set(searchSourceGroups.flatMap((group) => group.options.filter((option) => option.enabled).map((option) => option.key)));
 const priceReadySourceKeys = new Set(["naver", "danawa", "enuri"]);
-const apiPlatformOrder = ["naver", "smartstore", "danawa", "enuri", "elevenst", "gmarket", "auction", "google_search", "naver_search", "coupang"];
+const apiPlatformOrder = ["smartstore", "danawa", "enuri", "naver", "elevenst", "gmarket", "auction", "google_search", "naver_search", "coupang"];
 const serviceUrl = "https://pricescan.d2blue.com/";
 const productInfoNoticeTypes = ["기타 재화", "전자제품", "가전제품", "의류", "신발", "가방", "식품", "화장품"];
 const deliveryMethods = ["택배/소포/등기", "직접배송", "방문수령", "퀵서비스"];
@@ -90,25 +90,6 @@ type NaverApiGuide = {
 };
 
 const naverApiGuides: Record<string, NaverApiGuide> = {
-  naver: {
-    title: "네이버 쇼핑검색 API 발급 안내",
-    summary: "가격비교/상품검색 결과를 가져오는 API입니다. 상품 등록은 할 수 없고 검색 결과 수집에만 사용합니다.",
-    steps: [
-      "네이버 Developers에서 애플리케이션을 등록합니다.",
-      "사용 API에서 검색을 선택하고 쇼핑 검색 사용을 설정합니다.",
-      "발급된 Client ID와 Client Secret을 PriceScan 검색설정에 입력합니다.",
-      "저장 후 연동 테스트를 눌러 쇼핑 검색 호출 성공 여부를 확인합니다.",
-    ],
-    checklist: [
-      "애플리케이션 이름은 PriceScan처럼 알아보기 쉽게 입력",
-      "검색 API 권한 선택",
-      "Client ID / Client Secret 복사",
-    ],
-    links: [
-      { label: "네이버 Developers 애플리케이션", url: "https://developers.naver.com/apps/#/register" },
-      { label: "쇼핑 검색 API 문서", url: "https://developers.naver.com/docs/serviceapi/search/shopping/shopping.md" },
-    ],
-  },
   smartstore: {
     title: "네이버 스마트스토어 커머스API 발급 안내",
     summary: "스마트스토어 상품등록/수정/조회에 필요한 판매자 API입니다. 실제 상품 자동등록은 이 키가 있어야 진행됩니다.",
@@ -571,7 +552,7 @@ function statusLabel(status: string): string {
 
 function sourceLabel(source: string): string {
   const labels: Record<string, string> = {
-    naver: "네이버 쇼핑검색",
+    naver: "네이버 쇼핑",
     smartstore: "네이버 스마트스토어",
     danawa: "다나와",
     enuri: "에누리",
@@ -1081,7 +1062,7 @@ export default function App() {
   const [collecting, setCollecting] = useState(false);
   const [benefitScanning, setBenefitScanning] = useState(false);
   const [selectedBenefitIds, setSelectedBenefitIds] = useState<string[]>([]);
-  const [apiPlatform, setApiPlatform] = useState("naver");
+  const [apiPlatform, setApiPlatform] = useState("smartstore");
   const [apiClientId, setApiClientId] = useState("");
   const [apiClientSecret, setApiClientSecret] = useState("");
   const [notice, setNotice] = useState("");
@@ -1175,8 +1156,8 @@ export default function App() {
     setPreparedProducts(preparedData);
     setSearchExceptionTerms(exceptionData.terms);
     setSearchExceptionDraft(exceptionData.text);
-    const visibleKeyData = keyData.filter((item) => item.platform !== "naver_datalab");
-    const selected = visibleKeyData.find((item) => item.platform === apiPlatform) || visibleKeyData.find((item) => item.platform === "naver") || visibleKeyData[0];
+    const visibleKeyData = keyData.filter((item) => !["naver", "naver_datalab"].includes(item.platform));
+    const selected = visibleKeyData.find((item) => item.platform === apiPlatform) || visibleKeyData.find((item) => item.platform === "smartstore") || visibleKeyData[0];
     if (selected) {
       setApiPlatform(selected.platform);
       setApiClientId(selected.client_id || "");
@@ -1930,12 +1911,14 @@ export default function App() {
   const enabledOptionalTabs = optionalTabs.filter((item) => settings.features[item.key]);
   const visibleTabs = [...primaryTabs, ...enabledOptionalTabs];
   const visibleApiKeys = apiKeys
-    .filter((item) => item.platform !== "naver_datalab")
+    .filter((item) => !["naver", "naver_datalab"].includes(item.platform))
     .sort((a, b) => {
       const aIndex = apiPlatformOrder.indexOf(a.platform);
       const bIndex = apiPlatformOrder.indexOf(b.platform);
       return (aIndex === -1 ? 999 : aIndex) - (bIndex === -1 ? 999 : bIndex) || a.label.localeCompare(b.label, "ko");
     });
+  const selectedApiKey = visibleApiKeys.find((item) => item.platform === apiPlatform);
+  const selectedCrawlerSource = selectedApiKey ? priceReadySourceKeys.has(selectedApiKey.platform) : false;
   const filterKeyword = searchPayload.run?.query || keyword;
   const activeDetailFilters: SelectedDetailFilters = {};
   const filteredSearchPayload = {
@@ -2101,7 +2084,7 @@ export default function App() {
             <div className="section-head">
               <div>
                 <h2>검색설정</h2>
-                <p>플랫폼별 API 키를 저장하고 백엔드에서 연결 상태를 테스트합니다.</p>
+                <p>네이버 가격검색은 API 없이 다나와/에누리처럼 검색 페이지를 수집합니다. 키 입력은 판매자 API가 필요한 채널만 사용합니다.</p>
               </div>
               <span className="pill blue">{dashboard?.stats.connected_apis ?? 0} connected</span>
             </div>
@@ -2115,12 +2098,22 @@ export default function App() {
               ))}
             </div>
             {naverApiGuides[apiPlatform] && <NaverApiGuideCard guide={naverApiGuides[apiPlatform]} compact={false} />}
-            <div className="form-grid mt">
-              <input className="input" placeholder="Client ID" value={apiClientId} onChange={(event) => setApiClientId(event.target.value)} />
-              <input className="input" placeholder="Client Secret" value={apiClientSecret} onChange={(event) => setApiClientSecret(event.target.value)} />
-              <button className="btn primary" onClick={saveApiKey}>저장</button>
-              <button className="btn orange" onClick={testApiKey}>저장 후 연동 테스트</button>
-            </div>
+            {selectedCrawlerSource ? (
+              <div className="crawler-source-note mt">
+                <div>
+                  <strong>{selectedApiKey?.label}은 API 키가 필요 없습니다.</strong>
+                  <p>검색 페이지를 직접 수집해 최저가 라인에 반영합니다. 수집 테스트만 실행하면 됩니다.</p>
+                </div>
+                <button className="btn orange" onClick={testApiKey}>수집 테스트</button>
+              </div>
+            ) : (
+              <div className="form-grid mt">
+                <input className="input" placeholder="Client ID" value={apiClientId} onChange={(event) => setApiClientId(event.target.value)} />
+                <input className="input" placeholder="Client Secret" value={apiClientSecret} onChange={(event) => setApiClientSecret(event.target.value)} />
+                <button className="btn primary" onClick={saveApiKey}>저장</button>
+                <button className="btn orange" onClick={testApiKey}>저장 후 연동 테스트</button>
+              </div>
+            )}
           </section>
         )}
 
@@ -3647,7 +3640,6 @@ type SearchResultRow = {
 };
 
 const EXTRACTION_METHOD_META: Record<string, { icon: string; label: string }> = {
-  api: { icon: "(a)", label: "API" },
   crawl: { icon: "(c)", label: "크롤링" },
   playwright: { icon: "(p)", label: "Playwright" },
   scrapling: { icon: "(s)", label: "Scrapling" },
@@ -3655,7 +3647,7 @@ const EXTRACTION_METHOD_META: Record<string, { icon: string; label: string }> = 
 
 function extractionMethods(item: PriceItem): string[] {
   if (item.extraction_methods?.length) return item.extraction_methods;
-  if (item.source === "naver") return ["api"];
+  if (item.source === "naver") return ["crawl"];
   if (item.source === "danawa" || item.source === "enuri") return ["crawl"];
   return [];
 }
@@ -3763,7 +3755,7 @@ function SearchResultList({
   const rows = sortResultRows(view === "excluded" ? excludedRows : activeRows, sortMode, lowestTotal);
   const lineGroups = comparisonPlatformOptions.map((source) => ({
     ...source,
-    rows: sortResultRows(activeRows.filter((row) => row.collectionSource === source.key), "lowest", lowestTotal).slice(0, 10),
+    rows: sortResultRows(priceRows.filter((row) => row.collectionSource === source.key), "lowest", lowestTotal).slice(0, 10),
   }));
   const lowestRows = lowestTotal ? sortResultRows(rows.filter((row) => effectivePurchasePrice(row) === lowestTotal), "lowest", lowestTotal) : [];
   const comparisonRows = lowestTotal ? sortResultRows(rows.filter((row) => effectivePurchasePrice(row) !== lowestTotal), sortMode, lowestTotal) : rows;
@@ -3864,8 +3856,9 @@ function SearchResultList({
   const renderLineRow = (row: SearchResultRow, rank: number) => {
     const finalPurchasePrice = effectivePurchasePrice(row);
     const isPrepared = preparedSourceIds.has(row.sourceItemId);
+    const lineExcluded = Boolean(row.isExcluded) || row.status === "abnormal";
     return (
-      <tr key={row.id} className={isPrepared ? "registered-row" : ""}>
+      <tr key={row.id} className={`${isPrepared ? "registered-row" : ""} ${lineExcluded ? "line-excluded-row" : ""}`}>
         <td className="result-select-cell">
           <input
             type="checkbox"
@@ -3876,7 +3869,10 @@ function SearchResultList({
           />
         </td>
         <td className="number-cell">{rank}</td>
-        <td>{row.mall}</td>
+        <td>
+          {row.mall}
+          {lineExcluded && <small className="line-exclusion-reason">{row.exclusionReason || (row.status === "abnormal" ? "가격 이상치" : "제외됨")}</small>}
+        </td>
         <td className="number-cell">{money(row.salePrice)}</td>
         <td className="number-cell">{money(row.shippingFee)}</td>
         <td className="number-cell">{money(row.displayPrice)}</td>
@@ -3963,7 +3959,13 @@ function SearchResultList({
                   </thead>
                   <tbody>
                     {group.rows.map((row, index) => renderLineRow(row, index + 1))}
-                    {group.rows.length === 0 && <tr><td className="empty-result-cell" colSpan={10}>결과가 없습니다. 소스 선택 또는 수집 경고를 확인하세요.</td></tr>}
+                    {Array.from({ length: Math.max(0, 10 - group.rows.length) }, (_, emptyIndex) => (
+                      <tr className="line-placeholder-row" key={`${group.key}-empty-${emptyIndex}`}>
+                        <td className="result-select-cell"></td>
+                        <td className="number-cell">{group.rows.length + emptyIndex + 1}</td>
+                        <td colSpan={8}>수집된 후보가 없습니다. 해당 모델의 판매처가 부족하거나 수집이 차단된 상태입니다.</td>
+                      </tr>
+                    ))}
                   </tbody>
                 </table>
               </div>
@@ -3979,7 +3981,7 @@ function SearchResultList({
       <div className="result-list-head">
         <strong>{view === "excluded" ? "제외된 항목" : `(${keyword || "검색 상품"} 모델명)`}</strong>
         <span className="result-list-meta">
-          <span className="extraction-legend"><ExtractionMethodBadges methods={["api", "crawl", "playwright", "scrapling"]} /> API · 크롤링 · Playwright · Scrapling</span>
+          <span className="extraction-legend"><ExtractionMethodBadges methods={["crawl", "playwright", "scrapling"]} /> 크롤링 · Playwright · Scrapling</span>
           <span>{rows.length}개 결과</span>
         </span>
       </div>
