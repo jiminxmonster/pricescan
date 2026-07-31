@@ -3663,6 +3663,19 @@ function ExtractionMethodBadges({ methods }: { methods: string[] }) {
   );
 }
 
+function compactLineProductName(rows: SearchResultRow[], keyword: string): string {
+  const keywordText = normalize(keyword);
+  const candidates = unique(rows.map((row) => row.name.trim()))
+    .filter((name) => name && normalize(name) !== keywordText);
+  const relevant = candidates.filter((name) => !keywordText || normalize(name).includes(keywordText));
+  const selected = [...(relevant.length ? relevant : candidates)].sort((a, b) => {
+    const aPenalty = /쿠팡|coupang|광고|보호필름|파우치|케이스/i.test(a) ? 60 : 0;
+    const bPenalty = /쿠팡|coupang|광고|보호필름|파우치|케이스/i.test(b) ? 60 : 0;
+    return a.length + aPenalty - (b.length + bPenalty);
+  })[0] || "";
+  return selected.length > 72 ? `${selected.slice(0, 72)}…` : selected;
+}
+
 function sortResultRows(rows: SearchResultRow[], sortMode: string, lowestTotal: number): SearchResultRow[] {
   const sorted = [...rows];
   if (sortMode === "margin") {
@@ -3757,6 +3770,7 @@ function SearchResultList({
     ...source,
     rows: sortResultRows(priceRows.filter((row) => row.collectionSource === source.key), "lowest", lowestTotal).slice(0, 10),
   }));
+  const lineProductName = compactLineProductName(activeRows, keyword);
   const lowestRows = lowestTotal ? sortResultRows(rows.filter((row) => effectivePurchasePrice(row) === lowestTotal), "lowest", lowestTotal) : [];
   const comparisonRows = lowestTotal ? sortResultRows(rows.filter((row) => effectivePurchasePrice(row) !== lowestTotal), sortMode, lowestTotal) : rows;
   const preparedSourceIds = new Set(preparedProducts.map((item) => item.source_item_id).filter(Boolean));
@@ -3857,6 +3871,25 @@ function SearchResultList({
     const finalPurchasePrice = effectivePurchasePrice(row);
     const isPrepared = preparedSourceIds.has(row.sourceItemId);
     const lineExcluded = Boolean(row.isExcluded) || row.status === "abnormal";
+    const mallLabel = (() => {
+      const mall = row.mall.trim();
+      const normalizedMall = normalize(mall);
+      const normalizedName = normalize(row.name);
+      const normalizedKeyword = normalize(keyword);
+      const mallLooksLikeProductName = (
+        !mall
+        || mall === "판매처"
+        || (normalizedKeyword && normalizedMall.includes(normalizedKeyword))
+        || (mall.length > 14 && (normalizedName.includes(normalizedMall) || normalizedMall.includes(normalizedName)))
+      );
+      if (!mallLooksLikeProductName) return mall;
+      if (/쿠팡|coupang/i.test(`${mall} ${row.name} ${row.url}`)) return "쿠팡";
+      if (/11st|11번가/i.test(`${mall} ${row.name} ${row.url}`)) return "11번가";
+      if (/gmarket|g마켓/i.test(`${mall} ${row.name} ${row.url}`)) return "G마켓";
+      if (/auction|옥션/i.test(`${mall} ${row.name} ${row.url}`)) return "옥션";
+      if (row.url.includes("smartstore.naver.com")) return "스마트스토어";
+      return sourceLabel(row.collectionSource);
+    })();
     return (
       <tr key={row.id} className={`${isPrepared ? "registered-row" : ""} ${lineExcluded ? "line-excluded-row" : ""}`}>
         <td className="result-select-cell">
@@ -3870,7 +3903,7 @@ function SearchResultList({
         </td>
         <td className="number-cell">{rank}</td>
         <td>
-          {row.mall}
+          {mallLabel}
           {lineExcluded && <small className="line-exclusion-reason">{row.exclusionReason || (row.status === "abnormal" ? "가격 이상치" : "제외됨")}</small>}
         </td>
         <td className="number-cell">{money(row.salePrice)}</td>
@@ -3904,7 +3937,10 @@ function SearchResultList({
         <div className="result-list-head">
           <div className="lowest-line-title">
             <span>모델명</span>
-            <strong>{keyword || "검색 상품"}</strong>
+            <strong>
+              <span>{keyword || "검색 상품"}</span>
+              {lineProductName && <em>{lineProductName}</em>}
+            </strong>
           </div>
           <span className="result-list-meta">
             <span>네이버 · 다나와 · 에누리 TOP 10 비교</span>

@@ -1356,6 +1356,48 @@ def naver_search_shopping_url(query: str, sort_mode: str, display: int = 40) -> 
     return f"https://search.naver.com/search.naver?{params}"
 
 
+def infer_naver_crawl_mall(raw_mall: str, title: str, detail_url: str) -> str:
+    parsed = urllib.parse.urlparse(detail_url)
+    host = (parsed.hostname or "").lower()
+    text = f"{raw_mall} {title} {host}".lower()
+    mall_rules = (
+        ("coupang", "쿠팡"),
+        ("11st", "11번가"),
+        ("gmarket", "G마켓"),
+        ("auction", "옥션"),
+        ("lotteon", "롯데온"),
+        ("ssg", "SSG"),
+        ("wemakeprice", "위메프"),
+        ("tmon", "티몬"),
+        ("interpark", "인터파크"),
+        ("danawa", "다나와"),
+        ("enuri", "에누리"),
+    )
+    for marker, label in mall_rules:
+        if marker in text:
+            return label
+    if "smartstore.naver.com" in host:
+        return "스마트스토어"
+    if "shopping.naver.com" in host or "search.naver.com" in host or host.endswith("naver.com"):
+        return "네이버쇼핑"
+    return "네이버쇼핑"
+
+
+def normalize_naver_crawl_mall(raw_mall: str, title: str, detail_url: str) -> str:
+    mall = clean_text(raw_mall)
+    title_text = clean_text(title)
+    normalized_mall = normalize_title(mall)
+    normalized_title = normalize_title(title_text)
+    looks_like_title = (
+        not mall
+        or mall == "판매처"
+        or bool(re.search(r"\b[A-Z0-9]+(?:-[A-Z0-9]+)+\b", mall.upper()))
+        or (len(mall) > 14 and normalized_mall in normalized_title)
+        or (len(mall) > 14 and normalized_title in normalized_mall)
+    )
+    return infer_naver_crawl_mall(mall, title_text, detail_url) if looks_like_title else mall
+
+
 def parse_naver_shopping_crawl_products(document: str, search_url: str, display: int = 40) -> list[dict[str, Any]]:
     candidates = [
         *extract_script_json_competitors(document, search_url),
@@ -1363,15 +1405,17 @@ def parse_naver_shopping_crawl_products(document: str, search_url: str, display:
     ]
     products: list[dict[str, Any]] = []
     for candidate in normalize_competitor_candidates(candidates, limit=display):
+        detail_url = candidate.get("detail_url") or search_url
+        title = candidate.get("title") or ""
         products.append(
             {
                 "source": "naver",
-                "mall": candidate.get("mall") or "네이버",
-                "name": candidate.get("title") or "",
+                "mall": normalize_naver_crawl_mall(candidate.get("mall") or "", title, detail_url),
+                "name": title,
                 "price": parse_price(candidate.get("sale_price")),
                 "shipping": parse_price(candidate.get("shipping_fee")),
                 "total": parse_price(candidate.get("total_price")),
-                "url": candidate.get("detail_url") or search_url,
+                "url": detail_url,
                 "extraction_methods": ["crawl"],
             }
         )

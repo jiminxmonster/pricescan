@@ -674,8 +674,33 @@ td { font-size: 14px; }
   font-weight: 900;
 }
 .lowest-line-title > strong {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
   color: var(--text);
   font-size: 17px;
+}
+.lowest-line-title > strong em {
+  max-width: min(860px, 72vw);
+  overflow: hidden;
+  color: #536274;
+  font-size: 13px;
+  font-style: normal;
+  font-weight: 850;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lowest-line-title > strong em::before {
+  content: "대표상품명";
+  margin-right: 7px;
+  border: 1px solid #d6e0ec;
+  border-radius: 999px;
+  background: #f7faff;
+  color: #697789;
+  padding: 2px 6px;
+  font-size: 10px;
+  font-weight: 950;
 }
 .lowest-line-stack {
   display: grid;
