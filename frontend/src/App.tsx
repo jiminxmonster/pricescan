@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useState, type ReactNode } from "react";
 
 const basePath = import.meta.env.BASE_URL.replace(/\/$/, "");
 const API_BASE = `${basePath}/api`;
@@ -66,7 +66,7 @@ const searchSourceGroups: SearchSourceGroup[] = [
     options: [
       { key: "smartstore", label: "네이버 스마트스토어", description: "판매상품은 모니터링에서 조회", enabled: false, badge: "모니터링" },
       { key: "danawa", label: "다나와", description: "검색 페이지 크롤러", enabled: true, badge: "사용 가능" },
-      { key: "enuri", label: "에누리", description: "서버 요청 오류로 임시 비활성", enabled: false, badge: "점검 중" },
+      { key: "enuri", label: "에누리", description: "검색 페이지 크롤러", enabled: true, badge: "사용 가능" },
       { key: "elevenst", label: "11번가", description: "수집기 미구현", enabled: false, badge: "준비 중" },
       { key: "gmarket", label: "G마켓", description: "수집기 미구현", enabled: false, badge: "준비 중" },
       { key: "auction", label: "옥션", description: "수집기 미구현", enabled: false, badge: "준비 중" },
@@ -75,7 +75,7 @@ const searchSourceGroups: SearchSourceGroup[] = [
 ];
 
 const readySourceKeys = new Set(searchSourceGroups.flatMap((group) => group.options.filter((option) => option.enabled).map((option) => option.key)));
-const priceReadySourceKeys = new Set(["naver", "danawa"]);
+const priceReadySourceKeys = new Set(["naver", "danawa", "enuri"]);
 const apiPlatformOrder = ["naver", "smartstore", "danawa", "enuri", "elevenst", "gmarket", "auction", "google_search", "naver_search", "coupang"];
 const serviceUrl = "https://pricescan.d2blue.com/";
 const productInfoNoticeTypes = ["기타 재화", "전자제품", "가전제품", "의류", "신발", "가방", "식품", "화장품"];
@@ -242,6 +242,40 @@ type SmartstoreCategoryCandidate = {
   score: number;
 };
 
+type ComparisonPlatform = "naver" | "danawa" | "enuri";
+
+type ComparisonTarget = {
+  id: string;
+  prepared_product_id: string;
+  platform: ComparisonPlatform;
+  platform_label: string;
+  comparison_url: string;
+  enabled: boolean;
+  status: string;
+  last_scanned_at?: string | null;
+  last_error: string;
+  created_at: string;
+  updated_at: string;
+};
+
+type CompetitorSnapshot = {
+  id: string;
+  target_id: string;
+  prepared_product_id: string;
+  platform: ComparisonPlatform;
+  platform_label: string;
+  rank: number;
+  mall: string;
+  title: string;
+  sale_price: number;
+  shipping_fee: number;
+  total_price: number;
+  detail_url: string;
+  is_excluded: boolean;
+  exclusion_reason: string;
+  collected_at: string;
+};
+
 type PreparedProduct = {
   id: string;
   source_item_id: string;
@@ -264,6 +298,15 @@ type PreparedProduct = {
   auto_discount_value: number;
   status: string;
   listing_draft_id: string;
+  comparison_targets?: ComparisonTarget[];
+  competitors?: CompetitorSnapshot[];
+  lowest_competitor_total?: number;
+  recommended_display_price?: number;
+  recommended_reason?: string;
+  break_even_display_price?: number;
+  last_competitor_scanned_at?: string | null;
+  scan_warnings?: string[];
+  scanned_target_count?: number;
   created_at: string;
   updated_at: string;
 };
@@ -540,6 +583,12 @@ function sourceLabel(source: string): string {
   };
   return labels[source] || source;
 }
+
+const comparisonPlatformOptions: { key: ComparisonPlatform; label: string; placeholder: string }[] = [
+  { key: "naver", label: "네이버", placeholder: "네이버 가격비교 URL" },
+  { key: "danawa", label: "다나와", placeholder: "다나와 가격비교 URL" },
+  { key: "enuri", label: "에누리", placeholder: "에누리 가격비교 URL" },
+];
 
 function apiStatusLabel(status: string): string {
   if (status === "ready") return "설정 필요 없음";
@@ -1026,6 +1075,7 @@ export default function App() {
   const [listingDrafts, setListingDrafts] = useState<ListingDraft[]>([]);
   const [imageAssets, setImageAssets] = useState<ImageAsset[]>([]);
   const [preparedProducts, setPreparedProducts] = useState<PreparedProduct[]>([]);
+  const [comparisonScanningId, setComparisonScanningId] = useState("");
   const [keyword, setKeyword] = useState("노트북");
   const [sortMode, setSortMode] = useState("lowest");
   const [collecting, setCollecting] = useState(false);
@@ -1038,12 +1088,12 @@ export default function App() {
   const [selectedOrders, setSelectedOrders] = useState<string[]>([]);
   const [selectedDetailFilters, setSelectedDetailFilters] = useState<SelectedDetailFilters>({});
   const [showDetailScan, setShowDetailScan] = useState(false);
-  const [selectedSources, setSelectedSources] = useState<string[]>(["naver", "danawa"]);
+  const [selectedSources, setSelectedSources] = useState<string[]>(["naver", "danawa", "enuri"]);
   const [smartstorePayload, setSmartstorePayload] = useState<SmartstorePayload>({ items: [], count: 0, page: 1, size: 50 });
   const [smartstoreLoading, setSmartstoreLoading] = useState(false);
   const [smartstoreError, setSmartstoreError] = useState("");
   const [showSourcePanel, setShowSourcePanel] = useState(false);
-  const [searchResultView, setSearchResultView] = useState<"active" | "excluded">("active");
+  const [searchResultView, setSearchResultView] = useState<"line" | "active" | "excluded">("line");
   const [showSearchExceptions, setShowSearchExceptions] = useState(false);
   const [searchExceptionTerms, setSearchExceptionTerms] = useState<string[]>([]);
   const [searchExceptionDraft, setSearchExceptionDraft] = useState("");
@@ -1434,6 +1484,33 @@ export default function App() {
     });
     setPreparedProducts((current) => current.map((entry) => entry.id === saved.id ? saved : entry));
     setNotice(payload.monitoring_enabled ? "모니터링을 시작했습니다." : "모니터링 대기로 이동했습니다.");
+  };
+
+  const saveComparisonTargets = async (item: PreparedProduct, targets: { platform: ComparisonPlatform; comparison_url: string; enabled: boolean }[]) => {
+    const saved = await request<PreparedProduct>(`/prepared-products/${item.id}/comparison-targets`, token, {
+      method: "PUT",
+      body: JSON.stringify({ targets }),
+    });
+    setPreparedProducts((current) => current.map((entry) => entry.id === saved.id ? saved : entry));
+    setNotice("가격비교 URL을 저장했습니다.");
+    return saved;
+  };
+
+  const scanComparisonTargets = async (item: PreparedProduct) => {
+    setComparisonScanningId(item.id);
+    try {
+      const saved = await request<PreparedProduct>(`/prepared-products/${item.id}/comparison-scan`, token, {
+        method: "POST",
+        body: JSON.stringify({ platforms: [] }),
+      });
+      setPreparedProducts((current) => current.map((entry) => entry.id === saved.id ? saved : entry));
+      const warnings = saved.scan_warnings || [];
+      setNotice(warnings.length ? `경쟁가 스캔 완료 · 확인 필요 ${warnings.length}건` : "경쟁가 스캔 완료");
+      await refreshLogs();
+      return saved;
+    } finally {
+      setComparisonScanningId("");
+    }
   };
 
   const preparedToDraftSource = (item: PreparedProduct): DraftSourceItem => ({
@@ -1955,6 +2032,9 @@ export default function App() {
               </div>
             )}
             <div className="result-view-tabs" aria-label="상품검색 결과 메뉴">
+              <button className={searchResultView === "line" ? "active" : ""} onClick={() => setSearchResultView("line")}>
+                최저가 라인모드
+              </button>
               <button className={searchResultView === "active" ? "active" : ""} onClick={() => setSearchResultView("active")}>
                 검색결과 {searchPayload.items.filter((item) => !item.is_excluded && item.status !== "abnormal").length}
               </button>
@@ -2003,6 +2083,9 @@ export default function App() {
               onValidateDraft={validateDraft}
               onDeletePrepared={deletePreparedProduct}
               onUpdateMonitoring={updatePreparedMonitoring}
+              onSaveComparisonTargets={saveComparisonTargets}
+              onScanComparisonTargets={scanComparisonTargets}
+              comparisonScanningId={comparisonScanningId}
               onCopySmartstore={copySmartstoreToPrepared}
               onUpdateProcurement={updateProcurement}
               onOpenApi={() => {
@@ -2418,10 +2501,13 @@ function MonitoringWaitingRow({ item, onUpdate, onDelete }: {
   );
 }
 
-function MonitoringActiveRow({ item, onUpdate, onSell }: {
+function MonitoringActiveRow({ item, onUpdate, onSell, onSaveComparisonTargets, onScanComparisonTargets, comparisonScanning }: {
   item: PreparedProduct;
   onUpdate: (item: PreparedProduct, updates: Partial<PreparedProduct>) => Promise<void>;
   onSell: (item: PreparedProduct) => void;
+  onSaveComparisonTargets: (item: PreparedProduct, targets: { platform: ComparisonPlatform; comparison_url: string; enabled: boolean }[]) => Promise<PreparedProduct>;
+  onScanComparisonTargets: (item: PreparedProduct) => Promise<PreparedProduct | undefined>;
+  comparisonScanning: boolean;
 }) {
   const [feeRate, setFeeRate] = useState(item.fee_rate || 0);
   const [sellerSalePrice, setSellerSalePrice] = useState(item.seller_sale_price || item.sale_price);
@@ -2429,8 +2515,20 @@ function MonitoringActiveRow({ item, onUpdate, onSell }: {
   const [discountType, setDiscountType] = useState<"amount" | "percent">(item.auto_discount_type || "amount");
   const [discountValue, setDiscountValue] = useState(item.auto_discount_value || 0);
   const [autoDiscount, setAutoDiscount] = useState(Boolean(item.auto_discount_enabled));
+  const [targetUrls, setTargetUrls] = useState<Record<ComparisonPlatform, string>>(() => comparisonPlatformOptions.reduce((acc, platform) => {
+    acc[platform.key] = item.comparison_targets?.find((target) => target.platform === platform.key)?.comparison_url || "";
+    return acc;
+  }, {} as Record<ComparisonPlatform, string>));
   const metrics = monitoringMetrics(item, feeRate, sellerDisplayPrice);
   const identity = inferProductIdentity(item.title);
+  const competitors = item.competitors || [];
+  const hasComparisonUrl = comparisonPlatformOptions.some((platform) => targetUrls[platform.key]?.trim());
+  useEffect(() => {
+    setTargetUrls(comparisonPlatformOptions.reduce((acc, platform) => {
+      acc[platform.key] = item.comparison_targets?.find((target) => target.platform === platform.key)?.comparison_url || "";
+      return acc;
+    }, {} as Record<ComparisonPlatform, string>));
+  }, [item.id, item.comparison_targets]);
   const save = (enabled = true) => onUpdate(item, {
     monitoring_enabled: enabled ? 1 : 0,
     fee_rate: feeRate,
@@ -2442,20 +2540,86 @@ function MonitoringActiveRow({ item, onUpdate, onSell }: {
     product_type: item.product_type || inferProductType(item.title),
     model_name: item.model_name || identity.modelName,
   });
+  const saveTargets = () => onSaveComparisonTargets(item, comparisonPlatformOptions.map((platform) => ({
+    platform: platform.key,
+    comparison_url: targetUrls[platform.key] || "",
+    enabled: Boolean(targetUrls[platform.key]?.trim()),
+  })));
   return (
-    <tr>
-      <td>{item.product_type || inferProductType(item.title)}</td>
-      <td className="monitoring-model">{item.source_url ? <a href={item.source_url} target="_blank" rel="noreferrer">{item.model_name || identity.modelName || item.title}</a> : (item.model_name || identity.modelName || item.title)}</td>
-      <td>{item.mall || sourceLabel(item.source)}</td>
-      <td><span className="stacked-price">판매 {money(item.sale_price)}<b>노출 {money(item.display_price)}</b></span></td>
-      <td><span className="price-inputs"><input type="number" step="1000" min="0" value={sellerSalePrice} onChange={(event) => setSellerSalePrice(Number(event.target.value))} /><input type="number" step="1000" min="0" value={sellerDisplayPrice} onChange={(event) => setSellerDisplayPrice(Number(event.target.value))} /></span></td>
-      <td className={metrics.compareRate >= 0 ? "positive-value" : "negative-value"}>{metrics.compareRate.toFixed(1)}%</td>
-      <td><label className="inline-number"><input type="number" min="0" max="100" step="0.1" value={feeRate} onChange={(event) => setFeeRate(Number(event.target.value))} /><span>%</span></label><small>{money(metrics.fee)}</small></td>
-      <td>{money(metrics.sourceCost)}</td>
-      <td className={metrics.margin >= 0 ? "positive-value" : "negative-value"}>{money(metrics.margin)}</td>
-      <td><div className="auto-discount-control"><label><input type="checkbox" checked={autoDiscount} onChange={(event) => setAutoDiscount(event.target.checked)} /> 자동인하</label><span>최저가 대비</span><input type="number" min="0" step={discountType === "amount" ? 1000 : 0.1} value={discountValue} onChange={(event) => setDiscountValue(Number(event.target.value))} /><select value={discountType} onChange={(event) => setDiscountType(event.target.value as "amount" | "percent")}><option value="amount">원</option><option value="percent">%</option></select></div></td>
-      <td><div className="monitoring-row-actions"><button className="btn small orange" onClick={() => onSell(item)}>{item.listing_draft_id ? "등록폼" : "판매"}</button><button className="btn small primary" onClick={() => save(true)}>저장</button><button className="monitoring-toggle on" aria-pressed="true" onClick={() => save(false)}><span />ON</button></div></td>
-    </tr>
+    <Fragment>
+      <tr>
+        <td>{item.product_type || inferProductType(item.title)}</td>
+        <td className="monitoring-model">{item.source_url ? <a href={item.source_url} target="_blank" rel="noreferrer">{item.model_name || identity.modelName || item.title}</a> : (item.model_name || identity.modelName || item.title)}</td>
+        <td>{item.mall || sourceLabel(item.source)}</td>
+        <td><span className="stacked-price">판매 {money(item.sale_price)}<b>노출 {money(item.display_price)}</b></span></td>
+        <td><span className="price-inputs"><input type="number" step="1000" min="0" value={sellerSalePrice} onChange={(event) => setSellerSalePrice(Number(event.target.value))} /><input type="number" step="1000" min="0" value={sellerDisplayPrice} onChange={(event) => setSellerDisplayPrice(Number(event.target.value))} /></span></td>
+        <td className={metrics.compareRate >= 0 ? "positive-value" : "negative-value"}>{metrics.compareRate.toFixed(1)}%</td>
+        <td><label className="inline-number"><input type="number" min="0" max="100" step="0.1" value={feeRate} onChange={(event) => setFeeRate(Number(event.target.value))} /><span>%</span></label><small>{money(metrics.fee)}</small></td>
+        <td>{money(metrics.sourceCost)}</td>
+        <td className={metrics.margin >= 0 ? "positive-value" : "negative-value"}>{money(metrics.margin)}</td>
+        <td><div className="auto-discount-control"><label><input type="checkbox" checked={autoDiscount} onChange={(event) => setAutoDiscount(event.target.checked)} /> 자동인하</label><span>최저가 대비</span><input type="number" min="0" step={discountType === "amount" ? 1000 : 0.1} value={discountValue} onChange={(event) => setDiscountValue(Number(event.target.value))} /><select value={discountType} onChange={(event) => setDiscountType(event.target.value as "amount" | "percent")}><option value="amount">원</option><option value="percent">%</option></select></div></td>
+        <td><div className="monitoring-row-actions"><button className="btn small orange" onClick={() => onSell(item)}>{item.listing_draft_id ? "등록폼" : "판매"}</button><button className="btn small primary" onClick={() => save(true)}>저장</button><button className="monitoring-toggle on" aria-pressed="true" onClick={() => save(false)}><span />ON</button></div></td>
+      </tr>
+      <tr className="comparison-detail-row">
+        <td colSpan={11}>
+          <div className="comparison-monitor-box">
+            <div className="comparison-monitor-head">
+              <div>
+                <strong>가격비교 URL 추적</strong>
+                <span>네이버·다나와·에누리 가격비교 상세 URL 기준으로 경쟁 판매처 TOP 5를 저장합니다.</span>
+              </div>
+              <div className="comparison-monitor-kpis">
+                <span>최저 경쟁가 {money(item.lowest_competitor_total || 0)}</span>
+                <span>추천 노출가 {money(item.recommended_display_price || sellerDisplayPrice)}</span>
+                {item.last_competitor_scanned_at && <span>최근 {new Date(item.last_competitor_scanned_at).toLocaleString("ko-KR")}</span>}
+              </div>
+            </div>
+            <div className="comparison-target-inputs">
+              {comparisonPlatformOptions.map((platform) => {
+                const target = item.comparison_targets?.find((entry) => entry.platform === platform.key);
+                return (
+                  <label key={platform.key}>
+                    <span>{platform.label}</span>
+                    <input
+                      value={targetUrls[platform.key] || ""}
+                      onChange={(event) => setTargetUrls((current) => ({ ...current, [platform.key]: event.target.value }))}
+                      placeholder={platform.placeholder}
+                    />
+                    <small className={target?.status === "error" ? "negative-value" : ""}>{target?.last_error || statusLabel(target?.status || "pending")}</small>
+                  </label>
+                );
+              })}
+              <div className="comparison-target-actions">
+                <button className="btn small" onClick={saveTargets}>URL 저장</button>
+                <button className="btn small primary" disabled={!hasComparisonUrl || comparisonScanning} onClick={() => onScanComparisonTargets(item)}>
+                  {comparisonScanning ? "스캔 중" : "경쟁가 스캔"}
+                </button>
+              </div>
+            </div>
+            <div className="comparison-snapshot-grid">
+              {comparisonPlatformOptions.map((platform) => {
+                const rows = competitors.filter((competitor) => competitor.platform === platform.key).sort((a, b) => a.rank - b.rank).slice(0, 5);
+                return (
+                  <section key={platform.key}>
+                    <strong>{platform.label} TOP 5</strong>
+                    {rows.length === 0 && <p>아직 스캔 결과 없음</p>}
+                    {rows.map((competitor) => (
+                      <div className={`comparison-snapshot-item ${competitor.is_excluded ? "excluded" : ""}`} key={competitor.id}>
+                        <span>{competitor.rank}위</span>
+                        <b>{competitor.mall}</b>
+                        <em>{money(competitor.total_price)}</em>
+                        {competitor.detail_url && <a href={competitor.detail_url} target="_blank" rel="noreferrer">link</a>}
+                        {competitor.exclusion_reason && <small>{competitor.exclusion_reason}</small>}
+                      </div>
+                    ))}
+                  </section>
+                );
+              })}
+            </div>
+          </div>
+        </td>
+      </tr>
+    </Fragment>
   );
 }
 
@@ -2473,6 +2637,9 @@ function MonitoringBoard({
   onValidateDraft,
   onDeletePrepared,
   onUpdateMonitoring,
+  onSaveComparisonTargets,
+  onScanComparisonTargets,
+  comparisonScanningId,
   onCopySmartstore,
   onUpdateProcurement,
   onOpenApi,
@@ -2490,6 +2657,9 @@ function MonitoringBoard({
   onValidateDraft: (draftId: string) => void;
   onDeletePrepared: (id: string) => void;
   onUpdateMonitoring: (item: PreparedProduct, updates: Partial<PreparedProduct>) => Promise<void>;
+  onSaveComparisonTargets: (item: PreparedProduct, targets: { platform: ComparisonPlatform; comparison_url: string; enabled: boolean }[]) => Promise<PreparedProduct>;
+  onScanComparisonTargets: (item: PreparedProduct) => Promise<PreparedProduct | undefined>;
+  comparisonScanningId: string;
   onCopySmartstore: (item: SmartstoreProduct) => void;
   onUpdateProcurement: (order: Order, status: string, source?: PreparedProduct, updates?: Partial<Order>) => void;
   onOpenApi: () => void;
@@ -2528,7 +2698,17 @@ function MonitoringBoard({
       <div className="monitoring-panel-head"><div><strong>모니터링 중</strong><span>ON 상태 상품의 원소스 가격과 셀러 대응가를 함께 관리합니다.</span></div><b>{activeProducts.length}</b></div>
       <div className="monitoring-table-wrap">
         <table className="monitoring-data-table active-table"><thead><tr><th>상품종류</th><th>모델명</th><th>쇼핑몰</th><th>상대방<br />판매가/노출가</th><th>셀러대응<br />판매가/노출가</th><th>비교율</th><th>수수료</th><th>예상정산</th><th>마진</th><th>자동인하</th><th>관리</th></tr></thead><tbody>
-          {activeProducts.map((item) => <MonitoringActiveRow key={item.id} item={item} onUpdate={onUpdateMonitoring} onSell={onSell} />)}
+          {activeProducts.map((item) => (
+            <MonitoringActiveRow
+              key={item.id}
+              item={item}
+              onUpdate={onUpdateMonitoring}
+              onSell={onSell}
+              onSaveComparisonTargets={onSaveComparisonTargets}
+              onScanComparisonTargets={onScanComparisonTargets}
+              comparisonScanning={comparisonScanningId === item.id}
+            />
+          ))}
         </tbody></table>
         {activeProducts.length === 0 && <div className="monitoring-empty">대기 목록에서 모니터링을 ON으로 전환하세요.</div>}
       </div>
@@ -3541,7 +3721,7 @@ function SearchResultList({
   payload: SearchPayload;
   keyword: string;
   sortMode: string;
-  view: "active" | "excluded";
+  view: "line" | "active" | "excluded";
   preparedProducts: PreparedProduct[];
   onExclude: (id: string) => void;
   onPrepare: (item: DraftSourceItem) => void;
@@ -3581,10 +3761,16 @@ function SearchResultList({
   const positivePrices = activeRows.map(effectivePurchasePrice).filter((value) => value > 0);
   const lowestTotal = positivePrices.length ? Math.min(...positivePrices) : 0;
   const rows = sortResultRows(view === "excluded" ? excludedRows : activeRows, sortMode, lowestTotal);
+  const lineGroups = comparisonPlatformOptions.map((source) => ({
+    ...source,
+    rows: sortResultRows(activeRows.filter((row) => row.collectionSource === source.key), "lowest", lowestTotal).slice(0, 10),
+  }));
   const lowestRows = lowestTotal ? sortResultRows(rows.filter((row) => effectivePurchasePrice(row) === lowestTotal), "lowest", lowestTotal) : [];
   const comparisonRows = lowestTotal ? sortResultRows(rows.filter((row) => effectivePurchasePrice(row) !== lowestTotal), sortMode, lowestTotal) : rows;
   const preparedSourceIds = new Set(preparedProducts.map((item) => item.source_item_id).filter(Boolean));
-  const selectableIds = rows.slice(0, 10).map((row) => row.id);
+  const lineSelectableIds = lineGroups.flatMap((group) => group.rows.map((row) => row.id)).slice(0, 10);
+  const tableSelectableIds = rows.slice(0, 10).map((row) => row.id);
+  const selectableIds = view === "line" ? lineSelectableIds : tableSelectableIds;
   const selectedSet = new Set(selectedBenefitIds);
   const allSelected = selectableIds.length > 0 && selectableIds.every((id) => selectedSet.has(id));
 
@@ -3666,6 +3852,128 @@ function SearchResultList({
     );
   };
 
+  const renderBenefitInfo = (row: SearchResultRow) => (
+    <>
+      <span className={`benefit-status benefit-${row.benefitStatus}`}>{benefitStatusLabel(row.benefitStatus)}</span>
+      {row.detailMethods.length > 0 && <ExtractionMethodBadges methods={row.detailMethods} />}
+      {row.benefitSummary && <small className="benefit-summary">{row.benefitSummary}</small>}
+      {row.benefitCondition && <small className="benefit-condition" title={row.benefitCondition}>{row.benefitCondition}</small>}
+    </>
+  );
+
+  const renderLineRow = (row: SearchResultRow, rank: number) => {
+    const finalPurchasePrice = effectivePurchasePrice(row);
+    const isPrepared = preparedSourceIds.has(row.sourceItemId);
+    return (
+      <tr key={row.id} className={isPrepared ? "registered-row" : ""}>
+        <td className="result-select-cell">
+          <input
+            type="checkbox"
+            checked={selectedSet.has(row.id)}
+            disabled={!selectedSet.has(row.id) && selectedBenefitIds.length >= 10}
+            onChange={() => toggleBenefitSelection(row.id)}
+            aria-label={`${row.mall} ${rank}위 상세스캔 선택`}
+          />
+        </td>
+        <td className="number-cell">{rank}</td>
+        <td>{row.mall}</td>
+        <td className="number-cell">{money(row.salePrice)}</td>
+        <td className="number-cell">{money(row.shippingFee)}</td>
+        <td className="number-cell">{money(row.displayPrice)}</td>
+        <td className="number-cell">
+          <strong>{money(finalPurchasePrice)}</strong>
+          {row.benefitStatus === "conditional" && <small className="conditional-price">조건부</small>}
+        </td>
+        <td>{renderBenefitInfo(row)}</td>
+        <td><a href={row.url} target="_blank" rel="noreferrer">link</a></td>
+        <td>
+          <button className={`btn small ${isPrepared ? "monitor-registered" : "orange"}`} disabled={isPrepared} onClick={() => onPrepare({
+            sourceItemId: row.sourceItemId,
+            source: row.collectionSource,
+            mall: row.mall,
+            name: row.name,
+            salePrice: row.salePrice,
+            displayPrice: row.displayPrice,
+            shippingFee: row.shippingFee,
+            url: row.url,
+          })}>{isPrepared ? "등록됨" : "모니터링"}</button>
+        </td>
+      </tr>
+    );
+  };
+
+  if (view === "line") {
+    return (
+      <div className="result-list lowest-line-mode">
+        <div className="result-list-head">
+          <div className="lowest-line-title">
+            <span>모델명</span>
+            <strong>{keyword || "검색 상품"}</strong>
+          </div>
+          <span className="result-list-meta">
+            <span>네이버 · 다나와 · 에누리 TOP 10 비교</span>
+            <span>{activeRows.length}개 결과</span>
+          </span>
+        </div>
+        {activeRows.length > 0 && (
+          <div className="benefit-scan-toolbar">
+            <div>
+              <strong>체크 항목 상세스캔</strong>
+              <span>선택한 쇼핑정보 링크에서 쿠폰·행사·카드·배송비를 읽어와 같은 라인에 표시합니다. 1회 최대 10개</span>
+            </div>
+            <span className="benefit-scan-actions">
+              <button className="btn" disabled={benefitScanning || selectedBenefitIds.length === 0} onClick={() => onBenefitScan(selectedBenefitIds)}>
+                {benefitScanning ? "상세스캔 중..." : `상세스캔 (${selectedBenefitIds.length})`}
+              </button>
+              <button className="btn orange" disabled={benefitScanning || selectableIds.length === 0} onClick={() => onBenefitScan(selectableIds)}>
+                라인 상위 10개 상세스캔
+              </button>
+            </span>
+          </div>
+        )}
+        <div className="lowest-line-stack">
+          {lineGroups.map((group) => (
+            <section className="lowest-line-row" key={group.key}>
+              <div className="lowest-line-label">
+                <strong>{group.label}</strong>
+                <span>{group.rows.length} / 10</span>
+              </div>
+              <div className="lowest-line-table-wrap">
+                <table className="lowest-line-table">
+                  <thead>
+                    <tr>
+                      <th className="result-select-cell">
+                        <input
+                          type="checkbox"
+                          checked={group.rows.length > 0 && group.rows.every((row) => selectedSet.has(row.id))}
+                          disabled={group.rows.length === 0}
+                          onChange={() => {
+                            const groupIds = group.rows.map((row) => row.id);
+                            const withoutGroup = selectedBenefitIds.filter((id) => !groupIds.includes(id));
+                            const nextIds = group.rows.every((row) => selectedSet.has(row.id))
+                              ? withoutGroup
+                              : [...withoutGroup, ...groupIds].slice(0, 10);
+                            onBenefitSelectionChange(nextIds);
+                          }}
+                          aria-label={`${group.label} 라인 전체 선택`}
+                        />
+                      </th>
+                      <th>순위</th><th>쇼핑몰</th><th>판매가</th><th>배송비</th><th>노출가</th><th>상세스캔가</th><th>쿠폰/혜택</th><th>링크</th><th>관리</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {group.rows.map((row, index) => renderLineRow(row, index + 1))}
+                    {group.rows.length === 0 && <tr><td className="empty-result-cell" colSpan={10}>결과가 없습니다. 소스 선택 또는 수집 경고를 확인하세요.</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="result-list">
       <div className="result-list-head">
@@ -3687,14 +3995,14 @@ function SearchResultList({
               disabled={benefitScanning || selectedBenefitIds.length === 0}
               onClick={() => onBenefitScan(selectedBenefitIds)}
             >
-              {benefitScanning ? "조사 중..." : `선택 항목 조사 (${selectedBenefitIds.length})`}
+              {benefitScanning ? "상세스캔 중..." : `선택 항목 상세스캔 (${selectedBenefitIds.length})`}
             </button>
             <button
               className="btn orange"
               disabled={benefitScanning}
               onClick={() => onBenefitScan(rows.slice(0, 10).map((row) => row.id))}
             >
-              최저가 상위 10개 조사
+              최저가 상위 10개 상세스캔
             </button>
           </span>
         </div>

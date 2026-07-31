@@ -67,6 +67,13 @@ DEFAULT_COLLECTION_LIMITS = {
     "danawa": int(os.getenv("DANAWA_DAILY_REQUEST_LIMIT", "100")),
     "enuri": int(os.getenv("ENURI_DAILY_REQUEST_LIMIT", "60")),
 }
+COMPARISON_TARGET_PLATFORMS = {"naver", "danawa", "enuri"}
+COMPARISON_PLATFORM_LABELS = {
+    "naver": "네이버",
+    "danawa": "다나와",
+    "enuri": "에누리",
+}
+MAX_COMPETITOR_SNAPSHOT_ROWS = 5
 
 
 app = FastAPI(title="PriceScan API", version="0.1.0")
@@ -345,6 +352,44 @@ def init_db() -> None:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS comparison_targets (
+                id TEXT PRIMARY KEY,
+                prepared_product_id TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                comparison_url TEXT NOT NULL DEFAULT '',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                status TEXT NOT NULL DEFAULT 'pending',
+                last_scanned_at TEXT,
+                last_error TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(prepared_product_id, platform)
+            );
+
+            CREATE TABLE IF NOT EXISTS competitor_snapshots (
+                id TEXT PRIMARY KEY,
+                target_id TEXT NOT NULL,
+                prepared_product_id TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                rank INTEGER NOT NULL,
+                mall TEXT NOT NULL DEFAULT '',
+                title TEXT NOT NULL DEFAULT '',
+                sale_price INTEGER NOT NULL DEFAULT 0,
+                shipping_fee INTEGER NOT NULL DEFAULT 0,
+                total_price INTEGER NOT NULL DEFAULT 0,
+                detail_url TEXT NOT NULL DEFAULT '',
+                is_excluded INTEGER NOT NULL DEFAULT 0,
+                exclusion_reason TEXT NOT NULL DEFAULT '',
+                collected_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_comparison_targets_prepared
+                ON comparison_targets (prepared_product_id, platform);
+            CREATE INDEX IF NOT EXISTS idx_competitor_snapshots_target_time
+                ON competitor_snapshots (target_id, collected_at);
+            CREATE INDEX IF NOT EXISTS idx_competitor_snapshots_prepared
+                ON competitor_snapshots (prepared_product_id, platform, collected_at);
             """
         )
 
@@ -676,6 +721,20 @@ class PreparedMonitoringPayload(BaseModel):
     model_name: str = ""
 
 
+class ComparisonTargetInput(BaseModel):
+    platform: str
+    comparison_url: str = ""
+    enabled: bool = True
+
+
+class ComparisonTargetsPayload(BaseModel):
+    targets: list[ComparisonTargetInput] = Field(default_factory=list, max_length=3)
+
+
+class ComparisonScanPayload(BaseModel):
+    platforms: list[str] = Field(default_factory=list, max_length=3)
+
+
 def prepared_product_dedupe_key(payload: PreparedProductPayload) -> str:
     identity = payload.source_item_id.strip() or payload.source_url.strip() or " ".join(payload.title.lower().split())
     raw_key = "|".join((payload.source.strip().lower(), identity, payload.mall.strip().lower()))
@@ -689,6 +748,114 @@ def parse_json_text(value: str | None, fallback: Any) -> Any:
         return json.loads(value)
     except json.JSONDecodeError:
         return fallback
+
+
+def normalize_comparison_platform(value: str) -> str:
+    platform = value.strip().lower()
+    if platform not in COMPARISON_TARGET_PLATFORMS:
+        raise HTTPException(status_code=422, detail="comparison platform must be naver, danawa, or enuri")
+    return platform
+
+
+def normalize_comparison_url(value: str) -> str:
+    url = value.strip()
+    if not url:
+        return ""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(status_code=422, detail="가격비교 URL은 http 또는 https 주소여야 합니다.")
+    return url
+
+
+def comparison_target_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    data = row_to_dict(row) or {}
+    data["enabled"] = bool(data.get("enabled"))
+    data["platform_label"] = COMPARISON_PLATFORM_LABELS.get(data.get("platform", ""), data.get("platform", ""))
+    return data
+
+
+def competitor_snapshot_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    data = row_to_dict(row) or {}
+    data["is_excluded"] = bool(data.get("is_excluded"))
+    data["platform_label"] = COMPARISON_PLATFORM_LABELS.get(data.get("platform", ""), data.get("platform", ""))
+    return data
+
+
+def latest_competitor_rows(db: sqlite3.Connection, prepared_id: str) -> list[sqlite3.Row]:
+    return db.execute(
+        """
+        SELECT snapshots.*
+        FROM competitor_snapshots snapshots
+        JOIN comparison_targets targets ON targets.id = snapshots.target_id
+        WHERE snapshots.prepared_product_id = ?
+          AND snapshots.collected_at = (
+              SELECT MAX(inner_snapshots.collected_at)
+              FROM competitor_snapshots inner_snapshots
+              WHERE inner_snapshots.target_id = snapshots.target_id
+          )
+        ORDER BY snapshots.platform ASC, snapshots.rank ASC
+        """,
+        (prepared_id,),
+    ).fetchall()
+
+
+def prepared_recommendation(data: dict[str, Any], competitors: list[dict[str, Any]]) -> dict[str, Any]:
+    valid_totals = sorted(
+        int(item.get("total_price") or 0)
+        for item in competitors
+        if not item.get("is_excluded") and int(item.get("total_price") or 0) > 0
+    )
+    lowest = valid_totals[0] if valid_totals else 0
+    source_cost = int(data.get("display_price") or 0) + int(data.get("shipping_fee") or 0)
+    fee_rate = max(float(data.get("fee_rate") or 0), 0)
+    fee_multiplier = max(1 - fee_rate / 100, 0.01)
+    break_even = int(source_cost / fee_multiplier) if source_cost else 0
+    seller_display = int(data.get("seller_display_price") or 0) or int(data.get("display_price") or 0)
+
+    recommended = 0
+    reason = "저장된 경쟁가 스캔 결과가 없습니다."
+    if lowest:
+        target_price = lowest
+        if data.get("auto_discount_enabled"):
+            discount_value = float(data.get("auto_discount_value") or 0)
+            if data.get("auto_discount_type") == "percent":
+                target_price = int(lowest * max(0, 1 - discount_value / 100))
+            else:
+                target_price = int(lowest - discount_value)
+        recommended = max(target_price, break_even)
+        if recommended > target_price:
+            reason = "손익분기 하한가 때문에 최저가보다 높게 제안됨"
+        else:
+            reason = "최저 경쟁가 기준 추천가"
+    elif seller_display:
+        recommended = seller_display
+
+    return {
+        "lowest_competitor_total": lowest,
+        "recommended_display_price": max(recommended, 0),
+        "recommended_reason": reason,
+        "break_even_display_price": break_even,
+    }
+
+
+def prepared_product_row_to_dict(db: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
+    data = row_to_dict(row) or {}
+    prepared_id = str(data.get("id") or "")
+    target_rows = db.execute(
+        "SELECT * FROM comparison_targets WHERE prepared_product_id = ? ORDER BY platform ASC",
+        (prepared_id,),
+    ).fetchall()
+    competitors = [competitor_snapshot_row_to_dict(item) for item in latest_competitor_rows(db, prepared_id)]
+    scanned_at_values = [
+        str(item.get("collected_at") or "")
+        for item in competitors
+        if item.get("collected_at")
+    ]
+    data["comparison_targets"] = [comparison_target_row_to_dict(item) for item in target_rows]
+    data["competitors"] = competitors
+    data["last_competitor_scanned_at"] = max(scanned_at_values) if scanned_at_values else None
+    data.update(prepared_recommendation(data, competitors))
+    return data
 
 
 def listing_draft_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -1241,6 +1408,53 @@ def fetch_naver_products(query: str, sort_mode: str, client_id: str, client_secr
     return products
 
 
+def naver_shopping_search_url(query: str, sort_mode: str, display: int = 40) -> str:
+    params = urllib.parse.urlencode(
+        {
+            "query": query,
+            "origQuery": query,
+            "pagingIndex": 1,
+            "pagingSize": min(max(display, 1), 80),
+            "productSet": "total",
+            "sort": "price_asc" if sort_mode == "lowest" else "rel",
+        }
+    )
+    return f"https://search.shopping.naver.com/search/all?{params}"
+
+
+def parse_naver_shopping_crawl_products(document: str, search_url: str, display: int = 40) -> list[dict[str, Any]]:
+    candidates = [
+        *extract_script_json_competitors(document, search_url),
+        *html_competitor_candidates(document, search_url),
+    ]
+    products: list[dict[str, Any]] = []
+    for candidate in normalize_competitor_candidates(candidates, limit=display):
+        products.append(
+            {
+                "source": "naver",
+                "mall": candidate.get("mall") or "네이버",
+                "name": candidate.get("title") or "",
+                "price": parse_price(candidate.get("sale_price")),
+                "shipping": parse_price(candidate.get("shipping_fee")),
+                "total": parse_price(candidate.get("total_price")),
+                "url": candidate.get("detail_url") or search_url,
+                "extraction_methods": ["crawl"],
+            }
+        )
+    return products
+
+
+def fetch_naver_shopping_crawl_products(query: str, sort_mode: str, display: int = 40) -> list[dict[str, Any]]:
+    search_url = naver_shopping_search_url(query, sort_mode, display)
+    status, body = read_url(search_url, {"Referer": "https://shopping.naver.com/"})
+    if status != 200:
+        raise RuntimeError(f"네이버쇼핑 검색 페이지 수집 오류: HTTP {status}")
+    products = parse_naver_shopping_crawl_products(body, search_url, display=display)
+    if not products:
+        raise RuntimeError("네이버쇼핑 검색 결과 파싱 실패 또는 결과 없음")
+    return products
+
+
 def smartstore_signature(client_id: str, client_secret: str, timestamp: int) -> str:
     password = f"{client_id}_{timestamp}".encode("utf-8")
     hashed = bcrypt.hashpw(password, client_secret.encode("utf-8"))
@@ -1623,6 +1837,237 @@ def fetch_enuri_products(query: str, display: int = 30) -> list[dict[str, Any]]:
     return products
 
 
+COMPETITOR_MALL_KEYS = (
+    "mallName", "mall_name", "mall", "storeName", "store_name", "sellerName", "seller_name",
+    "shopName", "shop_name", "merchantName", "merchant_name", "companyName", "company_name",
+    "vendorName", "vendor_name", "seller", "shop",
+)
+COMPETITOR_TITLE_KEYS = (
+    "productName", "product_name", "productTitle", "product_title", "goodsName", "goods_name",
+    "name", "title",
+)
+COMPETITOR_PRICE_KEYS = (
+    "price", "salePrice", "sale_price", "lowPrice", "low_price", "lowestPrice", "lowest_price",
+    "finalPrice", "final_price", "minPrice", "min_price", "productPrice", "product_price",
+    "mobileLowPrice", "mobile_low_price", "discountedPrice", "discounted_price",
+)
+COMPETITOR_SHIPPING_KEYS = (
+    "deliveryFee", "delivery_fee", "shippingFee", "shipping_fee", "deliveryPrice", "delivery_price",
+    "dlvryPrice", "dlvry_price",
+)
+COMPETITOR_URL_KEYS = (
+    "url", "link", "productUrl", "product_url", "mallProductUrl", "mall_product_url",
+    "detailUrl", "detail_url", "crUrl", "cr_url",
+)
+COMPETITOR_EXCLUDE_TERMS = (
+    "중고", "리퍼", "리퍼비시", "반품", "전시", "파손", "부품용", "케이스", "파우치",
+    "필름", "보호필름", "스킨", "호환", "어댑터", "충전기", "키스킨",
+)
+
+
+def first_text_value(data: dict[str, Any], keys: tuple[str, ...]) -> str:
+    for key in keys:
+        value = data.get(key)
+        if value is None:
+            continue
+        if isinstance(value, (str, int, float)):
+            text = clean_text(str(value))
+            if text:
+                return text
+    return ""
+
+
+def first_price_value(data: dict[str, Any], keys: tuple[str, ...]) -> int:
+    for key in keys:
+        value = data.get(key)
+        if value is None:
+            continue
+        price = parse_price(value)
+        if price > 0:
+            return price
+    return 0
+
+
+def json_competitor_candidates(data: Any, base_url: str) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            mall = first_text_value(value, COMPETITOR_MALL_KEYS)
+            title = first_text_value(value, COMPETITOR_TITLE_KEYS)
+            sale_price = first_price_value(value, COMPETITOR_PRICE_KEYS)
+            shipping_fee = first_price_value(value, COMPETITOR_SHIPPING_KEYS)
+            detail_url = first_text_value(value, COMPETITOR_URL_KEYS)
+            if mall and sale_price > 0:
+                candidates.append(
+                    {
+                        "mall": mall,
+                        "title": title or mall,
+                        "sale_price": sale_price,
+                        "shipping_fee": shipping_fee,
+                        "total_price": sale_price + shipping_fee,
+                        "detail_url": urllib.parse.urljoin(base_url, html.unescape(detail_url)) if detail_url else "",
+                    }
+                )
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(data)
+    return candidates
+
+
+def extract_script_json_competitors(document: str, base_url: str) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    scripts = re.finditer(
+        r"<script\b[^>]*(?:type=[\"']application/(?:json|ld\+json)[\"']|id=[\"']__NEXT_DATA__[\"'])[^>]*>(.*?)</script>",
+        document,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    for script in scripts:
+        raw_json = html.unescape(script.group(1).strip())
+        if not raw_json:
+            continue
+        try:
+            data = json.loads(raw_json)
+        except json.JSONDecodeError:
+            continue
+        candidates.extend(json_competitor_candidates(data, base_url))
+    return candidates
+
+
+def html_competitor_candidates(document: str, base_url: str) -> list[dict[str, Any]]:
+    block_pattern = re.compile(
+        r"<(?P<tag>li|tr|div)\b[^>]*(?:mall|seller|shop|price|prod|goods|compare)[^>]*>.*?</(?P=tag)>",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    candidates: list[dict[str, Any]] = []
+    for match in block_pattern.finditer(document):
+        block = match.group(0)
+        text = clean_text(block)
+        if len(text) < 5 or "원" not in text:
+            continue
+        price_match = re.search(r"(\d{1,3}(?:,\d{3})+|\d{4,9})\s*원", text)
+        data_price_match = re.search(r"data-[^=]*price=[\"']([\d,]+)[\"']", block, flags=re.IGNORECASE)
+        price = parse_price(data_price_match.group(1) if data_price_match else price_match.group(1) if price_match else "")
+        if price <= 0:
+            continue
+        href_match = re.search(r"<a\b[^>]+href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>", block, flags=re.IGNORECASE | re.DOTALL)
+        mall_match = re.search(
+            r"class=[\"'][^\"']*(?:mall|seller|shop|company|logo)[^\"']*[\"'][^>]*>(.*?)</(?:a|span|div|p)>",
+            block,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        title_match = re.search(
+            r"class=[\"'][^\"']*(?:prod|goods|title|name)[^\"']*[\"'][^>]*>(.*?)</(?:a|span|div|p|strong)>",
+            block,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        link_text = clean_text(href_match.group(2)) if href_match else ""
+        mall = clean_text(mall_match.group(1)) if mall_match else ""
+        title = clean_text(title_match.group(1)) if title_match else ""
+        if not mall:
+            mall = link_text[:40]
+        if not title:
+            title = link_text or text[:80]
+        detail_url = urllib.parse.urljoin(base_url, html.unescape(href_match.group(1))) if href_match else ""
+        candidates.append(
+            {
+                "mall": mall or "판매처",
+                "title": title,
+                "sale_price": price,
+                "shipping_fee": 0,
+                "total_price": price,
+                "detail_url": detail_url,
+            }
+        )
+    return candidates
+
+
+def normalize_competitor_candidates(candidates: list[dict[str, Any]], limit: int = MAX_COMPETITOR_SNAPSHOT_ROWS) -> list[dict[str, Any]]:
+    unique: dict[str, dict[str, Any]] = {}
+    for item in candidates:
+        sale_price = parse_price(item.get("sale_price"))
+        shipping_fee = parse_price(item.get("shipping_fee"))
+        total_price = parse_price(item.get("total_price")) or sale_price + shipping_fee
+        if sale_price <= 0 and total_price <= 0:
+            continue
+        title = clean_text(str(item.get("title") or ""))
+        mall = clean_text(str(item.get("mall") or "판매처"))
+        detail_url = str(item.get("detail_url") or "").strip()
+        key = "|".join((normalize_title(mall), normalize_title(title), str(total_price), detail_url))
+        if key in unique:
+            continue
+        combined = f"{mall} {title}"
+        exclusion_reason = next((term for term in COMPETITOR_EXCLUDE_TERMS if term in combined), "")
+        unique[key] = {
+            "mall": mall,
+            "title": title or mall,
+            "sale_price": sale_price or total_price,
+            "shipping_fee": shipping_fee,
+            "total_price": total_price or sale_price + shipping_fee,
+            "detail_url": detail_url,
+            "is_excluded": bool(exclusion_reason),
+            "exclusion_reason": f"제외어: {exclusion_reason}" if exclusion_reason else "",
+        }
+
+    values = sorted(unique.values(), key=lambda item: (item["is_excluded"], item["total_price"], item["mall"]))
+    valid_prices = [item["total_price"] for item in values if not item["is_excluded"]]
+    if len(valid_prices) >= 4:
+        middle = len(valid_prices) // 2
+        median = valid_prices[middle] if len(valid_prices) % 2 else (valid_prices[middle - 1] + valid_prices[middle]) / 2
+        for item in values:
+            if item["is_excluded"]:
+                continue
+            if item["total_price"] < median * 0.35 or item["total_price"] > median * 3:
+                item["is_excluded"] = True
+                item["exclusion_reason"] = "중앙 가격대에서 크게 벗어난 가격"
+    return values[:limit]
+
+
+def fetch_comparison_competitors(platform: str, comparison_url: str, limit: int = MAX_COMPETITOR_SNAPSHOT_ROWS) -> list[dict[str, Any]]:
+    safe_url = assert_public_product_url(comparison_url)
+    status, body = read_url(safe_url, {"Referer": safe_url})
+    if status != 200:
+        raise RuntimeError(f"{COMPARISON_PLATFORM_LABELS.get(platform, platform)} 가격비교 URL 수집 오류: HTTP {status}")
+    if any(marker in body.lower() for marker in ("captcha", "access denied")):
+        raise RuntimeError("가격비교 페이지가 자동 요청을 차단했습니다.")
+    candidates = [
+        *extract_script_json_competitors(body, safe_url),
+        *html_competitor_candidates(body, safe_url),
+    ]
+    if platform == "danawa":
+        candidates.extend(
+            {
+                "mall": product.get("mall") or "다나와",
+                "title": product.get("name") or "",
+                "sale_price": product.get("price") or 0,
+                "shipping_fee": product.get("shipping") or 0,
+                "total_price": product.get("total") or 0,
+                "detail_url": product.get("url") or "",
+            }
+            for product in parse_danawa_products(body, limit=limit)
+        )
+    if platform == "enuri":
+        candidates.extend(
+            {
+                "mall": product.get("mall") or "에누리",
+                "title": product.get("name") or "",
+                "sale_price": product.get("price") or 0,
+                "shipping_fee": product.get("shipping") or 0,
+                "total_price": product.get("total") or 0,
+                "detail_url": product.get("url") or "",
+            }
+            for product in parse_enuri_products(body, limit=limit)
+        )
+    competitors = normalize_competitor_candidates(candidates, limit=limit)
+    if not competitors:
+        raise RuntimeError("가격비교 페이지에서 경쟁 판매처를 찾지 못했습니다.")
+    return competitors
+
+
 def dedupe_products(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     indexes: dict[str, int] = {}
     unique_items: list[dict[str, Any]] = []
@@ -1802,7 +2247,7 @@ def fetch_benefit_detail(url: str, reference_price: int, fallback_shipping: int)
     return parsed
 
 
-READY_SEARCH_SOURCES = {"naver", "danawa"}
+READY_SEARCH_SOURCES = {"naver", "danawa", "enuri"}
 COLLECTION_SOURCE_LABELS = {
     "naver": "네이버 쇼핑검색",
     "danawa": "다나와",
@@ -1816,7 +2261,7 @@ class CollectionQuotaExceeded(RuntimeError):
 
 def normalize_sources(sources: list[str]) -> list[str]:
     selected = [source for source in sources if source in READY_SEARCH_SOURCES]
-    return selected or ["naver", "danawa"]
+    return selected or ["naver", "danawa", "enuri"]
 
 
 def collection_quota_rows(db: sqlite3.Connection) -> list[dict[str, Any]]:
@@ -1901,18 +2346,32 @@ def collect_price_products(db: sqlite3.Connection, query: str, sort_mode: str, s
     selected_sources = normalize_sources(sources)
 
     if "naver" in selected_sources:
+        naver_collected = False
         naver_key = db.execute("SELECT * FROM api_keys WHERE platform = 'naver'").fetchone()
         if naver_key and naver_key["client_id"] and naver_key["client_secret"]:
             try:
                 reserve_collection_request(db, "naver")
-                products.extend(fetch_naver_products(query, sort_mode, naver_key["client_id"], naver_key["client_secret"]))
+                collected = fetch_naver_products(query, sort_mode, naver_key["client_id"], naver_key["client_secret"])
+                products.extend(collected)
+                complete_collection_request(db, "naver", "success")
+                naver_collected = bool(collected)
+            except Exception as error:
+                if not isinstance(error, CollectionQuotaExceeded):
+                    complete_collection_request(db, "naver", "error")
+                    warnings.append(str(error))
+                else:
+                    warnings.append(str(error))
+        else:
+            warnings.append("네이버 쇼핑 API 키가 없어 검색페이지 크롤링으로 시도")
+        if not naver_collected:
+            try:
+                reserve_collection_request(db, "naver")
+                products.extend(fetch_naver_shopping_crawl_products(query, sort_mode))
                 complete_collection_request(db, "naver", "success")
             except Exception as error:
                 if not isinstance(error, CollectionQuotaExceeded):
                     complete_collection_request(db, "naver", "error")
-                warnings.append(str(error))
-        else:
-            warnings.append("네이버 쇼핑 API 키가 없어 네이버 수집을 건너뜀")
+                warnings.append(f"네이버 크롤링: {error}")
 
     if "danawa" in selected_sources:
         try:
@@ -1938,6 +2397,16 @@ def collect_price_products(db: sqlite3.Connection, query: str, sort_mode: str, s
             if not isinstance(error, CollectionQuotaExceeded):
                 complete_collection_request(db, "danawa", "error")
             warnings.append(str(error))
+
+    if "enuri" in selected_sources:
+        try:
+            reserve_collection_request(db, "enuri")
+            products.extend(mark_extraction_method(fetch_enuri_products(query), "crawl"))
+            complete_collection_request(db, "enuri", "success")
+        except Exception as error:
+            if not isinstance(error, CollectionQuotaExceeded):
+                complete_collection_request(db, "enuri", "error")
+            warnings.append(f"에누리: {error}")
 
     unique_products = dedupe_products(products)
     if sort_mode == "recent":
@@ -2787,7 +3256,7 @@ def prepared_products() -> list[dict[str, Any]]:
         rows = db.execute(
             "SELECT * FROM prepared_products ORDER BY updated_at DESC LIMIT 300"
         ).fetchall()
-    return [row_to_dict(row) or {} for row in rows]
+        return [prepared_product_row_to_dict(db, row) for row in rows]
 
 
 @app.post("/prepared-products", dependencies=[Depends(require_admin)])
@@ -2863,7 +3332,11 @@ def prepare_product(payload: PreparedProductPayload) -> dict[str, Any]:
             )
         row = db.execute("SELECT * FROM prepared_products WHERE id = ?", (prepared_id,)).fetchone()
     log_event(f"product prepared: {payload.title}")
-    return row_to_dict(row) or {}
+    with connect() as db:
+        fresh = db.execute("SELECT * FROM prepared_products WHERE id = ?", (prepared_id,)).fetchone()
+        if not fresh:
+            raise HTTPException(status_code=404, detail="Prepared product not found")
+        return prepared_product_row_to_dict(db, fresh)
 
 
 @app.patch("/prepared-products/{prepared_id}/monitoring", dependencies=[Depends(require_admin)])
@@ -2899,9 +3372,158 @@ def update_prepared_monitoring(prepared_id: str, payload: PreparedMonitoringPayl
                 prepared_id,
             ),
         )
-        row = db.execute("SELECT * FROM prepared_products WHERE id = ?", (prepared_id,)).fetchone()
     log_event(f"monitoring {'enabled' if payload.monitoring_enabled else 'disabled'}: {existing['title']}")
-    return row_to_dict(row) or {}
+    with connect() as db:
+        row = db.execute("SELECT * FROM prepared_products WHERE id = ?", (prepared_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Prepared product not found")
+        return prepared_product_row_to_dict(db, row)
+
+
+@app.put("/prepared-products/{prepared_id}/comparison-targets", dependencies=[Depends(require_admin)])
+def save_comparison_targets(prepared_id: str, payload: ComparisonTargetsPayload) -> dict[str, Any]:
+    timestamp = now()
+    seen: set[str] = set()
+    with connect() as db:
+        existing_product = db.execute("SELECT id, title FROM prepared_products WHERE id = ?", (prepared_id,)).fetchone()
+        if not existing_product:
+            raise HTTPException(status_code=404, detail="Prepared product not found")
+        for target in payload.targets:
+            platform = normalize_comparison_platform(target.platform)
+            if platform in seen:
+                continue
+            seen.add(platform)
+            comparison_url = normalize_comparison_url(target.comparison_url)
+            if not comparison_url:
+                existing_target = db.execute(
+                    "SELECT id FROM comparison_targets WHERE prepared_product_id = ? AND platform = ?",
+                    (prepared_id, platform),
+                ).fetchone()
+                if existing_target:
+                    db.execute("DELETE FROM competitor_snapshots WHERE target_id = ?", (existing_target["id"],))
+                    db.execute("DELETE FROM comparison_targets WHERE id = ?", (existing_target["id"],))
+                continue
+            db.execute(
+                """
+                INSERT INTO comparison_targets (
+                    id, prepared_product_id, platform, comparison_url, enabled, status,
+                    last_scanned_at, last_error, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, 'pending', NULL, '', ?, ?)
+                ON CONFLICT(prepared_product_id, platform) DO UPDATE SET
+                    comparison_url = excluded.comparison_url,
+                    enabled = excluded.enabled,
+                    status = CASE WHEN comparison_targets.comparison_url != excluded.comparison_url THEN 'pending' ELSE comparison_targets.status END,
+                    last_error = CASE WHEN comparison_targets.comparison_url != excluded.comparison_url THEN '' ELSE comparison_targets.last_error END,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    new_id("target"),
+                    prepared_id,
+                    platform,
+                    comparison_url,
+                    int(target.enabled),
+                    timestamp,
+                    timestamp,
+                ),
+            )
+        db.execute("UPDATE prepared_products SET updated_at = ? WHERE id = ?", (timestamp, prepared_id))
+        row = db.execute("SELECT * FROM prepared_products WHERE id = ?", (prepared_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Prepared product not found")
+        product = prepared_product_row_to_dict(db, row)
+    log_event(f"comparison targets saved: {existing_product['title']}")
+    return product
+
+
+@app.post("/prepared-products/{prepared_id}/comparison-scan", dependencies=[Depends(require_admin)])
+def scan_comparison_targets(prepared_id: str, payload: ComparisonScanPayload) -> dict[str, Any]:
+    selected_platforms = {normalize_comparison_platform(platform) for platform in payload.platforms} if payload.platforms else set()
+    warnings: list[str] = []
+    scanned_count = 0
+    with connect() as db:
+        product = db.execute("SELECT id, title FROM prepared_products WHERE id = ?", (prepared_id,)).fetchone()
+        if not product:
+            raise HTTPException(status_code=404, detail="Prepared product not found")
+        target_rows = db.execute(
+            """
+            SELECT * FROM comparison_targets
+            WHERE prepared_product_id = ? AND enabled = 1 AND comparison_url != ''
+            ORDER BY platform ASC
+            """,
+            (prepared_id,),
+        ).fetchall()
+        target_rows = [
+            row for row in target_rows
+            if not selected_platforms or row["platform"] in selected_platforms
+        ]
+        if not target_rows:
+            raise HTTPException(status_code=400, detail="저장된 가격비교 URL이 없습니다.")
+        for target in target_rows:
+            platform = target["platform"]
+            collected_at = now()
+            try:
+                reserve_collection_request(db, platform)
+                competitors = fetch_comparison_competitors(platform, target["comparison_url"])
+                for rank, competitor in enumerate(competitors, start=1):
+                    db.execute(
+                        """
+                        INSERT INTO competitor_snapshots (
+                            id, target_id, prepared_product_id, platform, rank, mall, title,
+                            sale_price, shipping_fee, total_price, detail_url,
+                            is_excluded, exclusion_reason, collected_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            new_id("competitor"),
+                            target["id"],
+                            prepared_id,
+                            platform,
+                            rank,
+                            competitor["mall"],
+                            competitor["title"],
+                            competitor["sale_price"],
+                            competitor["shipping_fee"],
+                            competitor["total_price"],
+                            competitor["detail_url"],
+                            int(competitor["is_excluded"]),
+                            competitor["exclusion_reason"],
+                            collected_at,
+                        ),
+                    )
+                db.execute(
+                    """
+                    UPDATE comparison_targets
+                    SET status = 'success', last_scanned_at = ?, last_error = '', updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (collected_at, collected_at, target["id"]),
+                )
+                complete_collection_request(db, platform, "success")
+                scanned_count += 1
+            except Exception as error:
+                message = str(error)[:500]
+                warnings.append(f"{COMPARISON_PLATFORM_LABELS.get(platform, platform)}: {message}")
+                db.execute(
+                    """
+                    UPDATE comparison_targets
+                    SET status = 'error', last_error = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (message, collected_at, target["id"]),
+                )
+                if not isinstance(error, CollectionQuotaExceeded):
+                    complete_collection_request(db, platform, "error")
+        db.execute("UPDATE prepared_products SET updated_at = ? WHERE id = ?", (now(), prepared_id))
+        row = db.execute("SELECT * FROM prepared_products WHERE id = ?", (prepared_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Prepared product not found")
+        result = prepared_product_row_to_dict(db, row)
+        result["scan_warnings"] = warnings
+        result["scanned_target_count"] = scanned_count
+    log_event(f"comparison scan completed: {product['title']} · {scanned_count} targets", "warning" if warnings else "info")
+    return result
 
 
 @app.delete("/prepared-products/{prepared_id}", dependencies=[Depends(require_admin)])
@@ -2910,6 +3532,10 @@ def delete_prepared_product(prepared_id: str) -> dict[str, str]:
         row = db.execute("SELECT title FROM prepared_products WHERE id = ?", (prepared_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Prepared product not found")
+        target_rows = db.execute("SELECT id FROM comparison_targets WHERE prepared_product_id = ?", (prepared_id,)).fetchall()
+        for target in target_rows:
+            db.execute("DELETE FROM competitor_snapshots WHERE target_id = ?", (target["id"],))
+        db.execute("DELETE FROM comparison_targets WHERE prepared_product_id = ?", (prepared_id,))
         db.execute("DELETE FROM prepared_products WHERE id = ?", (prepared_id,))
     log_event(f"prepared product deleted: {row['title']}")
     return {"status": "deleted", "id": prepared_id}
