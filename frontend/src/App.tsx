@@ -3678,19 +3678,20 @@ function compactLineProductName(rows: SearchResultRow[], keyword: string): strin
 
 function sortResultRows(rows: SearchResultRow[], sortMode: string, lowestTotal: number): SearchResultRow[] {
   const sorted = [...rows];
+  const exclusionWeight = (row: SearchResultRow) => (row.isExcluded || row.status === "abnormal" ? 1 : 0);
   if (sortMode === "margin") {
     return sorted.sort((a, b) => {
       const aPrice = effectivePurchasePrice(a);
       const bPrice = effectivePurchasePrice(b);
       const aMargin = lowestTotal ? aPrice - lowestTotal : 0;
       const bMargin = lowestTotal ? bPrice - lowestTotal : 0;
-      return bMargin - aMargin || aPrice - bPrice || a.name.localeCompare(b.name, "ko");
+      return exclusionWeight(a) - exclusionWeight(b) || bMargin - aMargin || aPrice - bPrice || a.name.localeCompare(b.name, "ko");
     });
   }
   if (sortMode === "recent") {
-    return sorted.sort((a, b) => b.collectedAt.localeCompare(a.collectedAt) || effectivePurchasePrice(a) - effectivePurchasePrice(b) || a.name.localeCompare(b.name, "ko"));
+    return sorted.sort((a, b) => exclusionWeight(a) - exclusionWeight(b) || b.collectedAt.localeCompare(a.collectedAt) || effectivePurchasePrice(a) - effectivePurchasePrice(b) || a.name.localeCompare(b.name, "ko"));
   }
-  return sorted.sort((a, b) => effectivePurchasePrice(a) - effectivePurchasePrice(b) || a.salePrice - b.salePrice || a.name.localeCompare(b.name, "ko"));
+  return sorted.sort((a, b) => exclusionWeight(a) - exclusionWeight(b) || effectivePurchasePrice(a) - effectivePurchasePrice(b) || a.salePrice - b.salePrice || a.name.localeCompare(b.name, "ko"));
 }
 
 function effectivePurchasePrice(row: SearchResultRow): number {

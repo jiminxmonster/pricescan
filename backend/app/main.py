@@ -1700,6 +1700,63 @@ def mark_extraction_method(products: list[dict[str, Any]], method: str) -> list[
     return [{**product, "extraction_methods": [method]} for product in products]
 
 
+def parse_danawa_mall_price_products(document: str, product_name: str, fallback_url: str, limit: int = 10) -> list[dict[str, Any]]:
+    section_match = re.search(
+        r"<ul\b[^>]*class=[\"'][^\"']*list__mall-price[^\"']*[\"'][^>]*>(.*?)</ul>",
+        document,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if not section_match:
+        return []
+    section = section_match.group(1)
+    item_matches = re.finditer(r"<li\b[^>]*class=[\"'][^\"']*list-item[^\"']*[\"'][^>]*>(.*?)</li>", section, flags=re.IGNORECASE | re.DOTALL)
+    products: list[dict[str, Any]] = []
+    for item_match in item_matches:
+        block = item_match.group(1)
+        mall_match = re.search(r"\balt=[\"']([^\"']+)[\"']", block, flags=re.IGNORECASE)
+        mall = clean_text(mall_match.group(1)) if mall_match else ""
+        if not mall:
+            mall_text_match = re.search(
+                r"class=[\"'][^\"']*(?:mall|logo|store|shop)[^\"']*[\"'][^>]*>(.*?)</(?:a|span|div|p)>",
+                block,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            mall = clean_text(mall_text_match.group(1)) if mall_text_match else ""
+
+        base_price_match = re.search(r"data-base-price=[\"']([\d,]+)[\"']", block, flags=re.IGNORECASE)
+        delivery_price_match = re.search(r"data-delivery-price=[\"']([\d,]+)[\"']", block, flags=re.IGNORECASE)
+        price = parse_price(base_price_match.group(1) if base_price_match else "")
+        shipping = parse_price(delivery_price_match.group(1) if delivery_price_match else "")
+        if price <= 0:
+            price_match = re.search(r"(\d{1,3}(?:,\d{3})+|\d{4,9})\s*원", clean_text(block))
+            price = parse_price(price_match.group(1) if price_match else "")
+        if price <= 0:
+            continue
+
+        href_match = re.search(
+            r"<a\b[^>]+href=[\"']([^\"']+)[\"'][^>]*class=[\"'][^\"']*link__(?:sell-price|buy)[^\"']*[\"']",
+            block,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if not href_match:
+            href_match = re.search(r"<a\b[^>]+href=[\"']([^\"']+)[\"']", block, flags=re.IGNORECASE)
+        detail_url = urllib.parse.urljoin(fallback_url, html.unescape(href_match.group(1))) if href_match else fallback_url
+        products.append(
+            {
+                "source": "danawa",
+                "mall": mall or "다나와 판매처",
+                "name": product_name,
+                "price": price,
+                "shipping": shipping,
+                "total": price + shipping,
+                "url": detail_url,
+            }
+        )
+        if len(products) >= limit:
+            break
+    return sorted(products, key=lambda item: (item["total"], item["mall"]))
+
+
 def fetch_danawa_products(query: str, display: int = 30) -> list[dict[str, Any]]:
     status, body = read_url(danawa_search_url(query, display))
     if status != 200:
@@ -1707,6 +1764,26 @@ def fetch_danawa_products(query: str, display: int = 30) -> list[dict[str, Any]]
     products = parse_danawa_products(body, limit=display)
     if not products:
         raise RuntimeError("다나와 검색 결과 파싱 실패 또는 결과 없음")
+    detail_products: list[dict[str, Any]] = []
+    for product in products[:3]:
+        detail_url = str(product.get("url") or "")
+        if "prod.danawa.com/info/" not in detail_url:
+            continue
+        detail_status, detail_body = read_url(detail_url, {"Referer": danawa_search_url(query, display)})
+        if detail_status != 200:
+            continue
+        detail_products.extend(
+            parse_danawa_mall_price_products(
+                detail_body,
+                str(product.get("name") or query),
+                detail_url,
+                limit=max(10 - len(detail_products), 0),
+            )
+        )
+        if len(detail_products) >= 10:
+            break
+    if detail_products:
+        return mark_extraction_method(detail_products[:10], "crawl")
     return mark_extraction_method(products, "crawl")
 
 
@@ -1784,15 +1861,16 @@ def parse_enuri_products(document: str, limit: int = 30) -> list[dict[str, Any]]
                 if not isinstance(item, dict):
                     continue
                 offers = item.get("offers") if isinstance(item.get("offers"), dict) else {}
-                price = parse_price(offers.get("lowPrice"))
+                price = parse_price(offers.get("lowPrice") or offers.get("price"))
                 name = clean_text(str(item.get("name") or ""))
                 url = str(item.get("url") or "https://www.enuri.com/")
                 if not name or price <= 0:
                     continue
+                image_url = str(item.get("image") or "")
                 products.append(
                     {
                         "source": "enuri",
-                        "mall": "에누리",
+                        "mall": infer_enuri_mall(image_url, url, name),
                         "name": name,
                         "price": price,
                         "shipping": 0,
@@ -1803,6 +1881,31 @@ def parse_enuri_products(document: str, limit: int = 30) -> list[dict[str, Any]]
                 if len(products) >= limit:
                     return products
     return products
+
+
+def infer_enuri_mall(image_url: str, product_url: str, name: str) -> str:
+    text = f"{image_url} {product_url} {name}".lower()
+    mall_rules = (
+        ("011st", "11번가"),
+        ("11st", "11번가"),
+        ("coupang", "쿠팡"),
+        ("gmarket", "G마켓"),
+        ("auction", "옥션"),
+        ("lotteon", "롯데ON"),
+        ("cjonstyle", "CJ온스타일"),
+        ("ssg", "SSG.COM"),
+        ("emart", "이마트몰"),
+        ("hmall", "현대Hmall"),
+        ("interpark", "인터파크"),
+        ("shop1.phinf.naver.net", "스마트스토어"),
+        ("smartstore", "스마트스토어"),
+    )
+    for marker, label in mall_rules:
+        if marker in text:
+            return label
+    if "detail.jsp?modelno=" in product_url:
+        return "에누리 가격비교"
+    return "에누리 판매처"
 
 
 def fetch_enuri_products(query: str, display: int = 30) -> list[dict[str, Any]]:
@@ -2360,6 +2463,8 @@ def collect_price_products(db: sqlite3.Connection, query: str, sort_mode: str, s
                     products.extend(collected)
                     if collected:
                         method_successes += 1
+                    if label == "크롤링" and len(collected) >= 10:
+                        break
                 except Exception as error:
                     warnings.append(f"다나와 {label}: {error}")
             complete_collection_request(db, "danawa", "success" if method_successes else "error")
