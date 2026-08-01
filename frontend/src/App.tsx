@@ -3682,7 +3682,19 @@ function ExtractionMethodBadges({ methods }: { methods: string[] }) {
 }
 
 function PriceLineOverview({ items, onPointClick }: { items: PriceItem[]; onPointClick: (source: string, itemId: string) => void }) {
+  type PointPickerOption = {
+    groupKey: ComparisonPlatform;
+    groupLabel: string;
+    color: string;
+    itemId: string;
+    mall: string;
+    total: number;
+    rank: number;
+    x: number;
+    y: number;
+  };
   const [expanded, setExpanded] = useState(false);
+  const [pointPicker, setPointPicker] = useState<{ x: number; y: number; options: PointPickerOption[] } | null>(null);
   const sourceGroups = comparisonPlatformOptions.map((source) => {
     const rows = items
       .filter((item) => item.source === source.key && !item.is_excluded && item.status !== "abnormal" && item.total > 0)
@@ -3710,6 +3722,19 @@ function PriceLineOverview({ items, onPointClick }: { items: PriceItem[]; onPoin
     const linePoints = points.map((point) => `${point.x},${point.y}`).join(" ");
     return { ...group, points, linePoints, axisMinPrice, axisMaxPrice };
   });
+  const combinedPointOptions: PointPickerOption[] = groups.flatMap((group) => (
+    group.points.map((point) => ({
+      groupKey: group.key,
+      groupLabel: group.label,
+      color: group.color,
+      itemId: point.item.id,
+      mall: point.item.mall,
+      total: point.item.total,
+      rank: point.index + 1,
+      x: point.x,
+      y: point.y,
+    }))
+  ));
   const hasRows = groups.some((group) => group.rows.length > 0);
   if (!hasRows) {
     return (
@@ -3735,18 +3760,35 @@ function PriceLineOverview({ items, onPointClick }: { items: PriceItem[]; onPoin
       ))}
     </svg>
   );
-  const renderGraphPoint = (group: (typeof groups)[number], point: (typeof groups)[number]["points"][number]) => (
-    <button
-      className={`price-source-point source-${group.key} ${point.index === 0 ? "lowest" : ""}`}
-      key={`${group.key}-${point.item.id}`}
-      style={{ left: `${point.x}%`, top: `${point.y}%`, backgroundColor: group.color }}
-      onClick={() => onPointClick(group.key, point.item.id)}
-      title={`${group.label} ${point.index + 1}위 ${point.item.mall} ${money(point.item.total)}`}
-      aria-label={`${group.label} ${point.index + 1}위 ${point.item.mall} ${money(point.item.total)} 행으로 이동`}
-    >
-      <span>{point.index + 1}</span>
-    </button>
+  const findOverlappingOptions = (x: number, y: number) => (
+    combinedPointOptions
+      .filter((option) => Math.abs(option.x - x) < 0.01 && Math.abs(option.y - y) < 0.01)
+      .sort((a, b) => a.rank - b.rank || a.groupLabel.localeCompare(b.groupLabel, "ko") || a.mall.localeCompare(b.mall, "ko"))
   );
+  const renderGraphPoint = (group: (typeof groups)[number], point: (typeof groups)[number]["points"][number], useOverlapPicker = false) => {
+    const overlappingOptions = useOverlapPicker ? findOverlappingOptions(point.x, point.y) : [];
+    const hasOverlap = overlappingOptions.length > 1;
+    return (
+      <button
+        className={`price-source-point source-${group.key} ${point.index === 0 ? "lowest" : ""} ${hasOverlap ? "has-overlap" : ""}`}
+        key={`${group.key}-${point.item.id}`}
+        style={{ left: `${point.x}%`, top: `${point.y}%`, backgroundColor: group.color }}
+        onClick={() => {
+          if (hasOverlap) {
+            setPointPicker({ x: point.x, y: point.y, options: overlappingOptions });
+            return;
+          }
+          setPointPicker(null);
+          onPointClick(group.key, point.item.id);
+        }}
+        data-hover-label={money(point.item.total)}
+        title={`${group.label} ${point.index + 1}위 ${point.item.mall} ${money(point.item.total)}`}
+        aria-label={`${group.label} ${point.index + 1}위 ${point.item.mall} ${money(point.item.total)}${hasOverlap ? " 겹친 항목 선택" : " 행으로 이동"}`}
+      >
+        <span>{point.index + 1}</span>
+      </button>
+    );
+  };
   const renderSourceChart = (group: (typeof groups)[number]) => (
     <section className="price-source-chart" key={group.key}>
       <div className="price-source-chart-head">
@@ -3779,7 +3821,10 @@ function PriceLineOverview({ items, onPointClick }: { items: PriceItem[]; onPoin
           <strong>{expanded ? "소스별 가격대 그래프" : "전체 가격대 겹쳐보기"}</strong>
           <span>네이버 · 다나와 · 에누리 TOP 10 / 공통 Y축</span>
         </div>
-        <button className="price-line-overview-toggle" onClick={() => setExpanded((value) => !value)}>
+        <button className="price-line-overview-toggle" onClick={() => {
+          setPointPicker(null);
+          setExpanded((value) => !value);
+        }}>
           {expanded ? "겹쳐보기" : "펼쳐보기 모드"}
         </button>
       </div>
@@ -3795,7 +3840,30 @@ function PriceLineOverview({ items, onPointClick }: { items: PriceItem[]; onPoin
           </div>
           <div className="price-source-plot price-source-plot-combined" role="group" aria-label="네이버 다나와 에누리 통합 가격 꺾은선 그래프">
             {renderGraphLines(groups)}
-            {groups.flatMap((group) => group.points.map((point) => renderGraphPoint(group, point)))}
+            {groups.flatMap((group) => group.points.map((point) => renderGraphPoint(group, point, true)))}
+            {pointPicker && (
+              <div className="price-point-picker" style={{ left: `${pointPicker.x}%`, top: `${pointPicker.y}%` }}>
+                <div className="price-point-picker-head">
+                  <strong>{money(pointPicker.options[0]?.total || 0)}</strong>
+                  <button onClick={() => setPointPicker(null)} aria-label="겹친 항목 선택 닫기">×</button>
+                </div>
+                <div className="price-point-picker-list">
+                  {pointPicker.options.map((option) => (
+                    <button
+                      key={`${option.groupKey}-${option.itemId}`}
+                      onClick={() => {
+                        setPointPicker(null);
+                        onPointClick(option.groupKey, option.itemId);
+                      }}
+                    >
+                      <i style={{ backgroundColor: option.color }} />
+                      <span>{option.groupLabel} {option.rank}위</span>
+                      <em>{option.mall}</em>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
           <div className="price-source-legend">
             {groups.map((group) => (
