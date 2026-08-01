@@ -720,15 +720,14 @@ td { font-size: 14px; }
 .price-source-point {
   position: absolute;
   transform: translate(-50%, -50%);
-  width: 24px;
-  height: 24px;
+  width: 16px;
+  height: 16px;
   border: 2px solid #fff;
   border-radius: 999px;
   background: var(--brand);
-  box-shadow: 0 6px 14px rgba(18, 51, 94, 0.18);
   color: #fff;
   cursor: pointer;
-  font-size: 10px;
+  font-size: 9px;
   font-weight: 950;
   line-height: 1;
 }

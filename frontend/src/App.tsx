@@ -3676,7 +3676,7 @@ function ExtractionMethodBadges({ methods }: { methods: string[] }) {
 }
 
 function PriceLineOverview({ items, onPointClick }: { items: PriceItem[]; onPointClick: (source: string, itemId: string) => void }) {
-  const groups = comparisonPlatformOptions.map((source) => {
+  const sourceGroups = comparisonPlatformOptions.map((source) => {
     const rows = items
       .filter((item) => item.source === source.key && !item.is_excluded && item.status !== "abnormal" && item.total > 0)
       .sort((a, b) => a.total - b.total || a.price - b.price || a.name.localeCompare(b.name, "ko"))
@@ -3684,9 +3684,15 @@ function PriceLineOverview({ items, onPointClick }: { items: PriceItem[]; onPoin
     const prices = rows.map((item) => item.total);
     const minPrice = prices.length ? Math.min(...prices) : 0;
     const maxPrice = prices.length ? Math.max(...prices) : 0;
-    const points = rows.map((item, index) => {
-      const x = rows.length === 1 ? 50 : (index / (rows.length - 1)) * 100;
-      const y = maxPrice === minPrice ? 50 : 88 - ((item.total - minPrice) / (maxPrice - minPrice)) * 76;
+    return { ...source, rows, minPrice, maxPrice };
+  });
+  const axisPrices = sourceGroups.flatMap((group) => group.rows.map((item) => item.total));
+  const axisMinPrice = axisPrices.length ? Math.min(...axisPrices) : 0;
+  const axisMaxPrice = axisPrices.length ? Math.max(...axisPrices) : 0;
+  const groups = sourceGroups.map((group) => {
+    const points = group.rows.map((item, index) => {
+      const x = group.rows.length === 1 ? 50 : (index / (group.rows.length - 1)) * 100;
+      const y = axisMaxPrice === axisMinPrice ? 50 : 88 - ((item.total - axisMinPrice) / (axisMaxPrice - axisMinPrice)) * 76;
       return {
         item,
         index,
@@ -3695,7 +3701,7 @@ function PriceLineOverview({ items, onPointClick }: { items: PriceItem[]; onPoin
       };
     });
     const linePoints = points.map((point) => `${point.x},${point.y}`).join(" ");
-    return { ...source, rows, points, linePoints, minPrice, maxPrice };
+    return { ...group, points, linePoints, axisMinPrice, axisMaxPrice };
   });
   const hasRows = groups.some((group) => group.rows.length > 0);
   if (!hasRows) {
@@ -3716,8 +3722,8 @@ function PriceLineOverview({ items, onPointClick }: { items: PriceItem[]; onPoin
           {group.rows.length > 0 ? (
             <>
               <div className="price-source-range">
-                <span>최저 {money(group.minPrice)}</span>
-                <span>최고 {money(group.maxPrice)}</span>
+                <span>축 최저 {money(group.axisMinPrice)}</span>
+                <span>축 최고 {money(group.axisMaxPrice)}</span>
               </div>
               <div className="price-source-plot" role="group" aria-label={`${group.label} 순위별 가격 꺾은선 그래프`}>
                 <svg className="price-source-line-graph" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
@@ -3736,7 +3742,7 @@ function PriceLineOverview({ items, onPointClick }: { items: PriceItem[]; onPoin
                       title={`${index + 1}위 ${item.mall} ${money(item.total)}`}
                       aria-label={`${group.label} ${index + 1}위 ${item.mall} ${money(item.total)} 행으로 이동`}
                     >
-                      <span>{index + 1}</span>
+                      {index < 3 && <span>{index + 1}</span>}
                     </button>
                   );
                 })}
