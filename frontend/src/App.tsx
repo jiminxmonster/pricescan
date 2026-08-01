@@ -573,7 +573,7 @@ const comparisonPlatformOptions: { key: ComparisonPlatform; label: string; place
 
 const comparisonPlatformColors: Record<ComparisonPlatform, string> = {
   naver: "#03c75a",
-  danawa: "rgb(107, 255, 238)",
+  danawa: "rgb(62, 193, 190)",
   enuri: "#2563eb",
 };
 
