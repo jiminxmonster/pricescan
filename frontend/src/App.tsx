@@ -579,6 +579,7 @@ const comparisonPlatformColors: Record<ComparisonPlatform, string> = {
 
 const CHART_POINT_OVERLAP_X_TOLERANCE = 1.5;
 const CHART_POINT_OVERLAP_Y_TOLERANCE = 9;
+const CHART_POINT_SCALE_GAP = 11;
 
 function apiStatusLabel(status: string): string {
   if (status === "ready") return "설정 필요 없음";
@@ -3697,6 +3698,7 @@ function PriceLineOverview({ items, onPointClick }: { items: PriceItem[]; onPoin
     y: number;
   };
   const [expanded, setExpanded] = useState(false);
+  const [yScaleExpanded, setYScaleExpanded] = useState(false);
   const [pointPicker, setPointPicker] = useState<{ x: number; y: number; options: PointPickerOption[] } | null>(null);
   const sourceGroups = comparisonPlatformOptions.map((source) => {
     const rows = items
@@ -3752,6 +3754,25 @@ function PriceLineOverview({ items, onPointClick }: { items: PriceItem[]; onPoin
     }
     return clusters;
   }, []).map((options) => options.sort((a, b) => a.rank - b.rank || a.groupLabel.localeCompare(b.groupLabel, "ko") || a.mall.localeCompare(b.mall, "ko")));
+  const scaledCombinedPointOptions = combinedPointClusters.flatMap((cluster) => {
+    if (cluster.length <= 1) return cluster;
+    const sortedCluster = [...cluster].sort((a, b) => b.total - a.total || a.rank - b.rank || a.groupLabel.localeCompare(b.groupLabel, "ko"));
+    const centerIndex = (sortedCluster.length - 1) / 2;
+    const clusterCenterY = sortedCluster.reduce((sum, option) => sum + option.y, 0) / sortedCluster.length;
+    const safeCenterY = Math.min(Math.max(clusterCenterY, 12 + centerIndex * CHART_POINT_SCALE_GAP), 88 - centerIndex * CHART_POINT_SCALE_GAP);
+    return sortedCluster.map((option, index) => ({
+      ...option,
+      y: safeCenterY + (index - centerIndex) * CHART_POINT_SCALE_GAP,
+    }));
+  });
+  const scaledOptionById = new Map(scaledCombinedPointOptions.map((option) => [`${option.groupKey}-${option.itemId}`, option]));
+  const scaledOverlayLineGroups = groups.map((group) => {
+    const linePoints = group.points.map((point) => {
+      const scaledOption = scaledOptionById.get(`${group.key}-${point.item.id}`);
+      return `${point.x},${scaledOption?.y ?? point.y}`;
+    }).join(" ");
+    return { ...group, linePoints };
+  });
   const hasRows = groups.some((group) => group.rows.length > 0);
   if (!hasRows) {
     return (
@@ -3829,6 +3850,22 @@ function PriceLineOverview({ items, onPointClick }: { items: PriceItem[]; onPoin
       </button>
     );
   };
+  const renderScaledCombinedPoint = (option: PointPickerOption) => (
+    <button
+      className={`price-source-point combined-point source-${option.groupKey}`}
+      key={`${option.groupKey}-${option.itemId}`}
+      style={{ left: `${option.x}%`, top: `${option.y}%`, backgroundColor: option.color }}
+      onClick={() => {
+        setPointPicker(null);
+        onPointClick(option.groupKey, option.itemId);
+      }}
+      data-hover-label={money(option.total)}
+      title={`${option.groupLabel} ${option.rank}위 ${option.mall} ${money(option.total)}`}
+      aria-label={`${option.groupLabel} ${option.rank}위 ${option.mall} ${money(option.total)} 행으로 이동`}
+    >
+      <span>{option.rank}</span>
+    </button>
+  );
   const renderSourceChart = (group: (typeof groups)[number]) => (
     <section className="price-source-chart" key={group.key}>
       <div className="price-source-chart-head">
@@ -3855,18 +3892,31 @@ function PriceLineOverview({ items, onPointClick }: { items: PriceItem[]; onPoin
     </section>
   );
   return (
-    <div className={`price-line-overview ${expanded ? "expanded" : "overlay"}`} aria-label="소스별 최저가 가격대 그래프">
+    <div className={`price-line-overview ${expanded ? "expanded" : "overlay"} ${!expanded && yScaleExpanded ? "y-scale-expanded" : ""}`} aria-label="소스별 최저가 가격대 그래프">
       <div className="price-line-overview-head">
         <div>
           <strong>{expanded ? "소스별 가격대 그래프" : "전체 가격대 겹쳐보기"}</strong>
-          <span>네이버 · 다나와 · 에누리 TOP 10 / 공통 Y축</span>
+          <span>네이버 · 다나와 · 에누리 TOP 10 / 공통 Y축{!expanded && yScaleExpanded ? " / Y축 확대" : ""}</span>
         </div>
-        <button className="price-line-overview-toggle" onClick={() => {
-          setPointPicker(null);
-          setExpanded((value) => !value);
-        }}>
-          {expanded ? "겹쳐보기" : "펼쳐보기 모드"}
-        </button>
+        <div className="price-line-overview-actions">
+          {!expanded && (
+            <button
+              className={`price-line-overview-toggle ${yScaleExpanded ? "active" : ""}`}
+              onClick={() => {
+                setPointPicker(null);
+                setYScaleExpanded((value) => !value);
+              }}
+            >
+              {yScaleExpanded ? "Y축 기본" : "Y축 확대"}
+            </button>
+          )}
+          <button className="price-line-overview-toggle" onClick={() => {
+            setPointPicker(null);
+            setExpanded((value) => !value);
+          }}>
+            {expanded ? "겹쳐보기" : "펼쳐보기 모드"}
+          </button>
+        </div>
       </div>
       {expanded ? (
         <div className="price-line-overview-grid">
@@ -3879,8 +3929,10 @@ function PriceLineOverview({ items, onPointClick }: { items: PriceItem[]; onPoin
             <span>축 최고 {money(axisMaxPrice)}</span>
           </div>
           <div className="price-source-plot price-source-plot-combined" role="group" aria-label="네이버 다나와 에누리 통합 가격 꺾은선 그래프">
-            {renderGraphLines(groups)}
-            {combinedPointClusters.map((cluster) => renderCombinedPointCluster(cluster))}
+            {renderGraphLines(yScaleExpanded ? scaledOverlayLineGroups : groups)}
+            {yScaleExpanded
+              ? scaledCombinedPointOptions.map((option) => renderScaledCombinedPoint(option))
+              : combinedPointClusters.map((cluster) => renderCombinedPointCluster(cluster))}
             {pointPicker && (
               <div className="price-point-picker" style={{ left: `${pointPicker.x}%`, top: `${pointPicker.y}%` }}>
                 <div className="price-point-picker-head">

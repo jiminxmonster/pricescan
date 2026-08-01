@@ -673,6 +673,12 @@ td { font-size: 14px; }
   font-size: 12px;
   font-weight: 900;
 }
+.price-line-overview-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
 .price-line-overview-toggle {
   border: 1px solid var(--line-strong);
   border-radius: 4px;
@@ -687,6 +693,11 @@ td { font-size: 14px; }
 .price-line-overview-toggle:hover {
   border-color: var(--brand);
   background: #f4f8ff;
+}
+.price-line-overview-toggle.active {
+  border-color: var(--brand);
+  background: #edf4ff;
+  color: var(--brand);
 }
 .price-line-overview-grid {
   display: grid;
@@ -741,6 +752,9 @@ td { font-size: 14px; }
 .price-source-plot-combined {
   height: 130px;
   margin: 4px 12px 0;
+}
+.price-line-overview.y-scale-expanded .price-source-plot-combined {
+  height: 240px;
 }
 .price-source-line-graph {
   position: absolute;
