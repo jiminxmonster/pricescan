@@ -571,6 +571,12 @@ const comparisonPlatformOptions: { key: ComparisonPlatform; label: string; place
   { key: "enuri", label: "에누리", placeholder: "에누리 가격비교 URL" },
 ];
 
+const comparisonPlatformColors: Record<ComparisonPlatform, string> = {
+  naver: "#03c75a",
+  danawa: "rgb(107, 255, 238)",
+  enuri: "#2563eb",
+};
+
 function apiStatusLabel(status: string): string {
   if (status === "ready") return "설정 필요 없음";
   return statusLabel(status);
@@ -3676,6 +3682,7 @@ function ExtractionMethodBadges({ methods }: { methods: string[] }) {
 }
 
 function PriceLineOverview({ items, onPointClick }: { items: PriceItem[]; onPointClick: (source: string, itemId: string) => void }) {
+  const [expanded, setExpanded] = useState(false);
   const sourceGroups = comparisonPlatformOptions.map((source) => {
     const rows = items
       .filter((item) => item.source === source.key && !item.is_excluded && item.status !== "abnormal" && item.total > 0)
@@ -3684,7 +3691,7 @@ function PriceLineOverview({ items, onPointClick }: { items: PriceItem[]; onPoin
     const prices = rows.map((item) => item.total);
     const minPrice = prices.length ? Math.min(...prices) : 0;
     const maxPrice = prices.length ? Math.max(...prices) : 0;
-    return { ...source, rows, minPrice, maxPrice };
+    return { ...source, rows, color: comparisonPlatformColors[source.key], minPrice, maxPrice };
   });
   const axisPrices = sourceGroups.flatMap((group) => group.rows.map((item) => item.total));
   const axisMinPrice = axisPrices.length ? Math.min(...axisPrices) : 0;
@@ -3711,51 +3718,95 @@ function PriceLineOverview({ items, onPointClick }: { items: PriceItem[]; onPoin
       </div>
     );
   }
-  return (
-    <div className="price-line-overview" aria-label="소스별 최저가 가격대 그래프">
-      {groups.map((group) => (
-        <section className="price-source-chart" key={group.key}>
-          <div className="price-source-chart-head">
-            <strong>{group.label}</strong>
-            <span>{group.rows.length}개</span>
-          </div>
-          {group.rows.length > 0 ? (
-            <>
-              <div className="price-source-range">
-                <span>축 최저 {money(group.axisMinPrice)}</span>
-                <span>축 최고 {money(group.axisMaxPrice)}</span>
-              </div>
-              <div className="price-source-plot" role="group" aria-label={`${group.label} 순위별 가격 꺾은선 그래프`}>
-                <svg className="price-source-line-graph" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
-                  <line className="price-source-grid-line" x1="0" y1="12" x2="100" y2="12" />
-                  <line className="price-source-grid-line" x1="0" y1="50" x2="100" y2="50" />
-                  <line className="price-source-grid-line" x1="0" y1="88" x2="100" y2="88" />
-                  {group.points.length > 1 && <polyline className="price-source-polyline" points={group.linePoints} />}
-                </svg>
-                {group.points.map(({ item, index, x, y }) => {
-                  return (
-                    <button
-                      className={`price-source-point ${index === 0 ? "lowest" : ""}`}
-                      key={item.id}
-                      style={{ left: `${x}%`, top: `${y}%` }}
-                      onClick={() => onPointClick(group.key, item.id)}
-                      title={`${index + 1}위 ${item.mall} ${money(item.total)}`}
-                      aria-label={`${group.label} ${index + 1}위 ${item.mall} ${money(item.total)} 행으로 이동`}
-                    >
-                      {index < 3 && <span>{index + 1}</span>}
-                    </button>
-                  );
-                })}
-              </div>
-              <button className="price-source-lowest" onClick={() => onPointClick(group.key, group.rows[0].id)}>
-                최저 {group.rows[0].mall} · {money(group.rows[0].total)}
-              </button>
-            </>
-          ) : (
-            <div className="price-source-empty">정상 후보 없음</div>
-          )}
-        </section>
+  const renderGraphLines = (targetGroups: typeof groups) => (
+    <svg className="price-source-line-graph" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+      <line className="price-source-grid-line" x1="0" y1="12" x2="100" y2="12" />
+      <line className="price-source-grid-line" x1="0" y1="50" x2="100" y2="50" />
+      <line className="price-source-grid-line" x1="0" y1="88" x2="100" y2="88" />
+      {targetGroups.map((group) => (
+        group.points.length > 1 && (
+          <polyline
+            className="price-source-polyline"
+            key={group.key}
+            points={group.linePoints}
+            style={{ stroke: group.color }}
+          />
+        )
       ))}
+    </svg>
+  );
+  const renderGraphPoint = (group: (typeof groups)[number], point: (typeof groups)[number]["points"][number]) => (
+    <button
+      className={`price-source-point source-${group.key} ${point.index === 0 ? "lowest" : ""}`}
+      key={`${group.key}-${point.item.id}`}
+      style={{ left: `${point.x}%`, top: `${point.y}%`, backgroundColor: group.color }}
+      onClick={() => onPointClick(group.key, point.item.id)}
+      title={`${group.label} ${point.index + 1}위 ${point.item.mall} ${money(point.item.total)}`}
+      aria-label={`${group.label} ${point.index + 1}위 ${point.item.mall} ${money(point.item.total)} 행으로 이동`}
+    >
+      <span>{point.index + 1}</span>
+    </button>
+  );
+  const renderSourceChart = (group: (typeof groups)[number]) => (
+    <section className="price-source-chart" key={group.key}>
+      <div className="price-source-chart-head">
+        <strong>{group.label}</strong>
+        <span>{group.rows.length}개</span>
+      </div>
+      {group.rows.length > 0 ? (
+        <>
+          <div className="price-source-range">
+            <span>축 최저 {money(group.axisMinPrice)}</span>
+            <span>축 최고 {money(group.axisMaxPrice)}</span>
+          </div>
+          <div className="price-source-plot" role="group" aria-label={`${group.label} 순위별 가격 꺾은선 그래프`}>
+            {renderGraphLines([group])}
+            {group.points.map((point) => renderGraphPoint(group, point))}
+          </div>
+          <button className="price-source-lowest" onClick={() => onPointClick(group.key, group.rows[0].id)}>
+            최저 {group.rows[0].mall} · {money(group.rows[0].total)}
+          </button>
+        </>
+      ) : (
+        <div className="price-source-empty">정상 후보 없음</div>
+      )}
+    </section>
+  );
+  return (
+    <div className={`price-line-overview ${expanded ? "expanded" : "overlay"}`} aria-label="소스별 최저가 가격대 그래프">
+      <div className="price-line-overview-head">
+        <div>
+          <strong>{expanded ? "소스별 가격대 그래프" : "전체 가격대 겹쳐보기"}</strong>
+          <span>네이버 · 다나와 · 에누리 TOP 10 / 공통 Y축</span>
+        </div>
+        <button className="price-line-overview-toggle" onClick={() => setExpanded((value) => !value)}>
+          {expanded ? "겹쳐보기" : "펼쳐보기 모드"}
+        </button>
+      </div>
+      {expanded ? (
+        <div className="price-line-overview-grid">
+          {groups.map((group) => renderSourceChart(group))}
+        </div>
+      ) : (
+        <section className="price-source-chart price-source-chart-combined">
+          <div className="price-source-range">
+            <span>축 최저 {money(axisMinPrice)}</span>
+            <span>축 최고 {money(axisMaxPrice)}</span>
+          </div>
+          <div className="price-source-plot price-source-plot-combined" role="group" aria-label="네이버 다나와 에누리 통합 가격 꺾은선 그래프">
+            {renderGraphLines(groups)}
+            {groups.flatMap((group) => group.points.map((point) => renderGraphPoint(group, point)))}
+          </div>
+          <div className="price-source-legend">
+            {groups.map((group) => (
+              <span key={group.key}>
+                <i style={{ backgroundColor: group.color }} />
+                {group.label} {group.rows.length}개
+              </span>
+            ))}
+          </div>
+        </section>
+      )}
     </div>
   );
 }

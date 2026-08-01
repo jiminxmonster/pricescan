@@ -649,9 +649,49 @@ td { font-size: 14px; }
 }
 .price-line-overview {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
   margin: 12px 0 8px;
+}
+.price-line-overview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.price-line-overview-head > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+.price-line-overview-head strong {
+  color: var(--text);
+  font-size: 15px;
+}
+.price-line-overview-head span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+}
+.price-line-overview-toggle {
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: #fff;
+  color: var(--text);
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 950;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.price-line-overview-toggle:hover {
+  border-color: var(--brand);
+  background: #f4f8ff;
+}
+.price-line-overview-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
 }
 .price-line-overview.empty {
   display: block;
@@ -671,6 +711,9 @@ td { font-size: 14px; }
   background: #fff;
   padding: 13px;
   min-width: 0;
+}
+.price-source-chart-combined {
+  padding: 13px 15px 12px;
 }
 .price-source-chart-head,
 .price-source-range {
@@ -694,6 +737,10 @@ td { font-size: 14px; }
   height: 96px;
   margin: 2px 8px 0;
   overflow: visible;
+}
+.price-source-plot-combined {
+  height: 130px;
+  margin: 4px 12px 0;
 }
 .price-source-line-graph {
   position: absolute;
@@ -720,8 +767,8 @@ td { font-size: 14px; }
 .price-source-point {
   position: absolute;
   transform: translate(-50%, -50%);
-  width: 16px;
-  height: 16px;
+  width: 22px;
+  height: 22px;
   border: 2px solid #fff;
   border-radius: 999px;
   background: var(--brand);
@@ -731,11 +778,27 @@ td { font-size: 14px; }
   font-weight: 950;
   line-height: 1;
 }
-.price-source-point.lowest {
-  background: var(--orange);
-}
 .price-source-point:hover {
   transform: translate(-50%, -50%) translateY(-2px);
+}
+.price-source-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 950;
+}
+.price-source-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.price-source-legend i {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
 }
 .price-source-lowest {
   border: 0;
@@ -2671,6 +2734,7 @@ textarea {
   .form-grid,
   .settings-grid,
   .price-line-overview,
+  .price-line-overview-grid,
   .source-group-grid,
   .detail-filter-grid,
   .empty-slots,
