@@ -751,7 +751,7 @@ td { font-size: 14px; }
 }
 .price-source-plot-combined {
   height: 130px;
-  margin: 4px 12px 0;
+  margin: 18px 12px 0;
 }
 .price-line-overview.y-scale-level-1 .price-source-plot-combined {
   height: 190px;
@@ -944,8 +944,9 @@ td { font-size: 14px; }
 }
 .price-y-scale-control {
   position: absolute;
-  right: 0;
-  bottom: 0;
+  left: 50%;
+  top: 0;
+  transform: translate(-50%, -50%);
   z-index: 6;
   display: inline-flex;
   align-items: center;
