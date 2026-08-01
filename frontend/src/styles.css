@@ -753,8 +753,11 @@ td { font-size: 14px; }
   height: 130px;
   margin: 4px 12px 0;
 }
-.price-line-overview.y-scale-expanded .price-source-plot-combined {
-  height: 240px;
+.price-line-overview.y-scale-level-1 .price-source-plot-combined {
+  height: 190px;
+}
+.price-line-overview.y-scale-level-2 .price-source-plot-combined {
+  height: 260px;
 }
 .price-source-line-graph {
   position: absolute;
@@ -938,6 +941,53 @@ td { font-size: 14px; }
   font-size: 12px;
   font-weight: 950;
   white-space: nowrap;
+}
+.price-y-scale-control {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  z-index: 6;
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.94);
+  overflow: hidden;
+}
+.price-y-scale-control button,
+.price-y-scale-control span {
+  min-width: 30px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-right: 1px solid var(--line);
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 950;
+  line-height: 1;
+}
+.price-y-scale-control button {
+  cursor: pointer;
+}
+.price-y-scale-control button:hover:not(:disabled) {
+  background: #edf4ff;
+  color: var(--brand);
+}
+.price-y-scale-control button:disabled {
+  color: #b7c1cf;
+  cursor: not-allowed;
+}
+.price-y-scale-control span {
+  min-width: 42px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.price-y-scale-control button:last-child {
+  border-right: 0;
 }
 .price-source-legend {
   display: flex;
