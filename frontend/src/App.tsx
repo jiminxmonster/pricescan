@@ -3735,6 +3735,15 @@ function PriceLineOverview({ items, onPointClick }: { items: PriceItem[]; onPoin
       y: point.y,
     }))
   ));
+  const combinedPointClusters = Array.from(
+    combinedPointOptions.reduce((acc, option) => {
+      const key = `${option.x.toFixed(2)}|${option.y.toFixed(2)}`;
+      const current = acc.get(key) || [];
+      current.push(option);
+      acc.set(key, current);
+      return acc;
+    }, new Map<string, PointPickerOption[]>()).values()
+  ).map((options) => options.sort((a, b) => a.rank - b.rank || a.groupLabel.localeCompare(b.groupLabel, "ko") || a.mall.localeCompare(b.mall, "ko")));
   const hasRows = groups.some((group) => group.rows.length > 0);
   if (!hasRows) {
     return (
@@ -3760,32 +3769,55 @@ function PriceLineOverview({ items, onPointClick }: { items: PriceItem[]; onPoin
       ))}
     </svg>
   );
-  const findOverlappingOptions = (x: number, y: number) => (
-    combinedPointOptions
-      .filter((option) => Math.abs(option.x - x) < 0.01 && Math.abs(option.y - y) < 0.01)
-      .sort((a, b) => a.rank - b.rank || a.groupLabel.localeCompare(b.groupLabel, "ko") || a.mall.localeCompare(b.mall, "ko"))
+  const segmentedPointBackground = (options: PointPickerOption[]) => {
+    if (options.length <= 1) return options[0]?.color || "var(--brand)";
+    const segmentSize = 100 / options.length;
+    return `conic-gradient(${options.map((option, index) => `${option.color} ${index * segmentSize}% ${(index + 1) * segmentSize}%`).join(", ")})`;
+  };
+  const renderGraphPoint = (group: (typeof groups)[number], point: (typeof groups)[number]["points"][number]) => (
+    <button
+      className={`price-source-point source-${group.key} ${point.index === 0 ? "lowest" : ""}`}
+      key={`${group.key}-${point.item.id}`}
+      style={{ left: `${point.x}%`, top: `${point.y}%`, backgroundColor: group.color }}
+      onClick={() => {
+        setPointPicker(null);
+        onPointClick(group.key, point.item.id);
+      }}
+      data-hover-label={money(point.item.total)}
+      title={`${group.label} ${point.index + 1}위 ${point.item.mall} ${money(point.item.total)}`}
+      aria-label={`${group.label} ${point.index + 1}위 ${point.item.mall} ${money(point.item.total)} 행으로 이동`}
+    >
+      <span>{point.index + 1}</span>
+    </button>
   );
-  const renderGraphPoint = (group: (typeof groups)[number], point: (typeof groups)[number]["points"][number], useOverlapPicker = false) => {
-    const overlappingOptions = useOverlapPicker ? findOverlappingOptions(point.x, point.y) : [];
-    const hasOverlap = overlappingOptions.length > 1;
+  const renderCombinedPointCluster = (options: PointPickerOption[]) => {
+    const representative = options[0];
+    const hasOverlap = options.length > 1;
+    const rankText = new Set(options.map((option) => option.rank)).size === 1 ? String(representative.rank) : String(options.length);
     return (
       <button
-        className={`price-source-point source-${group.key} ${point.index === 0 ? "lowest" : ""} ${hasOverlap ? "has-overlap" : ""}`}
-        key={`${group.key}-${point.item.id}`}
-        style={{ left: `${point.x}%`, top: `${point.y}%`, backgroundColor: group.color }}
+        className={`price-source-point combined-point ${hasOverlap ? "has-overlap" : `source-${representative.groupKey}`}`}
+        key={options.map((option) => `${option.groupKey}-${option.itemId}`).join("-")}
+        style={{ left: `${representative.x}%`, top: `${representative.y}%`, background: segmentedPointBackground(options) }}
+        onMouseEnter={() => {
+          if (hasOverlap) setPointPicker({ x: representative.x, y: representative.y, options });
+        }}
+        onFocus={() => {
+          if (hasOverlap) setPointPicker({ x: representative.x, y: representative.y, options });
+        }}
         onClick={() => {
           if (hasOverlap) {
-            setPointPicker({ x: point.x, y: point.y, options: overlappingOptions });
+            setPointPicker({ x: representative.x, y: representative.y, options });
             return;
           }
           setPointPicker(null);
-          onPointClick(group.key, point.item.id);
+          onPointClick(representative.groupKey, representative.itemId);
         }}
-        data-hover-label={money(point.item.total)}
-        title={`${group.label} ${point.index + 1}위 ${point.item.mall} ${money(point.item.total)}`}
-        aria-label={`${group.label} ${point.index + 1}위 ${point.item.mall} ${money(point.item.total)}${hasOverlap ? " 겹친 항목 선택" : " 행으로 이동"}`}
+        data-hover-label={hasOverlap ? `${options.length}개 겹침` : money(representative.total)}
+        title={hasOverlap ? options.map((option) => `${option.groupLabel} ${option.rank}위 ${option.mall} ${money(option.total)}`).join(" / ") : `${representative.groupLabel} ${representative.rank}위 ${representative.mall} ${money(representative.total)}`}
+        aria-label={hasOverlap ? `겹친 항목 ${options.length}개 선택` : `${representative.groupLabel} ${representative.rank}위 ${representative.mall} ${money(representative.total)} 행으로 이동`}
       >
-        <span>{point.index + 1}</span>
+        <span>{rankText}</span>
       </button>
     );
   };
@@ -3840,11 +3872,11 @@ function PriceLineOverview({ items, onPointClick }: { items: PriceItem[]; onPoin
           </div>
           <div className="price-source-plot price-source-plot-combined" role="group" aria-label="네이버 다나와 에누리 통합 가격 꺾은선 그래프">
             {renderGraphLines(groups)}
-            {groups.flatMap((group) => group.points.map((point) => renderGraphPoint(group, point, true)))}
+            {combinedPointClusters.map((cluster) => renderCombinedPointCluster(cluster))}
             {pointPicker && (
               <div className="price-point-picker" style={{ left: `${pointPicker.x}%`, top: `${pointPicker.y}%` }}>
                 <div className="price-point-picker-head">
-                  <strong>{money(pointPicker.options[0]?.total || 0)}</strong>
+                  <strong>{pointPicker.options.length > 1 ? `겹친 항목 ${pointPicker.options.length}개` : money(pointPicker.options[0]?.total || 0)}</strong>
                   <button onClick={() => setPointPicker(null)} aria-label="겹친 항목 선택 닫기">×</button>
                 </div>
                 <div className="price-point-picker-list">
@@ -3859,6 +3891,7 @@ function PriceLineOverview({ items, onPointClick }: { items: PriceItem[]; onPoin
                       <i style={{ backgroundColor: option.color }} />
                       <span>{option.groupLabel} {option.rank}위</span>
                       <em>{option.mall}</em>
+                      <b>{money(option.total)}</b>
                     </button>
                   ))}
                 </div>

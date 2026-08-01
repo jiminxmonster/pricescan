@@ -781,6 +781,11 @@ td { font-size: 14px; }
 .price-source-point:hover {
   transform: translate(-50%, -50%) translateY(-2px);
 }
+.price-source-point.has-overlap {
+  width: 24.2px;
+  height: 24.2px;
+  font-size: 9.5px;
+}
 .price-source-chart-combined .price-source-point:hover,
 .price-source-chart-combined .price-source-point:focus-visible {
   z-index: 4;
@@ -825,10 +830,16 @@ td { font-size: 14px; }
 .price-source-chart-combined .price-source-point:focus-visible::before {
   opacity: 1;
 }
+.price-source-chart-combined .price-source-point.has-overlap:hover::after,
+.price-source-chart-combined .price-source-point.has-overlap:focus-visible::after,
+.price-source-chart-combined .price-source-point.has-overlap:hover::before,
+.price-source-chart-combined .price-source-point.has-overlap:focus-visible::before {
+  opacity: 0;
+}
 .price-point-picker {
   position: absolute;
   z-index: 8;
-  min-width: 190px;
+  min-width: 260px;
   transform: translate(-50%, calc(-100% - 20px));
   border: 1px solid var(--line-strong);
   border-radius: 6px;
@@ -871,7 +882,7 @@ td { font-size: 14px; }
 }
 .price-point-picker-list button {
   display: grid;
-  grid-template-columns: 10px auto 1fr;
+  grid-template-columns: 10px auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 6px;
   border: 0;
@@ -906,6 +917,12 @@ td { font-size: 14px; }
   font-style: normal;
   font-weight: 900;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.price-point-picker-list b {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 950;
   white-space: nowrap;
 }
 .price-source-legend {
