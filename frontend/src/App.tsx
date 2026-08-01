@@ -577,6 +577,9 @@ const comparisonPlatformColors: Record<ComparisonPlatform, string> = {
   enuri: "#2563eb",
 };
 
+const CHART_POINT_OVERLAP_X_TOLERANCE = 1.5;
+const CHART_POINT_OVERLAP_Y_TOLERANCE = 9;
+
 function apiStatusLabel(status: string): string {
   if (status === "ready") return "설정 필요 없음";
   return statusLabel(status);
@@ -3735,15 +3738,20 @@ function PriceLineOverview({ items, onPointClick }: { items: PriceItem[]; onPoin
       y: point.y,
     }))
   ));
-  const combinedPointClusters = Array.from(
-    combinedPointOptions.reduce((acc, option) => {
-      const key = `${option.x.toFixed(2)}|${option.y.toFixed(2)}`;
-      const current = acc.get(key) || [];
-      current.push(option);
-      acc.set(key, current);
-      return acc;
-    }, new Map<string, PointPickerOption[]>()).values()
-  ).map((options) => options.sort((a, b) => a.rank - b.rank || a.groupLabel.localeCompare(b.groupLabel, "ko") || a.mall.localeCompare(b.mall, "ko")));
+  const combinedPointClusters = combinedPointOptions.reduce<PointPickerOption[][]>((clusters, option) => {
+    const cluster = clusters.find((candidate) => (
+      candidate.some((existing) => (
+        Math.abs(existing.x - option.x) <= CHART_POINT_OVERLAP_X_TOLERANCE
+        && Math.abs(existing.y - option.y) <= CHART_POINT_OVERLAP_Y_TOLERANCE
+      ))
+    ));
+    if (cluster) {
+      cluster.push(option);
+    } else {
+      clusters.push([option]);
+    }
+    return clusters;
+  }, []).map((options) => options.sort((a, b) => a.rank - b.rank || a.groupLabel.localeCompare(b.groupLabel, "ko") || a.mall.localeCompare(b.mall, "ko")));
   const hasRows = groups.some((group) => group.rows.length > 0);
   if (!hasRows) {
     return (
