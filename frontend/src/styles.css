@@ -691,22 +691,35 @@ td { font-size: 14px; }
 }
 .price-source-plot {
   position: relative;
-  height: 52px;
-  margin: 2px 10px 0;
+  height: 96px;
+  margin: 2px 8px 0;
+  overflow: visible;
 }
-.price-source-axis {
+.price-source-line-graph {
   position: absolute;
   left: 0;
   right: 0;
-  top: 24px;
-  height: 5px;
-  border-radius: 999px;
-  background: linear-gradient(90deg, #ff8a2a, #ffd7a8, #dce6f3);
+  top: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+.price-source-grid-line {
+  stroke: #e8eef6;
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+.price-source-polyline {
+  fill: none;
+  stroke: var(--brand);
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
 }
 .price-source-point {
   position: absolute;
-  top: 15px;
-  transform: translateX(-50%);
+  transform: translate(-50%, -50%);
   width: 24px;
   height: 24px;
   border: 2px solid #fff;
@@ -723,7 +736,7 @@ td { font-size: 14px; }
   background: var(--orange);
 }
 .price-source-point:hover {
-  transform: translateX(-50%) translateY(-2px);
+  transform: translate(-50%, -50%) translateY(-2px);
 }
 .price-source-lowest {
   border: 0;

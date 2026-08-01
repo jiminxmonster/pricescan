@@ -3684,7 +3684,18 @@ function PriceLineOverview({ items, onPointClick }: { items: PriceItem[]; onPoin
     const prices = rows.map((item) => item.total);
     const minPrice = prices.length ? Math.min(...prices) : 0;
     const maxPrice = prices.length ? Math.max(...prices) : 0;
-    return { ...source, rows, minPrice, maxPrice };
+    const points = rows.map((item, index) => {
+      const x = rows.length === 1 ? 50 : (index / (rows.length - 1)) * 100;
+      const y = maxPrice === minPrice ? 50 : 88 - ((item.total - minPrice) / (maxPrice - minPrice)) * 76;
+      return {
+        item,
+        index,
+        x: Math.min(Math.max(x, 0), 100),
+        y: Math.min(Math.max(y, 12), 88),
+      };
+    });
+    const linePoints = points.map((point) => `${point.x},${point.y}`).join(" ");
+    return { ...source, rows, points, linePoints, minPrice, maxPrice };
   });
   const hasRows = groups.some((group) => group.rows.length > 0);
   if (!hasRows) {
@@ -3705,18 +3716,22 @@ function PriceLineOverview({ items, onPointClick }: { items: PriceItem[]; onPoin
           {group.rows.length > 0 ? (
             <>
               <div className="price-source-range">
-                <span>{money(group.minPrice)}</span>
-                <span>{money(group.maxPrice)}</span>
+                <span>최저 {money(group.minPrice)}</span>
+                <span>최고 {money(group.maxPrice)}</span>
               </div>
-              <div className="price-source-plot" role="group" aria-label={`${group.label} 가격대`}>
-                <span className="price-source-axis" />
-                {group.rows.map((item, index) => {
-                  const position = group.maxPrice === group.minPrice ? 50 : ((item.total - group.minPrice) / (group.maxPrice - group.minPrice)) * 100;
+              <div className="price-source-plot" role="group" aria-label={`${group.label} 순위별 가격 꺾은선 그래프`}>
+                <svg className="price-source-line-graph" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+                  <line className="price-source-grid-line" x1="0" y1="12" x2="100" y2="12" />
+                  <line className="price-source-grid-line" x1="0" y1="50" x2="100" y2="50" />
+                  <line className="price-source-grid-line" x1="0" y1="88" x2="100" y2="88" />
+                  {group.points.length > 1 && <polyline className="price-source-polyline" points={group.linePoints} />}
+                </svg>
+                {group.points.map(({ item, index, x, y }) => {
                   return (
                     <button
                       className={`price-source-point ${index === 0 ? "lowest" : ""}`}
                       key={item.id}
-                      style={{ left: `${Math.min(Math.max(position, 0), 100)}%` }}
+                      style={{ left: `${x}%`, top: `${y}%` }}
                       onClick={() => onPointClick(group.key, item.id)}
                       title={`${index + 1}위 ${item.mall} ${money(item.total)}`}
                       aria-label={`${group.label} ${index + 1}위 ${item.mall} ${money(item.total)} 행으로 이동`}
