@@ -647,6 +647,105 @@ td { font-size: 14px; }
   gap: 6px;
   margin: 12px 0 8px;
 }
+.price-line-overview {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 12px 0 8px;
+}
+.price-line-overview.empty {
+  display: block;
+  border: 1px dashed #cfd8e5;
+  border-radius: 4px;
+  background: #fbfcfe;
+  color: var(--muted);
+  padding: 16px;
+  font-size: 13px;
+  font-weight: 900;
+}
+.price-source-chart {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #fff;
+  padding: 13px;
+  min-width: 0;
+}
+.price-source-chart-head,
+.price-source-range {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.price-source-chart-head strong {
+  color: var(--text);
+  font-size: 15px;
+}
+.price-source-chart-head span,
+.price-source-range span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 950;
+}
+.price-source-plot {
+  position: relative;
+  height: 52px;
+  margin: 2px 10px 0;
+}
+.price-source-axis {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 24px;
+  height: 5px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #ff8a2a, #ffd7a8, #dce6f3);
+}
+.price-source-point {
+  position: absolute;
+  top: 15px;
+  transform: translateX(-50%);
+  width: 24px;
+  height: 24px;
+  border: 2px solid #fff;
+  border-radius: 999px;
+  background: var(--brand);
+  box-shadow: 0 6px 14px rgba(18, 51, 94, 0.18);
+  color: #fff;
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 950;
+  line-height: 1;
+}
+.price-source-point.lowest {
+  background: var(--orange);
+}
+.price-source-point:hover {
+  transform: translateX(-50%) translateY(-2px);
+}
+.price-source-lowest {
+  border: 0;
+  border-radius: 4px;
+  background: #fff7ed;
+  color: #a24707;
+  padding: 8px;
+  font-size: 12px;
+  font-weight: 950;
+  text-align: left;
+  cursor: pointer;
+}
+.price-source-empty {
+  border: 1px dashed #d6dee9;
+  border-radius: 4px;
+  background: #fbfcfe;
+  color: var(--muted);
+  padding: 18px 10px;
+  font-size: 12px;
+  font-weight: 900;
+  text-align: center;
+}
 .result-view-tabs button {
   border: 1px solid var(--line);
   border-radius: 4px;
@@ -791,6 +890,14 @@ td { font-size: 14px; }
   background: #fbfcfe;
   color: #96a1af;
   font-weight: 800;
+}
+.lowest-line-table tr.line-row-highlight td {
+  animation: line-row-pulse 1.8s ease;
+}
+@keyframes line-row-pulse {
+  0% { background: #fff4db; }
+  65% { background: #fff4db; }
+  100% { background: inherit; }
 }
 .line-exclusion-reason {
   display: block;
@@ -2551,6 +2658,7 @@ textarea {
   .api-grid,
   .form-grid,
   .settings-grid,
+  .price-line-overview,
   .source-group-grid,
   .detail-filter-grid,
   .empty-slots,

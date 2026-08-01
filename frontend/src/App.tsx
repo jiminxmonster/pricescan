@@ -2014,6 +2014,18 @@ export default function App() {
                 {searchPayload.warnings?.map((warning) => <span key={warning}>{warning}</span>)}
               </div>
             )}
+            <PriceLineOverview
+              items={filteredSearchPayload.items}
+              onPointClick={(source, itemId) => {
+                setSearchResultView("line");
+                window.setTimeout(() => {
+                  const target = document.getElementById(`line-row-${source}-${itemId}`);
+                  target?.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
+                  target?.classList.add("line-row-highlight");
+                  window.setTimeout(() => target?.classList.remove("line-row-highlight"), 1800);
+                }, 80);
+              }}
+            />
             <div className="result-view-tabs" aria-label="상품검색 결과 메뉴">
               <button className={searchResultView === "line" ? "active" : ""} onClick={() => setSearchResultView("line")}>
                 최저가 라인모드
@@ -3663,6 +3675,70 @@ function ExtractionMethodBadges({ methods }: { methods: string[] }) {
   );
 }
 
+function PriceLineOverview({ items, onPointClick }: { items: PriceItem[]; onPointClick: (source: string, itemId: string) => void }) {
+  const groups = comparisonPlatformOptions.map((source) => {
+    const rows = items
+      .filter((item) => item.source === source.key && !item.is_excluded && item.status !== "abnormal" && item.total > 0)
+      .sort((a, b) => a.total - b.total || a.price - b.price || a.name.localeCompare(b.name, "ko"))
+      .slice(0, 10);
+    const prices = rows.map((item) => item.total);
+    const minPrice = prices.length ? Math.min(...prices) : 0;
+    const maxPrice = prices.length ? Math.max(...prices) : 0;
+    return { ...source, rows, minPrice, maxPrice };
+  });
+  const hasRows = groups.some((group) => group.rows.length > 0);
+  if (!hasRows) {
+    return (
+      <div className="price-line-overview empty">
+        <span>검색 후 네이버 · 다나와 · 에누리 가격대 그래프가 표시됩니다.</span>
+      </div>
+    );
+  }
+  return (
+    <div className="price-line-overview" aria-label="소스별 최저가 가격대 그래프">
+      {groups.map((group) => (
+        <section className="price-source-chart" key={group.key}>
+          <div className="price-source-chart-head">
+            <strong>{group.label}</strong>
+            <span>{group.rows.length}개</span>
+          </div>
+          {group.rows.length > 0 ? (
+            <>
+              <div className="price-source-range">
+                <span>{money(group.minPrice)}</span>
+                <span>{money(group.maxPrice)}</span>
+              </div>
+              <div className="price-source-plot" role="group" aria-label={`${group.label} 가격대`}>
+                <span className="price-source-axis" />
+                {group.rows.map((item, index) => {
+                  const position = group.maxPrice === group.minPrice ? 50 : ((item.total - group.minPrice) / (group.maxPrice - group.minPrice)) * 100;
+                  return (
+                    <button
+                      className={`price-source-point ${index === 0 ? "lowest" : ""}`}
+                      key={item.id}
+                      style={{ left: `${Math.min(Math.max(position, 0), 100)}%` }}
+                      onClick={() => onPointClick(group.key, item.id)}
+                      title={`${index + 1}위 ${item.mall} ${money(item.total)}`}
+                      aria-label={`${group.label} ${index + 1}위 ${item.mall} ${money(item.total)} 행으로 이동`}
+                    >
+                      <span>{index + 1}</span>
+                    </button>
+                  );
+                })}
+              </div>
+              <button className="price-source-lowest" onClick={() => onPointClick(group.key, group.rows[0].id)}>
+                최저 {group.rows[0].mall} · {money(group.rows[0].total)}
+              </button>
+            </>
+          ) : (
+            <div className="price-source-empty">정상 후보 없음</div>
+          )}
+        </section>
+      ))}
+    </div>
+  );
+}
+
 function compactLineProductName(rows: SearchResultRow[], keyword: string): string {
   const keywordText = normalize(keyword);
   const candidates = unique(rows.map((row) => row.name.trim()))
@@ -3892,7 +3968,7 @@ function SearchResultList({
       return sourceLabel(row.collectionSource);
     })();
     return (
-      <tr key={row.id} className={`${isPrepared ? "registered-row" : ""} ${lineExcluded ? "line-excluded-row" : ""}`}>
+      <tr id={`line-row-${row.collectionSource}-${row.id}`} key={row.id} className={`${isPrepared ? "registered-row" : ""} ${lineExcluded ? "line-excluded-row" : ""}`}>
         <td className="result-select-cell">
           <input
             type="checkbox"
