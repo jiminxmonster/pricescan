@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 const basePath = import.meta.env.BASE_URL.replace(/\/$/, "");
 const API_BASE = `${basePath}/api`;
@@ -346,7 +346,7 @@ type Order = {
   updated_at: string;
 };
 
-type MonitoringView = "waiting" | "active" | "selling" | "procurement" | "shipping" | "settlement";
+type MonitoringView = "monitoring_sales" | "procurement" | "shipping" | "settlement";
 
 type Channel = {
   name: string;
@@ -1445,7 +1445,7 @@ export default function App() {
       body: JSON.stringify(preparedPayload(item)),
     });
     setPreparedProducts((current) => [prepared, ...current.filter((entry) => entry.id !== prepared.id)]);
-    setNotice("모니터링 대기에 등록했습니다.");
+    setNotice("모니터링판매에 등록했습니다.");
     await refreshLogs();
   };
 
@@ -1474,7 +1474,7 @@ export default function App() {
       body: JSON.stringify(payload),
     });
     setPreparedProducts((current) => current.map((entry) => entry.id === saved.id ? saved : entry));
-    setNotice(payload.monitoring_enabled ? "모니터링을 시작했습니다." : "모니터링 대기로 이동했습니다.");
+    setNotice(payload.monitoring_enabled ? "모니터링을 시작했습니다." : "모니터링판매 대기 상태로 변경했습니다.");
   };
 
   const saveComparisonTargets = async (item: PreparedProduct, targets: { platform: ComparisonPlatform; comparison_url: string; enabled: boolean }[]) => {
@@ -2478,9 +2478,76 @@ function StatCard({ label, value }: { label: string; value: number }) {
 function monitoringMetrics(item: PreparedProduct, feeRate: number, sellerDisplayPrice: number) {
   const sourceCost = Math.max(item.display_price, 0) + Math.max(item.shipping_fee, 0);
   const fee = Math.round(Math.max(sellerDisplayPrice, 0) * Math.max(feeRate, 0) / 100);
-  const margin = Math.max(sellerDisplayPrice, 0) - sourceCost - fee;
+  const settlement = Math.max(sellerDisplayPrice, 0) - fee;
+  const margin = settlement - sourceCost;
   const compareRate = sourceCost > 0 ? ((Math.max(sellerDisplayPrice, 0) - sourceCost) / sourceCost) * 100 : 0;
-  return { sourceCost, fee, margin, compareRate };
+  const marginRate = sellerDisplayPrice > 0 ? (margin / sellerDisplayPrice) * 100 : 0;
+  return { sourceCost, fee, settlement, margin, compareRate, marginRate };
+}
+
+function settlementMetrics(displayPrice: number, cost: number, feeRate: number) {
+  const fee = Math.round(Math.max(displayPrice, 0) * Math.max(feeRate, 0) / 100);
+  const settlement = Math.max(displayPrice, 0) - fee;
+  const margin = settlement - Math.max(cost, 0);
+  const marginRate = displayPrice > 0 ? (margin / displayPrice) * 100 : 0;
+  return { fee, settlement, margin, marginRate };
+}
+
+function MonitoringPriceStack({ registeredPrice, exposurePrice, shippingFee = 0 }: { registeredPrice: number; exposurePrice: number; shippingFee?: number }) {
+  return (
+    <span className="monitoring-price-stack">
+      <s>등록가 {money(registeredPrice)}</s>
+      <b>노출가 {money(exposurePrice)}</b>
+      {shippingFee > 0 && <small>배송비 {money(shippingFee)}</small>}
+    </span>
+  );
+}
+
+function MonitoringEditablePriceInputs({
+  salePrice,
+  displayPrice,
+  onSalePrice,
+  onDisplayPrice,
+}: {
+  salePrice: number;
+  displayPrice: number;
+  onSalePrice: (value: number) => void;
+  onDisplayPrice: (value: number) => void;
+}) {
+  return (
+    <span className="price-inputs monitoring-price-inputs">
+      <label><span>등록가</span><input type="number" step="1000" min="0" value={salePrice} onChange={(event) => onSalePrice(Number(event.target.value))} /></label>
+      <label><span>노출가</span><input type="number" step="1000" min="0" value={displayPrice} onChange={(event) => onDisplayPrice(Number(event.target.value))} /></label>
+    </span>
+  );
+}
+
+function monitoringIdentity(item: PreparedProduct) {
+  const identity = inferProductIdentity(item.title);
+  return {
+    productType: item.product_type || inferProductType(item.title),
+    modelName: item.model_name || identity.modelName || item.title,
+  };
+}
+
+function MonitoringProductHead({ item, active }: { item: PreparedProduct; active: boolean }) {
+  const identity = monitoringIdentity(item);
+  return (
+    <div className="monitoring-product-head">
+      <div><span>상품종류</span><strong>{identity.productType}</strong></div>
+      <div>
+        <span>모델명</span>
+        {item.source_url ? <a href={item.source_url} target="_blank" rel="noreferrer">{identity.modelName}</a> : <strong>{identity.modelName}</strong>}
+      </div>
+      <em className={active ? "pill green" : "pill"}>{active ? "모니터링 ON" : "대기"}</em>
+    </div>
+  );
+}
+
+function lowestCompetitorByPlatform(competitors: CompetitorSnapshot[], platform: ComparisonPlatform) {
+  return [...competitors]
+    .filter((competitor) => competitor.platform === platform && !competitor.is_excluded && competitor.total_price > 0)
+    .sort((a, b) => a.total_price - b.total_price || a.rank - b.rank || a.mall.localeCompare(b.mall, "ko"))[0];
 }
 
 function MonitoringWaitingRow({ item, onUpdate, onDelete }: {
@@ -2491,28 +2558,35 @@ function MonitoringWaitingRow({ item, onUpdate, onDelete }: {
   const [feeRate, setFeeRate] = useState(item.fee_rate || 0);
   const sellerDisplayPrice = item.seller_display_price || item.display_price;
   const metrics = monitoringMetrics(item, feeRate, sellerDisplayPrice);
-  const identity = inferProductIdentity(item.title);
+  const identity = monitoringIdentity(item);
   const enableMonitoring = () => onUpdate(item, {
     monitoring_enabled: 1,
     fee_rate: feeRate,
     seller_sale_price: item.seller_sale_price || item.sale_price,
     seller_display_price: sellerDisplayPrice,
-    product_type: item.product_type || inferProductType(item.title),
-    model_name: item.model_name || identity.modelName,
+    product_type: identity.productType,
+    model_name: identity.modelName,
   });
   return (
-    <tr>
-      <td>{item.product_type || inferProductType(item.title)}</td>
-      <td className="monitoring-model">{item.source_url ? <a href={item.source_url} target="_blank" rel="noreferrer">{item.model_name || identity.modelName || item.title}</a> : (item.model_name || identity.modelName || item.title)}</td>
-      <td>{item.mall || sourceLabel(item.source)}</td>
-      <td>{money(item.sale_price)}</td>
-      <td>{money(item.display_price)}</td>
-      <td><label className="inline-number"><input type="number" min="0" max="100" step="0.1" value={feeRate} onChange={(event) => setFeeRate(Number(event.target.value))} /><span>%</span></label></td>
-      <td>{money(metrics.sourceCost)}</td>
-      <td className={metrics.margin >= 0 ? "positive-value" : "negative-value"}>{money(metrics.margin)}</td>
-      <td><button className="monitoring-toggle" aria-pressed="false" onClick={enableMonitoring}><span />OFF</button></td>
-      <td><button className="btn small danger" onClick={() => onDelete(item.id)}>삭제</button></td>
-    </tr>
+    <article className="monitoring-product-card">
+      <MonitoringProductHead item={item} active={false} />
+      <div className="monitoring-table-wrap">
+        <table className="monitoring-data-table monitoring-card-table">
+          <thead><tr><th>쇼핑몰</th><th>소싱가</th><th>수수료</th><th>예상정산</th><th>예상마진</th><th>상태</th><th>관리</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>{item.mall || sourceLabel(item.source)}</td>
+              <td><MonitoringPriceStack registeredPrice={item.sale_price} exposurePrice={item.display_price} shippingFee={item.shipping_fee} /></td>
+              <td><label className="inline-number"><input type="number" min="0" max="100" step="0.1" value={feeRate} onChange={(event) => setFeeRate(Number(event.target.value))} /><span>%</span></label><small>{money(metrics.fee)}</small></td>
+              <td>{money(metrics.settlement)}</td>
+              <td><span className={metrics.margin >= 0 ? "positive-value" : "negative-value"}>{money(metrics.margin)}</span><small>{metrics.marginRate.toFixed(1)}%</small></td>
+              <td><button className="monitoring-toggle" aria-pressed="false" onClick={enableMonitoring}><span />OFF</button></td>
+              <td><button className="btn small danger" onClick={() => onDelete(item.id)}>삭제</button></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </article>
   );
 }
 
@@ -2535,8 +2609,22 @@ function MonitoringActiveRow({ item, onUpdate, onSell, onSaveComparisonTargets, 
     return acc;
   }, {} as Record<ComparisonPlatform, string>));
   const metrics = monitoringMetrics(item, feeRate, sellerDisplayPrice);
-  const identity = inferProductIdentity(item.title);
+  const identity = monitoringIdentity(item);
   const competitors = item.competitors || [];
+  const lowestByPlatform = comparisonPlatformOptions.map((platform) => ({
+    ...platform,
+    competitor: lowestCompetitorByPlatform(competitors, platform.key),
+  }));
+  const marginScenarios = lowestByPlatform.flatMap((source) => (
+    lowestByPlatform
+      .filter((target) => target.key !== source.key && source.competitor && target.competitor)
+      .map((target) => {
+        const targetTotal = target.competitor?.total_price || 0;
+        const sourceCost = source.competitor?.total_price || 0;
+        const scenario = settlementMetrics(targetTotal, sourceCost, feeRate);
+        return { source, target, targetTotal, sourceCost, ...scenario };
+      })
+  ));
   const hasComparisonUrl = comparisonPlatformOptions.some((platform) => targetUrls[platform.key]?.trim());
   useEffect(() => {
     setTargetUrls(comparisonPlatformOptions.reduce((acc, platform) => {
@@ -2552,8 +2640,8 @@ function MonitoringActiveRow({ item, onUpdate, onSell, onSaveComparisonTargets, 
     auto_discount_enabled: autoDiscount ? 1 : 0,
     auto_discount_type: discountType,
     auto_discount_value: discountValue,
-    product_type: item.product_type || inferProductType(item.title),
-    model_name: item.model_name || identity.modelName,
+    product_type: identity.productType,
+    model_name: identity.modelName,
   });
   const saveTargets = () => onSaveComparisonTargets(item, comparisonPlatformOptions.map((platform) => ({
     platform: platform.key,
@@ -2561,23 +2649,26 @@ function MonitoringActiveRow({ item, onUpdate, onSell, onSaveComparisonTargets, 
     enabled: Boolean(targetUrls[platform.key]?.trim()),
   })));
   return (
-    <Fragment>
-      <tr>
-        <td>{item.product_type || inferProductType(item.title)}</td>
-        <td className="monitoring-model">{item.source_url ? <a href={item.source_url} target="_blank" rel="noreferrer">{item.model_name || identity.modelName || item.title}</a> : (item.model_name || identity.modelName || item.title)}</td>
-        <td>{item.mall || sourceLabel(item.source)}</td>
-        <td><span className="stacked-price">판매 {money(item.sale_price)}<b>노출 {money(item.display_price)}</b></span></td>
-        <td><span className="price-inputs"><input type="number" step="1000" min="0" value={sellerSalePrice} onChange={(event) => setSellerSalePrice(Number(event.target.value))} /><input type="number" step="1000" min="0" value={sellerDisplayPrice} onChange={(event) => setSellerDisplayPrice(Number(event.target.value))} /></span></td>
-        <td className={metrics.compareRate >= 0 ? "positive-value" : "negative-value"}>{metrics.compareRate.toFixed(1)}%</td>
-        <td><label className="inline-number"><input type="number" min="0" max="100" step="0.1" value={feeRate} onChange={(event) => setFeeRate(Number(event.target.value))} /><span>%</span></label><small>{money(metrics.fee)}</small></td>
-        <td>{money(metrics.sourceCost)}</td>
-        <td className={metrics.margin >= 0 ? "positive-value" : "negative-value"}>{money(metrics.margin)}</td>
-        <td><div className="auto-discount-control"><label><input type="checkbox" checked={autoDiscount} onChange={(event) => setAutoDiscount(event.target.checked)} /> 자동인하</label><span>최저가 대비</span><input type="number" min="0" step={discountType === "amount" ? 1000 : 0.1} value={discountValue} onChange={(event) => setDiscountValue(Number(event.target.value))} /><select value={discountType} onChange={(event) => setDiscountType(event.target.value as "amount" | "percent")}><option value="amount">원</option><option value="percent">%</option></select></div></td>
-        <td><div className="monitoring-row-actions"><button className="btn small orange" onClick={() => onSell(item)}>{item.listing_draft_id ? "등록폼" : "판매"}</button><button className="btn small primary" onClick={() => save(true)}>저장</button><button className="monitoring-toggle on" aria-pressed="true" onClick={() => save(false)}><span />ON</button></div></td>
-      </tr>
-      <tr className="comparison-detail-row">
-        <td colSpan={11}>
-          <div className="comparison-monitor-box">
+    <article className="monitoring-product-card active">
+      <MonitoringProductHead item={item} active />
+      <div className="monitoring-table-wrap">
+        <table className="monitoring-data-table monitoring-card-table active-card-table">
+          <thead><tr><th>소싱몰</th><th>소싱가</th><th>셀러 대응가</th><th>수수료</th><th>예상정산</th><th>예상마진</th><th>자동인하</th><th>관리</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>{item.mall || sourceLabel(item.source)}</td>
+              <td><MonitoringPriceStack registeredPrice={item.sale_price} exposurePrice={item.display_price} shippingFee={item.shipping_fee} /></td>
+              <td><MonitoringEditablePriceInputs salePrice={sellerSalePrice} displayPrice={sellerDisplayPrice} onSalePrice={setSellerSalePrice} onDisplayPrice={setSellerDisplayPrice} /></td>
+              <td><label className="inline-number"><input type="number" min="0" max="100" step="0.1" value={feeRate} onChange={(event) => setFeeRate(Number(event.target.value))} /><span>%</span></label><small>{money(metrics.fee)}</small></td>
+              <td>{money(metrics.settlement)}</td>
+              <td><span className={metrics.margin >= 0 ? "positive-value" : "negative-value"}>{money(metrics.margin)}</span><small>{metrics.marginRate.toFixed(1)}%</small></td>
+              <td><div className="auto-discount-control"><label><input type="checkbox" checked={autoDiscount} onChange={(event) => setAutoDiscount(event.target.checked)} /> 자동인하</label><span>최저가 대비</span><input type="number" min="0" step={discountType === "amount" ? 1000 : 0.1} value={discountValue} onChange={(event) => setDiscountValue(Number(event.target.value))} /><select value={discountType} onChange={(event) => setDiscountType(event.target.value as "amount" | "percent")}><option value="amount">원</option><option value="percent">%</option></select></div></td>
+              <td><div className="monitoring-row-actions"><button className="btn small orange" onClick={() => onSell(item)}>{item.listing_draft_id ? "등록폼" : "판매"}</button><button className="btn small primary" onClick={() => save(true)}>저장</button><button className="monitoring-toggle on" aria-pressed="true" onClick={() => save(false)}><span />ON</button></div></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div className="comparison-monitor-box">
             <div className="comparison-monitor-head">
               <div>
                 <strong>가격비교 URL 추적</strong>
@@ -2631,10 +2722,37 @@ function MonitoringActiveRow({ item, onUpdate, onSell, onSaveComparisonTargets, 
                 );
               })}
             </div>
+            <div className="comparison-margin-simulator">
+              <div className="comparison-monitor-head compact">
+                <div>
+                  <strong>채널 이동 마진 시뮬레이션</strong>
+                  <span>각 소스 최저가를 다른 채널 최저가 기준으로 판매할 때 수수료 차감 후 예상정산과 마진율을 계산합니다.</span>
+                </div>
+              </div>
+              {marginScenarios.length > 0 ? (
+                <div className="monitoring-table-wrap">
+                  <table className="monitoring-data-table simulator-table">
+                    <thead><tr><th>소싱 최저가</th><th>판매 기준가</th><th>등록/노출 기준</th><th>수수료</th><th>예상정산</th><th>예상마진</th></tr></thead>
+                    <tbody>
+                      {marginScenarios.map((scenario) => (
+                        <tr key={`${scenario.source.key}-${scenario.target.key}`}>
+                          <td><strong>{scenario.source.label}</strong><small>{scenario.source.competitor?.mall} · {money(scenario.sourceCost)}</small></td>
+                          <td><strong>{scenario.target.label}</strong><small>{scenario.target.competitor?.mall} · {money(scenario.targetTotal)}</small></td>
+                          <td><MonitoringPriceStack registeredPrice={scenario.target.competitor?.sale_price || scenario.targetTotal} exposurePrice={scenario.targetTotal} /></td>
+                          <td>{money(scenario.fee)}<small>{feeRate.toFixed(1)}%</small></td>
+                          <td>{money(scenario.settlement)}</td>
+                          <td><span className={scenario.margin >= 0 ? "positive-value" : "negative-value"}>{money(scenario.margin)}</span><small>{scenario.marginRate.toFixed(1)}%</small></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="simulator-empty">네이버·다나와·에누리 경쟁가 스캔 후 채널 이동 마진을 계산합니다.</p>
+              )}
+            </div>
           </div>
-        </td>
-      </tr>
-    </Fragment>
+    </article>
   );
 }
 
@@ -2679,61 +2797,30 @@ function MonitoringBoard({
   onUpdateProcurement: (order: Order, status: string, source?: PreparedProduct, updates?: Partial<Order>) => void;
   onOpenApi: () => void;
 }) {
-  const [view, setView] = useState<MonitoringView>("waiting");
-  const waitingProducts = preparedProducts.filter((item) => !Boolean(item.monitoring_enabled));
-  const activeProducts = preparedProducts.filter((item) => Boolean(item.monitoring_enabled));
+  const [view, setView] = useState<MonitoringView>("monitoring_sales");
   const procurementOrders = orders.filter((order) => !["shipped", "cancelled"].includes(order.procurement_status));
   const shippingOrders = orders.filter((order) => ["ordered", "tracking_pending", "shipped"].includes(order.procurement_status));
   const workflow = [
-    { key: "waiting" as MonitoringView, step: "2", label: "모니터링 대기", count: waitingProducts.length },
-    { key: "active" as MonitoringView, step: "3", label: "모니터링 중", count: activeProducts.length },
-    { key: "selling" as MonitoringView, step: "4", label: "판매상품", count: smartstorePayload.count },
+    { key: "monitoring_sales" as MonitoringView, step: "2", label: "모니터링판매", count: preparedProducts.length + smartstorePayload.count },
     { key: "procurement" as MonitoringView, step: "5", label: "주문·발주", count: procurementOrders.length },
     { key: "shipping" as MonitoringView, step: "6", label: "배송·클레임", count: shippingOrders.length },
     { key: "settlement" as MonitoringView, step: "7", label: "정산", count: 0 },
   ];
 
-  const waitingPanel = (
-    <section className="monitoring-panel">
-      <div className="monitoring-panel-head">
-        <div><strong>모니터링 대기</strong><span>검색에서 등록한 상품을 검토하고 ON으로 전환합니다.</span></div>
-        <b>{waitingProducts.length}</b>
-      </div>
-      <div className="monitoring-table-wrap">
-        <table className="monitoring-data-table"><thead><tr><th>상품종류</th><th>모델명</th><th>쇼핑몰</th><th>판매가</th><th>노출가</th><th>수수료</th><th>예상정산</th><th>최저가 대비 마진</th><th>모니터링</th><th>관리</th></tr></thead><tbody>
-          {waitingProducts.map((item) => <MonitoringWaitingRow key={item.id} item={item} onUpdate={onUpdateMonitoring} onDelete={onDeletePrepared} />)}
-        </tbody></table>
-        {waitingProducts.length === 0 && <div className="monitoring-empty">상품검색에서 `모니터링 등록`을 눌러 추가하세요.</div>}
-      </div>
-    </section>
-  );
-
-  const activePanel = (
-    <section className="monitoring-panel">
-      <div className="monitoring-panel-head"><div><strong>모니터링 중</strong><span>ON 상태 상품의 원소스 가격과 셀러 대응가를 함께 관리합니다.</span></div><b>{activeProducts.length}</b></div>
-      <div className="monitoring-table-wrap">
-        <table className="monitoring-data-table active-table"><thead><tr><th>상품종류</th><th>모델명</th><th>쇼핑몰</th><th>상대방<br />판매가/노출가</th><th>셀러대응<br />판매가/노출가</th><th>비교율</th><th>수수료</th><th>예상정산</th><th>마진</th><th>자동인하</th><th>관리</th></tr></thead><tbody>
-          {activeProducts.map((item) => (
-            <MonitoringActiveRow
-              key={item.id}
-              item={item}
-              onUpdate={onUpdateMonitoring}
-              onSell={onSell}
-              onSaveComparisonTargets={onSaveComparisonTargets}
-              onScanComparisonTargets={onScanComparisonTargets}
-              comparisonScanning={comparisonScanningId === item.id}
-            />
-          ))}
-        </tbody></table>
-        {activeProducts.length === 0 && <div className="monitoring-empty">대기 목록에서 모니터링을 ON으로 전환하세요.</div>}
-      </div>
-    </section>
-  );
+  const findSmartstoreMonitoringMatch = (item: SmartstoreProduct) => {
+    const smartText = normalize(`${item.name} ${item.seller_management_code}`);
+    return preparedProducts.find((candidate) => {
+      const identity = monitoringIdentity(candidate);
+      const modelText = normalize(identity.modelName);
+      const titleText = normalize(candidate.title);
+      return Boolean(modelText && smartText.includes(modelText)) || Boolean(titleText && smartText.includes(titleText));
+    });
+  };
 
   const sellingPanel = (
     <section className="monitoring-panel">
       <div className="monitoring-panel-head">
-        <div><strong>스마트스토어 판매상품</strong><span>판매상태 · 가격 · 재고 · 원소스 연결 관리</span></div>
+        <div><strong>판매중 상품</strong><span>등록가와 노출가를 함께 보고, 모니터링 상품 기준 예상정산/마진을 확인합니다.</span></div>
         <b>{smartstorePayload.count}</b>
       </div>
       {!smartstoreActive && (
@@ -2745,26 +2832,67 @@ function MonitoringBoard({
       {smartstoreActive && smartstoreError && <div className="source-warning"><span>{smartstoreError}</span></div>}
       {smartstoreActive && smartstoreLoading && <div className="monitoring-empty">판매상품 조회 중...</div>}
       {smartstoreActive && !smartstoreLoading && (
-        <div className="monitoring-list">
-          {smartstorePayload.items.map((item) => (
-            <article className="monitoring-item" key={item.channel_product_no || item.id}>
-              <div className="monitoring-item-title">
-                {item.url ? <a href={item.url} target="_blank" rel="noreferrer">{item.name}</a> : <strong>{item.name}</strong>}
-                <span className="pill green">{item.status || "판매중"}</span>
-              </div>
-              <p>채널상품번호 {item.channel_product_no || "-"} · 재고 {item.stock_quantity.toLocaleString("ko-KR")}</p>
-              <div className="source-health-row warning"><span>원소스 매핑 확인</span><span>가격·재고 자동감시는 원소스 연결 후 시작</span></div>
-              <div className="monitoring-price"><strong>{money(item.discounted_price || item.sale_price)}</strong><span>배송비 {money(item.delivery_fee)}</span></div>
-              <div className="monitoring-actions">
-                <button className="btn small" onClick={() => onCopySmartstore(item)}>예비로 복사</button>
-                {item.url && <a className="btn small" href={item.url} target="_blank" rel="noreferrer">상품 보기</a>}
-              </div>
-            </article>
-          ))}
+        <div className="monitoring-table-wrap">
+          <table className="monitoring-data-table selling-table">
+            <thead><tr><th>상품명</th><th>상태/재고</th><th>등록가/노출가</th><th>배송비</th><th>모니터링 비교</th><th>예상정산/마진</th><th>관리</th></tr></thead>
+            <tbody>
+              {smartstorePayload.items.map((item) => {
+                const match = findSmartstoreMonitoringMatch(item);
+                const exposurePrice = item.discounted_price || item.sale_price;
+                const sourceCost = match ? (match.lowest_competitor_total || match.display_price + match.shipping_fee) : 0;
+                const metrics = match ? settlementMetrics(exposurePrice, sourceCost, match.fee_rate || 0) : null;
+                return (
+                  <tr key={item.channel_product_no || item.id}>
+                    <td className="monitoring-model">{item.url ? <a href={item.url} target="_blank" rel="noreferrer">{item.name}</a> : item.name}<small>채널상품번호 {item.channel_product_no || "-"}</small></td>
+                    <td><span className="pill green">{item.status || "판매중"}</span><small>재고 {item.stock_quantity.toLocaleString("ko-KR")}</small></td>
+                    <td><MonitoringPriceStack registeredPrice={item.sale_price} exposurePrice={exposurePrice} /></td>
+                    <td>{money(item.delivery_fee)}</td>
+                    <td>{match ? <span className="monitoring-match"><b>{monitoringIdentity(match).modelName}</b><small>비교원가 {money(sourceCost)}</small></span> : <span className="source-health-row warning"><span>모니터링 상품 매핑 대기</span></span>}</td>
+                    <td>{metrics ? <span className="monitoring-settlement"><b>{money(metrics.settlement)}</b><small className={metrics.margin >= 0 ? "positive-value" : "negative-value"}>{money(metrics.margin)} · {metrics.marginRate.toFixed(1)}%</small></span> : "계산 대기"}</td>
+                    <td><div className="monitoring-row-actions"><button className="btn small" onClick={() => onCopySmartstore(item)}>모니터링 상품으로 복사</button>{item.url && <a className="btn small" href={item.url} target="_blank" rel="noreferrer">상품 보기</a>}</div></td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
           {smartstorePayload.items.length === 0 && !smartstoreError && <div className="monitoring-empty">조회된 스마트스토어 판매상품이 없습니다.</div>}
         </div>
       )}
     </section>
+  );
+
+  const monitoringProductsPanel = (
+    <section className="monitoring-panel">
+      <div className="monitoring-panel-head">
+        <div><strong>모니터링 상품</strong><span>상품검색에서 모니터링 등록한 상품입니다. 대기와 ON 상태를 한 곳에서 관리합니다.</span></div>
+        <b>{preparedProducts.length}</b>
+      </div>
+      <div className="monitoring-product-list">
+        {preparedProducts.map((item) => (
+          Boolean(item.monitoring_enabled) ? (
+            <MonitoringActiveRow
+              key={item.id}
+              item={item}
+              onUpdate={onUpdateMonitoring}
+              onSell={onSell}
+              onSaveComparisonTargets={onSaveComparisonTargets}
+              onScanComparisonTargets={onScanComparisonTargets}
+              comparisonScanning={comparisonScanningId === item.id}
+            />
+          ) : (
+            <MonitoringWaitingRow key={item.id} item={item} onUpdate={onUpdateMonitoring} onDelete={onDeletePrepared} />
+          )
+        ))}
+        {preparedProducts.length === 0 && <div className="monitoring-empty">상품검색에서 `모니터링 등록`을 눌러 추가하세요.</div>}
+      </div>
+    </section>
+  );
+
+  const monitoringSalesPanel = (
+    <div className="monitoring-sales-layout">
+      {sellingPanel}
+      {monitoringProductsPanel}
+    </div>
   );
 
   const orderPanel = (shippingOnly = false) => {
@@ -2839,12 +2967,10 @@ function MonitoringBoard({
       <div className="workflow-rule">
         <strong>운영 순서</strong>
         <span>1. 상품검색·모니터링 등록</span>
-        <span>2. 모니터링 대기에서 ON</span>
-        <span>3. 모니터링 중 가격관리</span>
+        <span>2. 모니터링판매에서 가격·마진 시뮬레이션</span>
+        <span>3. 주문·발주 처리</span>
       </div>
-      {view === "waiting" && waitingPanel}
-      {view === "active" && activePanel}
-      {view === "selling" && sellingPanel}
+      {view === "monitoring_sales" && monitoringSalesPanel}
       {view === "procurement" && orderPanel(false)}
       {view === "shipping" && orderPanel(true)}
       {view === "settlement" && <div className="monitoring-empty settlement-empty">정산 연동은 판매채널 주문·발주 흐름이 안정화된 다음 단계에서 연결합니다.</div>}

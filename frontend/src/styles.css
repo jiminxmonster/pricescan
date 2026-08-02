@@ -2200,7 +2200,7 @@ textarea {
 }
 .workflow-rail {
   display: grid;
-  grid-template-columns: repeat(6, minmax(120px, 1fr));
+  grid-template-columns: repeat(4, minmax(142px, 1fr));
   gap: 6px;
   overflow-x: auto;
   padding-bottom: 2px;
@@ -2295,6 +2295,58 @@ textarea {
   overflow: auto;
   background: var(--line);
 }
+.monitoring-sales-layout,
+.monitoring-product-list {
+  display: grid;
+  gap: 14px;
+}
+.monitoring-product-list {
+  padding: 14px;
+  background: #fff;
+}
+.monitoring-product-card {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #fff;
+  overflow: hidden;
+}
+.monitoring-product-card.active {
+  border-color: #c8d6e6;
+}
+.monitoring-product-head {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+  border-bottom: 1px solid var(--line);
+  background: #f8fafc;
+  padding: 12px;
+}
+.monitoring-product-head div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+.monitoring-product-head span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 900;
+}
+.monitoring-product-head strong,
+.monitoring-product-head a {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-weight: 950;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  text-decoration: none;
+}
+.monitoring-product-head a {
+  color: var(--brand);
+}
 .monitoring-table-wrap {
   overflow-x: auto;
   background: #fff;
@@ -2306,6 +2358,18 @@ textarea {
   font-size: 12px;
 }
 .monitoring-data-table.active-table { min-width: 1540px; }
+.monitoring-card-table {
+  min-width: 980px;
+}
+.monitoring-card-table.active-card-table {
+  min-width: 1320px;
+}
+.selling-table {
+  min-width: 1280px;
+}
+.simulator-table {
+  min-width: 1020px;
+}
 .monitoring-data-table th {
   position: sticky;
   top: 0;
@@ -2375,15 +2439,49 @@ textarea {
   color: #087443;
 }
 .monitoring-toggle.on span { background: #0fa968; }
-.stacked-price {
+.stacked-price,
+.monitoring-price-stack,
+.monitoring-settlement,
+.monitoring-match {
   display: grid;
   gap: 4px;
   color: var(--muted);
 }
-.stacked-price b { color: var(--text); }
+.stacked-price b,
+.monitoring-price-stack b,
+.monitoring-settlement b,
+.monitoring-match b {
+  color: var(--text);
+}
+.monitoring-price-stack s {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 900;
+  text-decoration-thickness: 2px;
+}
+.monitoring-price-stack b {
+  font-size: 13px;
+  font-weight: 950;
+}
+.monitoring-price-stack small,
+.monitoring-settlement small,
+.monitoring-match small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 900;
+}
 .price-inputs {
   display: grid;
   gap: 5px;
+}
+.monitoring-price-inputs label {
+  display: grid;
+  gap: 3px;
+}
+.monitoring-price-inputs label span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 900;
 }
 .price-inputs input {
   width: 112px;
@@ -2432,10 +2530,16 @@ textarea {
   padding: 13px;
   border-top: 1px solid #e4ebf3;
 }
+.monitoring-product-card > .comparison-monitor-box {
+  border-top: 0;
+}
 .comparison-monitor-head {
   display: flex;
   justify-content: space-between;
   gap: 12px;
+}
+.comparison-monitor-head.compact {
+  align-items: start;
 }
 .comparison-monitor-head > div:first-child {
   display: grid;
@@ -2538,6 +2642,20 @@ textarea {
 }
 .comparison-snapshot-item.excluded {
   color: var(--muted);
+}
+.comparison-margin-simulator {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #fff;
+  padding: 10px;
+}
+.simulator-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
 }
 .sell-channel-modal {
   width: min(760px, calc(100vw - 52px));
