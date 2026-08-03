@@ -98,4 +98,4 @@ https://pricescan.d2blue.com/pricescan/
 
 ## 다음 단계
 
-현재는 React/Vite 프론트엔드, FastAPI 백엔드, SQLite 저장소, Docker Compose 실행까지 복구했습니다. 가격검색은 네이버쇼핑/다나와/에누리 검색 페이지 수집을 기준으로 두고, 다음 단계에서 가격 이력 DB 고도화, 회원별 워크스페이스, 송장 출력 연동을 붙이면 됩니다.
+현재는 React/Vite 프론트엔드, FastAPI 백엔드, SQLite 저장소, Docker Compose 실행까지 복구했습니다. 가격검색은 네이버쇼핑/다나와/에누리/쿠팡 검색 페이지 수집을 기준으로 두고, 다음 단계에서 가격 이력 DB 고도화, 회원별 워크스페이스, 송장 출력 연동을 붙이면 됩니다.

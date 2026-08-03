@@ -66,12 +66,14 @@ DEFAULT_COLLECTION_LIMITS = {
     "naver": int(os.getenv("NAVER_DAILY_REQUEST_LIMIT", "200")),
     "danawa": int(os.getenv("DANAWA_DAILY_REQUEST_LIMIT", "100")),
     "enuri": int(os.getenv("ENURI_DAILY_REQUEST_LIMIT", "60")),
+    "coupang": int(os.getenv("COUPANG_DAILY_REQUEST_LIMIT", "60")),
 }
-COMPARISON_TARGET_PLATFORMS = {"naver", "danawa", "enuri"}
+COMPARISON_TARGET_PLATFORMS = {"naver", "danawa", "enuri", "coupang"}
 COMPARISON_PLATFORM_LABELS = {
     "naver": "네이버",
     "danawa": "다나와",
     "enuri": "에누리",
+    "coupang": "쿠팡",
 }
 MAX_COMPETITOR_SNAPSHOT_ROWS = 5
 SEARCH_LINE_SOURCE_LIMIT = 80
@@ -560,7 +562,7 @@ def init_db() -> None:
             """
             UPDATE api_keys
             SET status = 'ready'
-            WHERE platform IN ('naver', 'danawa', 'enuri') AND status = 'not_configured'
+            WHERE platform IN ('naver', 'danawa', 'enuri', 'coupang') AND status = 'not_configured'
             """
         )
         # Remove fixed recovery-demo orders so the operations board only shows
@@ -710,11 +712,11 @@ class ComparisonTargetInput(BaseModel):
 
 
 class ComparisonTargetsPayload(BaseModel):
-    targets: list[ComparisonTargetInput] = Field(default_factory=list, max_length=3)
+    targets: list[ComparisonTargetInput] = Field(default_factory=list, max_length=4)
 
 
 class ComparisonScanPayload(BaseModel):
-    platforms: list[str] = Field(default_factory=list, max_length=3)
+    platforms: list[str] = Field(default_factory=list, max_length=4)
 
 
 def prepared_product_dedupe_key(payload: PreparedProductPayload) -> str:
@@ -735,7 +737,7 @@ def parse_json_text(value: str | None, fallback: Any) -> Any:
 def normalize_comparison_platform(value: str) -> str:
     platform = value.strip().lower()
     if platform not in COMPARISON_TARGET_PLATFORMS:
-        raise HTTPException(status_code=422, detail="comparison platform must be naver, danawa, or enuri")
+        raise HTTPException(status_code=422, detail="comparison platform must be naver, danawa, enuri, or coupang")
     return platform
 
 
@@ -1930,6 +1932,171 @@ def fetch_enuri_products(query: str, display: int = 30) -> list[dict[str, Any]]:
     return products
 
 
+def coupang_search_url(query: str, sort_mode: str = "lowest", display: int = 40) -> str:
+    sorter = "salePriceAsc" if sort_mode == "lowest" else "scoreDesc"
+    params = urllib.parse.urlencode(
+        {
+            "component": "",
+            "q": query,
+            "channel": "user",
+            "listSize": min(max(display, 1), 100),
+            "sorter": sorter,
+        }
+    )
+    return f"https://www.coupang.com/np/search?{params}"
+
+
+def parse_coupang_products(document: str, search_url: str, limit: int = 30) -> list[dict[str, Any]]:
+    starts = [
+        match.start()
+        for match in re.finditer(
+            r"<li\b[^>]*class=[\"'][^\"']*search-product[^\"']*[\"']",
+            document,
+            flags=re.IGNORECASE,
+        )
+    ]
+    blocks = [document[start : starts[index + 1] if index + 1 < len(starts) else len(document)] for index, start in enumerate(starts)]
+    if not blocks:
+        blocks = [
+            match.group(0)
+            for match in re.finditer(
+                r"<(?P<tag>li|div)\b[^>]*(?:data-product-id|data-item-id|search-product|baby-product)[^>]*>.*?</(?P=tag)>",
+                document,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+        ]
+
+    products: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for block in blocks:
+        text = clean_text(block)
+        if "원" not in text:
+            continue
+        href_match = re.search(
+            r"<a\b[^>]+href=[\"']([^\"']*(?:/vp/products/|/np/products/|/products/)[^\"']*)[\"']",
+            block,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if not href_match:
+            href_match = re.search(r"<a\b[^>]+href=[\"']([^\"']+)[\"']", block, flags=re.IGNORECASE)
+
+        name_match = re.search(
+            r"class=[\"'][^\"']*(?:name|prod-name|product-title|title)[^\"']*[\"'][^>]*>(.*?)</(?:div|span|strong|p)>",
+            block,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        name = clean_text(name_match.group(1)) if name_match else ""
+        if not name:
+            alt_match = re.search(r"\balt=[\"']([^\"']{4,200})[\"']", block, flags=re.IGNORECASE)
+            name = clean_text(alt_match.group(1)) if alt_match else ""
+
+        price_match = re.search(
+            r"class=[\"'][^\"']*(?:price-value|sale-price|final-price|price)[^\"']*[\"'][^>]*>(.*?)</(?:strong|span|em|div)>",
+            block,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        price = parse_price(price_match.group(1) if price_match else "")
+        if price <= 0:
+            data_price_match = re.search(r"data-[^=]*(?:price|amount)=[\"']([\d,]+)[\"']", block, flags=re.IGNORECASE)
+            price = parse_price(data_price_match.group(1) if data_price_match else "")
+        if price <= 0:
+            text_price_match = re.search(r"(\d{1,3}(?:,\d{3})+|\d{4,9})\s*원", text)
+            price = parse_price(text_price_match.group(1) if text_price_match else "")
+        if not name or price <= 0:
+            continue
+
+        shipping = 0
+        shipping_match = re.search(r"배송비[^\d]{0,20}(\d{1,3}(?:,\d{3})+|\d{3,7})\s*원", text)
+        if shipping_match and "무료배송" not in text.replace(" ", ""):
+            shipping = parse_price(shipping_match.group(1))
+
+        detail_url = urllib.parse.urljoin("https://www.coupang.com/", html.unescape(href_match.group(1))) if href_match else search_url
+        key = f"{normalize_title(name)}:{price + shipping}:{detail_url}"
+        if key in seen:
+            continue
+        seen.add(key)
+        products.append(
+            {
+                "source": "coupang",
+                "mall": "쿠팡",
+                "name": name,
+                "price": price,
+                "shipping": shipping,
+                "total": price + shipping,
+                "url": detail_url,
+            }
+        )
+        if len(products) >= limit:
+            break
+    return products
+
+
+def fetch_coupang_products(query: str, sort_mode: str, display: int = 30) -> list[dict[str, Any]]:
+    search_url = coupang_search_url(query, sort_mode, display)
+    status, body = read_url(
+        search_url,
+        {
+            "Referer": "https://www.coupang.com/",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "same-origin",
+            "Upgrade-Insecure-Requests": "1",
+        },
+    )
+    if status != 200:
+        raise RuntimeError(f"쿠팡 검색 페이지 수집 오류: HTTP {status}")
+    if any(marker in body.lower() for marker in ("access denied", "captcha", "forbidden")):
+        raise RuntimeError("쿠팡이 현재 자동 요청을 차단함")
+    products = parse_coupang_products(body, search_url, limit=display)
+    if not products:
+        raise RuntimeError("쿠팡 검색 결과 파싱 실패 또는 결과 없음")
+    return mark_extraction_method(products, "crawl")
+
+
+def fetch_coupang_playwright_products(query: str, sort_mode: str, display: int = 30) -> list[dict[str, Any]]:
+    if not PLAYWRIGHT_SEARCH_ENABLED:
+        return []
+    if sync_playwright is None:
+        raise RuntimeError("Playwright 검색 모듈이 설치되지 않음")
+    search_url = coupang_search_url(query, sort_mode, display)
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        try:
+            page = browser.new_page(locale="ko-KR", user_agent=CRAWLER_USER_AGENT)
+            page.goto(search_url, wait_until="domcontentloaded", timeout=PLAYWRIGHT_TIMEOUT_MS)
+            page.wait_for_timeout(1200)
+            products = parse_coupang_products(page.content(), search_url, limit=display)
+        finally:
+            browser.close()
+    if not products:
+        raise RuntimeError("쿠팡 Playwright 렌더링 결과 파싱 실패 또는 결과 없음")
+    return mark_extraction_method(products, "playwright")
+
+
+def fetch_coupang_scrapling_products(query: str, sort_mode: str, display: int = 30) -> list[dict[str, Any]]:
+    if not SCRAPLING_SEARCH_ENABLED:
+        return []
+    if ScraplingFetcher is None:
+        raise RuntimeError("Scrapling 검색 모듈이 설치되지 않음")
+    search_url = coupang_search_url(query, sort_mode, display)
+    response = ScraplingFetcher.get(
+        search_url,
+        timeout=HTTP_TIMEOUT_SECONDS,
+        impersonate="chrome",
+        headers={"Accept-Language": "ko-KR,ko;q=0.9,en;q=0.8", "Referer": "https://www.coupang.com/"},
+    )
+    if int(response.status) != 200:
+        raise RuntimeError(f"쿠팡 Scrapling 수집 오류: HTTP {response.status}")
+    document = response.body.decode("utf-8", errors="replace")
+    products = parse_coupang_products(document, search_url, limit=display)
+    if not products:
+        raise RuntimeError("쿠팡 Scrapling 결과 파싱 실패 또는 결과 없음")
+    return mark_extraction_method(products, "scrapling")
+
+
 COMPETITOR_MALL_KEYS = (
     "mallName", "mall_name", "mall", "storeName", "store_name", "sellerName", "seller_name",
     "shopName", "shop_name", "merchantName", "merchant_name", "companyName", "company_name",
@@ -2155,6 +2322,18 @@ def fetch_comparison_competitors(platform: str, comparison_url: str, limit: int 
             }
             for product in parse_enuri_products(body, limit=limit)
         )
+    if platform == "coupang":
+        candidates.extend(
+            {
+                "mall": product.get("mall") or "쿠팡",
+                "title": product.get("name") or "",
+                "sale_price": product.get("price") or 0,
+                "shipping_fee": product.get("shipping") or 0,
+                "total_price": product.get("total") or 0,
+                "detail_url": product.get("url") or "",
+            }
+            for product in parse_coupang_products(body, safe_url, limit=limit)
+        )
     competitors = normalize_competitor_candidates(candidates, limit=limit)
     if not competitors:
         raise RuntimeError("가격비교 페이지에서 경쟁 판매처를 찾지 못했습니다.")
@@ -2340,11 +2519,12 @@ def fetch_benefit_detail(url: str, reference_price: int, fallback_shipping: int)
     return parsed
 
 
-READY_SEARCH_SOURCES = {"naver", "danawa", "enuri"}
+READY_SEARCH_SOURCES = {"naver", "danawa", "enuri", "coupang"}
 COLLECTION_SOURCE_LABELS = {
     "naver": "네이버쇼핑",
     "danawa": "다나와",
     "enuri": "에누리",
+    "coupang": "쿠팡",
 }
 
 
@@ -2354,7 +2534,7 @@ class CollectionQuotaExceeded(RuntimeError):
 
 def normalize_sources(sources: list[str]) -> list[str]:
     selected = [source for source in sources if source in READY_SEARCH_SOURCES]
-    return selected or ["naver", "danawa", "enuri"]
+    return selected or ["naver", "danawa", "enuri", "coupang"]
 
 
 def collection_quota_rows(db: sqlite3.Connection) -> list[dict[str, Any]]:
@@ -2367,7 +2547,7 @@ def collection_quota_rows(db: sqlite3.Connection) -> list[dict[str, Any]]:
         FROM collection_limits AS limits
         LEFT JOIN collection_usage AS usage
           ON usage.source = limits.source AND usage.usage_date = ?
-        ORDER BY CASE limits.source WHEN 'naver' THEN 1 WHEN 'danawa' THEN 2 WHEN 'enuri' THEN 3 ELSE 9 END,
+        ORDER BY CASE limits.source WHEN 'naver' THEN 1 WHEN 'danawa' THEN 2 WHEN 'enuri' THEN 3 WHEN 'coupang' THEN 4 ELSE 9 END,
                  limits.source
         """,
         (usage_date(),),
@@ -2485,6 +2665,33 @@ def collect_price_products(db: sqlite3.Connection, query: str, sort_mode: str, s
                 complete_collection_request(db, "enuri", "error")
             warnings.append(f"에누리: {error}")
 
+    if "coupang" in selected_sources:
+        try:
+            reserve_collection_request(db, "coupang")
+            method_successes = 0
+            collectors = (
+                ("크롤링", fetch_coupang_products),
+                ("Playwright", fetch_coupang_playwright_products),
+                ("Scrapling", fetch_coupang_scrapling_products),
+            )
+            for label, collector in collectors:
+                try:
+                    collected = collector(query, sort_mode, display=SEARCH_LINE_SOURCE_LIMIT)
+                    products.extend(collected)
+                    if collected:
+                        method_successes += 1
+                    if label == "크롤링" and len(collected) >= 10:
+                        break
+                except Exception as error:
+                    warnings.append(f"쿠팡 {label}: {error}")
+            complete_collection_request(db, "coupang", "success" if method_successes else "error")
+            if method_successes == 0:
+                warnings.append("쿠팡의 모든 추출 방식이 실패함")
+        except Exception as error:
+            if not isinstance(error, CollectionQuotaExceeded):
+                complete_collection_request(db, "coupang", "error")
+            warnings.append(f"쿠팡: {error}")
+
     unique_products = dedupe_products(products)
     if sort_mode == "recent":
         return list(reversed(unique_products)), warnings
@@ -2498,7 +2705,7 @@ def sample_products(query: str) -> list[dict[str, Any]]:
             ("naver", "11번가", f"{keyword} C타입 고속충전 2m", 8510, 0, "https://shopping.naver.com/"),
             ("naver", "11번가", f"{keyword} C타입 고속충전 2m", 8510, 0, "https://shopping.naver.com/"),
             ("naver", "스마트스토어", f"{keyword} 100W PD 케이블", 11900, 2500, "https://shopping.naver.com/"),
-            ("naver", "쿠팡", f"{keyword} 애플워치 호환 충전", 18900, 0, "https://www.coupang.com/"),
+            ("coupang", "쿠팡", f"{keyword} 애플워치 호환 충전", 18900, 0, "https://www.coupang.com/"),
             ("naver", "오픈마켓", f"{keyword} 벌크 특가", 990, 3000, "https://shopping.naver.com/"),
         ]
     else:
@@ -2506,7 +2713,7 @@ def sample_products(query: str) -> list[dict[str, Any]]:
             ("naver", "11번가", f"{keyword} 초경량 업무용 14형 16GB", 819000, 0, "https://shopping.naver.com/"),
             ("naver", "스마트스토어", f"{keyword} 초경량 업무용 14형 8GB", 842000, 0, "https://shopping.naver.com/"),
             ("naver", "다나와", f"{keyword} 업무용 i5 512GB", 874000, 2500, "https://www.danawa.com/"),
-            ("naver", "쿠팡", f"{keyword} 고성능 15형 32GB", 1299000, 0, "https://www.coupang.com/"),
+            ("coupang", "쿠팡", f"{keyword} 고성능 15형 32GB", 1299000, 0, "https://www.coupang.com/"),
             ("naver", "오픈마켓", f"{keyword} 리퍼 특가 13형", 299000, 3000, "https://shopping.naver.com/"),
         ]
 
@@ -2992,6 +3199,17 @@ def test_api_key(platform: str) -> dict[str, Any]:
             except Exception as error:
                 if not isinstance(error, CollectionQuotaExceeded):
                     complete_collection_request(db, "enuri", "error")
+                message = str(error)
+        elif platform == "coupang":
+            try:
+                reserve_collection_request(db, "coupang")
+                fetch_coupang_products("노트북", "lowest", display=1)
+                complete_collection_request(db, "coupang", "success")
+                connected = True
+                message = "쿠팡 검색 페이지 수집/파싱 성공"
+            except Exception as error:
+                if not isinstance(error, CollectionQuotaExceeded):
+                    complete_collection_request(db, "coupang", "error")
                 message = str(error)
         else:
             connected = bool(key["client_id"] and key["client_secret"])

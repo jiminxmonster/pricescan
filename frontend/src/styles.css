@@ -701,7 +701,7 @@ td { font-size: 14px; }
 }
 .price-line-overview-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
 }
 .price-line-overview.empty {
@@ -2570,7 +2570,7 @@ textarea {
 }
 .comparison-target-inputs {
   display: grid;
-  grid-template-columns: repeat(3, minmax(180px, 1fr)) auto;
+  grid-template-columns: repeat(4, minmax(160px, 1fr)) auto;
   gap: 8px;
   align-items: end;
 }
@@ -2596,7 +2596,7 @@ textarea {
 }
 .comparison-snapshot-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
 }
 .comparison-snapshot-grid section {

@@ -67,6 +67,7 @@ const searchSourceGroups: SearchSourceGroup[] = [
       { key: "naver", label: "네이버 쇼핑", description: "검색 페이지 크롤러", enabled: true, badge: "사용 가능" },
       { key: "danawa", label: "다나와", description: "검색 페이지 크롤러", enabled: true, badge: "사용 가능" },
       { key: "enuri", label: "에누리", description: "검색 페이지 크롤러", enabled: true, badge: "사용 가능" },
+      { key: "coupang", label: "쿠팡", description: "검색 페이지 크롤러", enabled: true, badge: "사용 가능" },
       { key: "elevenst", label: "11번가", description: "수집기 미구현", enabled: false, badge: "준비 중" },
       { key: "gmarket", label: "G마켓", description: "수집기 미구현", enabled: false, badge: "준비 중" },
       { key: "auction", label: "옥션", description: "수집기 미구현", enabled: false, badge: "준비 중" },
@@ -75,8 +76,8 @@ const searchSourceGroups: SearchSourceGroup[] = [
 ];
 
 const readySourceKeys = new Set(searchSourceGroups.flatMap((group) => group.options.filter((option) => option.enabled).map((option) => option.key)));
-const priceReadySourceKeys = new Set(["naver", "danawa", "enuri"]);
-const apiPlatformOrder = ["smartstore", "danawa", "enuri", "naver", "elevenst", "gmarket", "auction", "google_search", "naver_search", "coupang"];
+const priceReadySourceKeys = new Set(["naver", "danawa", "enuri", "coupang"]);
+const apiPlatformOrder = ["smartstore", "danawa", "enuri", "coupang", "naver", "elevenst", "gmarket", "auction", "google_search", "naver_search"];
 const serviceUrl = "https://pricescan.d2blue.com/";
 const productInfoNoticeTypes = ["기타 재화", "전자제품", "가전제품", "의류", "신발", "가방", "식품", "화장품"];
 const deliveryMethods = ["택배/소포/등기", "직접배송", "방문수령", "퀵서비스"];
@@ -223,7 +224,7 @@ type SmartstoreCategoryCandidate = {
   score: number;
 };
 
-type ComparisonPlatform = "naver" | "danawa" | "enuri";
+type ComparisonPlatform = "naver" | "danawa" | "enuri" | "coupang";
 
 type ComparisonTarget = {
   id: string;
@@ -556,6 +557,7 @@ function sourceLabel(source: string): string {
     smartstore: "네이버 스마트스토어",
     danawa: "다나와",
     enuri: "에누리",
+    coupang: "쿠팡",
     elevenst: "11번가",
     gmarket: "G마켓",
     auction: "옥션",
@@ -569,13 +571,17 @@ const comparisonPlatformOptions: { key: ComparisonPlatform; label: string; place
   { key: "naver", label: "네이버", placeholder: "네이버 가격비교 URL" },
   { key: "danawa", label: "다나와", placeholder: "다나와 가격비교 URL" },
   { key: "enuri", label: "에누리", placeholder: "에누리 가격비교 URL" },
+  { key: "coupang", label: "쿠팡", placeholder: "쿠팡 검색/상품 URL" },
 ];
 
 const comparisonPlatformColors: Record<ComparisonPlatform, string> = {
   naver: "#03c75a",
   danawa: "rgb(62, 193, 190)",
   enuri: "#2563eb",
+  coupang: "#ef4444",
 };
+
+const comparisonPlatformLabelText = comparisonPlatformOptions.map((platform) => platform.label).join(" · ");
 
 const CHART_POINT_OVERLAP_X_TOLERANCE = 1.5;
 const CHART_POINT_OVERLAP_Y_TOLERANCE = 9;
@@ -1079,7 +1085,7 @@ export default function App() {
   const [selectedOrders, setSelectedOrders] = useState<string[]>([]);
   const [selectedDetailFilters, setSelectedDetailFilters] = useState<SelectedDetailFilters>({});
   const [showDetailScan, setShowDetailScan] = useState(false);
-  const [selectedSources, setSelectedSources] = useState<string[]>(["naver", "danawa", "enuri"]);
+  const [selectedSources, setSelectedSources] = useState<string[]>(["naver", "danawa", "enuri", "coupang"]);
   const [smartstorePayload, setSmartstorePayload] = useState<SmartstorePayload>({ items: [], count: 0, page: 1, size: 50 });
   const [smartstoreLoading, setSmartstoreLoading] = useState(false);
   const [smartstoreError, setSmartstoreError] = useState("");
@@ -2672,7 +2678,7 @@ function MonitoringActiveRow({ item, onUpdate, onSell, onSaveComparisonTargets, 
             <div className="comparison-monitor-head">
               <div>
                 <strong>가격비교 URL 추적</strong>
-                <span>네이버·다나와·에누리 가격비교 상세 URL 기준으로 경쟁 판매처 TOP 5를 저장합니다.</span>
+                <span>{comparisonPlatformLabelText} 가격비교 상세 URL 기준으로 경쟁 판매처 TOP 5를 저장합니다.</span>
               </div>
               <div className="comparison-monitor-kpis">
                 <span>최저 경쟁가 {money(item.lowest_competitor_total || 0)}</span>
@@ -2748,7 +2754,7 @@ function MonitoringActiveRow({ item, onUpdate, onSell, onSaveComparisonTargets, 
                   </table>
                 </div>
               ) : (
-                <p className="simulator-empty">네이버·다나와·에누리 경쟁가 스캔 후 채널 이동 마진을 계산합니다.</p>
+                <p className="simulator-empty">{comparisonPlatformLabelText} 경쟁가 스캔 후 채널 이동 마진을 계산합니다.</p>
               )}
             </div>
           </div>
@@ -3796,7 +3802,7 @@ const EXTRACTION_METHOD_META: Record<string, { icon: string; label: string }> = 
 function extractionMethods(item: PriceItem): string[] {
   if (item.extraction_methods?.length) return item.extraction_methods;
   if (item.source === "naver") return ["crawl"];
-  if (item.source === "danawa" || item.source === "enuri") return ["crawl"];
+  if (item.source === "danawa" || item.source === "enuri" || item.source === "coupang") return ["crawl"];
   return [];
 }
 
@@ -3905,7 +3911,7 @@ function PriceLineOverview({ items, onPointClick }: { items: PriceItem[]; onPoin
   if (!hasRows) {
     return (
       <div className="price-line-overview empty">
-        <span>검색 후 네이버 · 다나와 · 에누리 가격대 그래프가 표시됩니다.</span>
+        <span>검색 후 {comparisonPlatformLabelText} 가격대 그래프가 표시됩니다.</span>
       </div>
     );
   }
@@ -4024,7 +4030,7 @@ function PriceLineOverview({ items, onPointClick }: { items: PriceItem[]; onPoin
       <div className="price-line-overview-head">
         <div>
           <strong>{expanded ? "소스별 가격대 그래프" : "전체 가격대 겹쳐보기"}</strong>
-          <span>네이버 · 다나와 · 에누리 TOP 10 / 공통 Y축{!expanded && yScaleActive ? ` / Y축 ${yScaleLevel + 1}단계` : ""}</span>
+          <span>{comparisonPlatformLabelText} TOP 10 / 공통 Y축{!expanded && yScaleActive ? ` / Y축 ${yScaleLevel + 1}단계` : ""}</span>
         </div>
         <div className="price-line-overview-actions">
           <button className="price-line-overview-toggle" onClick={() => {
@@ -4045,7 +4051,7 @@ function PriceLineOverview({ items, onPointClick }: { items: PriceItem[]; onPoin
             <span>축 최저 {money(axisMinPrice)}</span>
             <span>축 최고 {money(axisMaxPrice)}</span>
           </div>
-          <div className="price-source-plot price-source-plot-combined" role="group" aria-label="네이버 다나와 에누리 통합 가격 꺾은선 그래프">
+          <div className="price-source-plot price-source-plot-combined" role="group" aria-label={`${comparisonPlatformLabelText} 통합 가격 꺾은선 그래프`}>
             {renderGraphLines(yScaleActive ? scaledOverlayLineGroups : groups)}
             {yScaleActive
               ? scaledCombinedPointOptions.map((option) => renderScaledCombinedPoint(option))
@@ -4393,7 +4399,7 @@ function SearchResultList({
             </strong>
           </div>
           <span className="result-list-meta">
-            <span>네이버 · 다나와 · 에누리 TOP 10 비교</span>
+            <span>{comparisonPlatformLabelText} TOP 10 비교</span>
             <span>{activeRows.length}개 결과</span>
           </span>
         </div>
