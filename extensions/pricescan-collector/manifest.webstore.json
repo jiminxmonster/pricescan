@@ -1,0 +1,50 @@
+{
+  "manifest_version": 3,
+  "name": "PriceScan Collector",
+  "description": "네이버쇼핑, 다나와, 에누리, 쿠팡 화면에 보이는 상품 가격 정보를 PriceScan으로 수집합니다.",
+  "version": "0.1.4",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "action": {
+    "default_title": "PriceScan Collector",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": [
+    "scripting",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://pricescan.d2blue.com/*",
+    "https://shopping.naver.com/*",
+    "https://search.shopping.naver.com/*",
+    "https://www.danawa.com/*",
+    "https://search.danawa.com/*",
+    "https://www.enuri.com/*",
+    "https://www.coupang.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://pricescan.d2blue.com/*"
+      ],
+      "js": [
+        "pricescan-page.js"
+      ],
+      "run_at": "document_start"
+    }
+  ]
+}

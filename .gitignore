@@ -32,6 +32,10 @@ pnpm-debug.log*
 # Frontend build output
 dist/
 frontend/dist/
+artifacts/
+
+# Local browser automation state
+.playwright-mcp/
 
 # Docker/local runtime
 docker-compose.override.yml

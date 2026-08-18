@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PriceScan Collector</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="popup">
+      <div class="brand">
+        <span class="icon">🧩</span>
+        <div>
+          <strong>PriceScan Collector</strong>
+          <p>브라우저 화면 기준 가격 수집</p>
+        </div>
+      </div>
+
+      <section class="status-card">
+        <span class="dot"></span>
+        <div>
+          <strong id="statusTitle">설치됨</strong>
+          <p id="statusBody">PriceScan 사이트에서 상품스캔을 실행하면 자동으로 동작합니다.</p>
+        </div>
+      </section>
+
+      <section class="guide">
+        <strong>사용 흐름</strong>
+        <ol>
+          <li>PriceScan 사이트를 엽니다.</li>
+          <li>상품명을 입력하고 스캔을 누릅니다.</li>
+          <li>익스텐션이 쇼핑몰 화면을 열고 가격을 수집합니다.</li>
+        </ol>
+      </section>
+
+      <div class="actions">
+        <button id="openLocal" type="button">로컬 PriceScan</button>
+        <button id="openProd" type="button">운영 PriceScan</button>
+      </div>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>
