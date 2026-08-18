@@ -38,6 +38,30 @@ jobs:
           path: artifacts/chrome-webstore/pricescan-collector-*-webstore.zip
           if-no-files-found: error
 
+  verify-auth:
+    if: github.event_name == 'workflow_dispatch'
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Authenticate service account
+        id: auth
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/122997755155/locations/global/workloadIdentityPools/github-actions/providers/github
+          service_account: pricescan-chrome-webstore-ci@pricescan-cws-20260818.iam.gserviceaccount.com
+          token_format: access_token
+          access_token_scopes: https://www.googleapis.com/auth/chromewebstore
+      - name: Verify Chrome Web Store access
+        env:
+          CHROME_WEBSTORE_ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+        run: |
+          curl --fail-with-body --silent --show-error \
+            -H "Authorization: Bearer ${CHROME_WEBSTORE_ACCESS_TOKEN}" \
+            "https://chromewebstore.googleapis.com/v2/publishers/a6830834-3553-4d82-a2f1-4a886d8bcf91/items/llicapkpbafdjmdhofekdjoadnelkdif:fetchStatus"
+
   publish:
     if: startsWith(github.ref, 'refs/tags/pricescan-collector-v')
     needs: validate
