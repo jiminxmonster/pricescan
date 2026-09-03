@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   calculateSellerMargin, financeToDraft, groupSellerOffers, offerIdentity,
-  parseFinance, safeOfferUrl, type Finance, type SellerOffer,
+  importedSearchRequest, parseFinance, safeOfferUrl, type Finance, type SellerOffer,
 } from "../src/seller-workspace.ts";
 
 const finance: Finance = { sale_price: 900000, cost_price: 750000, fee_rate: 8, shipping_cost: 3000 };
@@ -63,4 +63,11 @@ test("stable source/URL identity retains selection when run item IDs change", ()
 test("only http(s) product links without embedded credentials are actionable", () => {
   for (const url of ["javascript:alert(1)", "file:///etc/passwd", "data:text/html,a", "https://user:password@example.com/", "invalid"]) assert.equal(safeOfferUrl(url), undefined);
   assert.equal(safeOfferUrl("https://example.com/product"), "https://example.com/product");
+});
+test("keeps an imported run pending until the active seller product is ready", () => {
+  assert.equal(importedSearchRequest("", "run-naver"), null);
+  assert.deepEqual(importedSearchRequest("product-1", "run-naver"), {
+    path: "/product-1/search-results",
+    body: { run_id: "run-naver" },
+  });
 });

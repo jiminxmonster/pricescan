@@ -56,6 +56,12 @@ export function offerIdentity(offer: Pick<SellerOffer, "source" | "url">): strin
 export function isReviewRequired(item: SellerOffer): boolean {
   return Boolean(item.is_excluded || item.status === "abnormal" || item.price <= 0 || !safeOfferUrl(item.url));
 }
+export function importedSearchRequest(productId: string, runId: string) {
+  if (!productId) return null;
+  return runId
+    ? { path: `/${productId}/search-results`, body: { run_id: runId } }
+    : { path: `/${productId}`, body: undefined };
+}
 export function groupSellerOffers(items: readonly SellerOffer[], sources: readonly string[]) {
   return sources.map((source) => {
     const seen = new Set<string>();

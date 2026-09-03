@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   calculateSellerMargin, financeLabels, financeToDraft, groupSellerOffers, isReviewRequired,
-  offerIdentity, parseFinance, safeOfferUrl, sellerSourceLabels, sellerSources,
+  importedSearchRequest, offerIdentity, parseFinance, safeOfferUrl, sellerSourceLabels, sellerSources,
   type FinanceDraft, type SellerOffer, type SellerProduct, type SellerSearchResult, type WatchedOffer,
 } from "./seller-workspace";
 import "./seller-workspace.css";
@@ -45,6 +45,7 @@ export default function SellerWorkspace({ token, busy, progress, selectedSources
   const togglePending = useRef(false);
   const [error, setError] = useState("");
   const [status, setStatus] = useState("");
+  const [pendingImportedRunId, setPendingImportedRunId] = useState<string | null>(null);
   const desktop = window.PriceScanDesktop;
   const [desktopJobs, setDesktopJobs] = useState<DesktopJob[]>([]);
   const desktopJob = desktopJobs.find(job => job.productId === product?.id);
@@ -136,23 +137,29 @@ export default function SellerWorkspace({ token, busy, progress, selectedSources
   }, [desktopJob?.id, desktopSavedVersion, token]);
   useEffect(() => {
     const refreshImportedCurrentPage = (event: Event) => {
-      const id = activeId.current;
-      if (!id) return;
       const runId = String((event as CustomEvent<{ runId?: string }>).detail?.runId || "");
-      const refresh = runId
-        ? api<SellerProduct>(token, `/${id}/search-results`, { run_id: runId })
-        : api<SellerProduct>(token, `/${id}`);
-      void refresh.then(next => {
-        if (activeId.current === id) {
-          setProduct(next);
-          setProducts(current => [next, ...current.filter(entry => entry.id !== next.id)]);
-          setStatus("네이버 현재 화면 결과가 기존 가격 비교표에 합쳐졌습니다.");
-        }
-      }).catch(reason => setError(reason.message));
+      setPendingImportedRunId(runId);
     };
     window.addEventListener("pricescan:current-page-imported", refreshImportedCurrentPage);
     return () => window.removeEventListener("pricescan:current-page-imported", refreshImportedCurrentPage);
   }, [token]);
+  useEffect(() => {
+    if (pendingImportedRunId === null) return;
+    const id = product?.id || activeId.current;
+    const target = importedSearchRequest(id, pendingImportedRunId);
+    if (!target) return;
+    let cancelled = false;
+    void api<SellerProduct>(token, target.path, target.body).then(next => {
+      if (cancelled || activeId.current !== id) return;
+      setPendingImportedRunId(current => current === pendingImportedRunId ? null : current);
+      setProduct(next);
+      setProducts(current => [next, ...current.filter(entry => entry.id !== next.id)]);
+      setStatus("네이버 현재 화면 결과가 기존 가격 비교표에 합쳐졌습니다.");
+    }).catch(reason => {
+      if (!cancelled) setError(reason.message);
+    });
+    return () => { cancelled = true; };
+  }, [pendingImportedRunId, product?.id, token]);
   useEffect(() => {
     if (!dirty) return;
     const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
