@@ -4031,8 +4031,11 @@ def get_run_payload(db: sqlite3.Connection, run_id: str) -> dict[str, Any]:
         item["abnormal"] = abnormal
         items.append(item)
 
+    run_data = row_to_dict(run) or {}
+    metadata = parse_json_text(str(run_data.get("filters_json") or "{}"), {})
+    run_data["sources"] = metadata.get("sources", []) if isinstance(metadata, dict) else []
     return {
-        "run": row_to_dict(run),
+        "run": run_data,
         "items": items,
         "summary": {
             "collected_count": len(rows),

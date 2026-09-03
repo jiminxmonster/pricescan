@@ -6,6 +6,8 @@ export type SellerOffer = {
   registered_price?: number; shipping: number; total: number; url: string;
   is_excluded?: number | boolean; status?: string; exclusion_reason?: string;
   extraction_methods?: string[]; collected_at?: string;
+  benefit_status?: "not_checked" | "confirmed" | "conditional" | "none" | "failed";
+  benefit_summary?: string; benefit_condition?: string; detail_methods?: string[];
 };
 export type SellerSearchResult = {
   run: { id: string; query: string; status: string; created_at: string } | null;

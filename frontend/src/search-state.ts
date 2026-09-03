@@ -15,12 +15,26 @@ export type SourceSearchResult = {
   status?: string;
 };
 
+export type MergeableSearchPayload = {
+  run: { id: string; query: string; sources?: string[] } | null;
+  items: Array<{ source: string }>;
+};
+
 export function shouldRestoreSimpleSearch(payload: RestorableSearchPayload): boolean {
   return payload.run?.status === "completed";
 }
 
 export function shouldApplyInitialSearchPayload(loadRevision: number, currentRevision: number): boolean {
   return loadRevision === currentRevision;
+}
+
+export function canReuseCompanionSearch(payload: MergeableSearchPayload, query: string): boolean {
+  const attemptedSources = new Set(payload.run?.sources || payload.items.map((item) => item.source));
+  return Boolean(
+    payload.run
+    && payload.run.query.trim() === query.trim()
+    && ["danawa", "enuri", "coupang"].every((source) => attemptedSources.has(source)),
+  );
 }
 
 export function isSourceItemMonitored(sourceItemId: string, products: readonly MonitorableProduct[]): boolean {

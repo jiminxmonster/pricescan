@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import SellerWorkspace from "./SellerWorkspace";
 import { checkCollectorConnection, collectorConnectionCopy, launchCollectorBrowser, type BrowserLaunchStatus, type CollectorStatus } from "./collector-connection";
 import {
+  canReuseCompanionSearch,
   isMonitoringRefreshDue,
   isSourceItemMonitored,
   nextMonitoringRefreshAt,
@@ -188,7 +189,7 @@ type Dashboard = {
 };
 
 type SearchPayload = {
-  run: { id: string; query: string; status: string; created_at: string } | null;
+  run: { id: string; query: string; status: string; created_at: string; sources?: string[] } | null;
   items: PriceItem[];
   warnings?: string[];
   summary: {
@@ -1307,21 +1308,39 @@ export default function App() {
       if (importingCaptureIds.current.has(capture.id)) return;
       importingCaptureIds.current.add(capture.id);
       const captureQuery = String(capture.query || keyword || "네이버 쇼핑").trim();
-      const mergeRunId = searchPayload.run?.query.trim() === captureQuery ? searchPayload.run.id : "";
       setCollecting(true);
-      setNotice(`네이버 현재 화면 ${capture.items?.length || 0}건을 PriceScan에 반영 중...`);
-      void request<SearchPayload>("/price-search/extension-results", token, {
-        method: "POST",
-        body: JSON.stringify({
-          query: captureQuery,
-          sort_mode: capture.sortMode || "lowest",
-          approval_scope: "user_current_page",
-          merge_run_id: mergeRunId,
-          page_urls: { naver: capture.pageUrl || "" },
-          warnings: capture.warnings || [],
-          items: capture.items || [],
-        }),
-      }).then(async (data) => {
+      const importCurrentPage = async () => {
+        let comparisonBase = searchPayload;
+        if (!canReuseCompanionSearch(comparisonBase, captureQuery)) {
+          const latest = await request<SearchPayload>("/price-search/latest", token).catch(() => null);
+          if (latest && canReuseCompanionSearch(latest, captureQuery)) comparisonBase = latest;
+        }
+        if (!canReuseCompanionSearch(comparisonBase, captureQuery)) {
+          setNotice(`네이버 ${capture.items?.length || 0}건을 보관했습니다. 다나와 · 에누리 · 쿠팡을 이어서 조사 중...`);
+          comparisonBase = await request<SearchPayload>("/price-search", token, {
+            method: "POST",
+            body: JSON.stringify({
+              query: captureQuery,
+              sort_mode: capture.sortMode || "lowest",
+              filters: [],
+              sources: ["danawa", "enuri", "coupang"],
+            }),
+          });
+          setSearchPayload(comparisonBase);
+        }
+        setNotice(`다른 쇼핑몰 조사 결과에 네이버 현재 화면 ${capture.items?.length || 0}건을 합치는 중...`);
+        const data = await request<SearchPayload>("/price-search/extension-results", token, {
+          method: "POST",
+          body: JSON.stringify({
+            query: captureQuery,
+            sort_mode: capture.sortMode || "lowest",
+            approval_scope: "user_current_page",
+            merge_run_id: comparisonBase.run?.id || "",
+            page_urls: { naver: capture.pageUrl || "" },
+            warnings: [...(comparisonBase.warnings || []), ...(capture.warnings || [])],
+            items: capture.items || [],
+          }),
+        });
         currentPageImportRevision.current += 1;
         setKeyword(captureQuery);
         setSearchPayload(data);
@@ -1329,19 +1348,23 @@ export default function App() {
         setSimpleSearchComplete(true);
         setSearchResultView("line");
         setTab("search");
-        setNotice(`네이버 현재 화면 ${data.items.filter((item) => item.source === "naver").length}건을 반영했습니다.`);
+        const sourceCounts = ["naver", "danawa", "enuri", "coupang"]
+          .map((source) => `${sourceLabel(source)} ${data.items.filter((item) => item.source === source).length}건`)
+          .join(" · ");
+        setNotice(`통합 가격조사 완료 · ${sourceCounts}`);
         window.dispatchEvent(new CustomEvent("pricescan:current-page-imported", { detail: { runId: data.run?.id || "" } }));
         window.postMessage({ type: PRICESCAN_CURRENT_PAGE_CAPTURE_ACK, captureId: capture.id }, window.location.origin);
         await request<Dashboard>("/dashboard", token).then(setDashboard).catch(() => undefined);
         await refreshLogs().catch(() => undefined);
-      }).catch((error) => {
+      };
+      void importCurrentPage().catch((error) => {
         importingCaptureIds.current.delete(capture.id!);
         setNotice(error instanceof Error ? error.message : "네이버 현재 화면 반영 실패");
       }).finally(() => setCollecting(false));
     };
     window.addEventListener("message", receiveCurrentPageCapture);
     return () => window.removeEventListener("message", receiveCurrentPageCapture);
-  }, [token, keyword, searchPayload.run?.id, searchPayload.run?.query]);
+  }, [token, keyword, searchPayload]);
 
   useEffect(() => {
     if (!draftSourceItem && !editingDraft && !sellCandidate && !coupangCollector.open) return undefined;
@@ -1739,6 +1762,7 @@ export default function App() {
       setSelectedBenefitIds([]);
       const failedCount = data.items.filter((item) => uniqueIds.includes(item.id) && item.benefit_status === "failed").length;
       setNotice(`혜택 상세조사 완료 · ${uniqueIds.length - failedCount}건 확인 · ${failedCount}건 확인 실패`);
+      return data;
     } finally {
       setBenefitScanning(false);
     }
@@ -2495,6 +2519,7 @@ export default function App() {
             selectedSources={selectedSources}
             onToggleSource={toggleSearchSource}
             onSearch={(query) => startProductScan("simple", query)}
+            onDetailScan={scanBenefits}
             onBrowser={showBrowserConnection}
             onSettings={() => setTab((current) => current === "settings" ? "search" : "settings")}
             onLogout={logout}

@@ -44,6 +44,7 @@ class ExtensionCollectionTest(unittest.TestCase):
 
         self.assertEqual(first["run"]["id"], merged["run"]["id"])
         self.assertEqual({item["source"] for item in merged["items"]}, {"danawa", "naver"})
+        self.assertEqual(merged["run"]["sources"], ["danawa", "naver"])
         self.assertEqual(sum(item["is_baseline"] for item in merged["items"]), 1)
 
     def test_reimport_replaces_only_same_source_rows(self):

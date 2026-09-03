@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  canReuseCompanionSearch,
   isMonitoringRefreshDue,
   isSourceItemMonitored,
   nextMonitoringRefreshAt,
@@ -24,6 +25,17 @@ test("does not overwrite a current-page import with an older initial-load respon
 
   assert.equal(shouldApplyInitialSearchPayload(initialLoadRevision, 0), true);
   assert.equal(shouldApplyInitialSearchPayload(initialLoadRevision, 1), false);
+});
+
+test("manual Naver capture reuses only a matching run that already attempted companion shopping sources", () => {
+  const naverOnly = { run: { id: "run-1", query: "노트북" }, items: [{ source: "naver" }] };
+  const partial = { run: { id: "run-2", query: "노트북", sources: ["danawa"] }, items: [{ source: "danawa" }] };
+  const combined = { run: { id: "run-3", query: "노트북", sources: ["danawa", "enuri", "coupang"] }, items: [{ source: "danawa" }] };
+
+  assert.equal(canReuseCompanionSearch(naverOnly, "노트북"), false);
+  assert.equal(canReuseCompanionSearch(partial, "노트북"), false);
+  assert.equal(canReuseCompanionSearch(combined, "노트북"), true);
+  assert.equal(canReuseCompanionSearch(combined, "다른 상품"), false);
 });
 
 test("marks only active prepared products as monitored", () => {
