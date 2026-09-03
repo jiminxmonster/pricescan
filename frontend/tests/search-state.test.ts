@@ -5,6 +5,7 @@ import {
   isMonitoringRefreshDue,
   isSourceItemMonitored,
   nextMonitoringRefreshAt,
+  shouldApplyInitialSearchPayload,
   shouldRestoreSimpleSearch,
   visibleResultsBySource,
 } from "../src/search-state.ts";
@@ -16,6 +17,13 @@ test("restores the result panel for a persisted completed search", () => {
 test("keeps the result panel collapsed when no completed search exists", () => {
   assert.equal(shouldRestoreSimpleSearch({ run: null }), false);
   assert.equal(shouldRestoreSimpleSearch({ run: { status: "failed" } }), false);
+});
+
+test("does not overwrite a current-page import with an older initial-load response", () => {
+  const initialLoadRevision = 0;
+
+  assert.equal(shouldApplyInitialSearchPayload(initialLoadRevision, 0), true);
+  assert.equal(shouldApplyInitialSearchPayload(initialLoadRevision, 1), false);
 });
 
 test("marks only active prepared products as monitored", () => {

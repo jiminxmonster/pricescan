@@ -5,6 +5,7 @@ import {
   isMonitoringRefreshDue,
   isSourceItemMonitored,
   nextMonitoringRefreshAt,
+  shouldApplyInitialSearchPayload,
   shouldRestoreSimpleSearch,
   visibleResultsBySource,
 } from "./search-state";
@@ -1139,6 +1140,7 @@ export default function App() {
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [searchPayload, setSearchPayload] = useState<SearchPayload>({ run: null, items: [], summary: { collected_count: 0, lowest_count: 0, excluded_count: 0 } });
   const importingCaptureIds = useRef(new Set<string>());
+  const currentPageImportRevision = useRef(0);
   const [apiKeys, setApiKeys] = useState<ApiKey[]>([]);
   const [collectionQuotas, setCollectionQuotas] = useState<CollectionQuota[]>([]);
   const [quotaDrafts, setQuotaDrafts] = useState<Record<string, { dailyLimit: number; enabled: boolean }>>({});
@@ -1320,6 +1322,7 @@ export default function App() {
           items: capture.items || [],
         }),
       }).then(async (data) => {
+        currentPageImportRevision.current += 1;
         setKeyword(captureQuery);
         setSearchPayload(data);
         setSimpleSearchAttempted(true);
@@ -1362,6 +1365,7 @@ export default function App() {
 
   const loadAll = async () => {
     if (!token) return;
+    const importRevisionAtStart = currentPageImportRevision.current;
     const [dashboardData, latestSearch, keyData, quotaData, orderData, channelData, logData, draftData, imageData, preparedData, exceptionData] = await Promise.all([
       request<Dashboard>("/dashboard", token),
       request<SearchPayload>("/price-search/latest", token),
@@ -1377,9 +1381,11 @@ export default function App() {
     ]);
     const restoreSimpleSearch = shouldRestoreSimpleSearch(latestSearch);
     setDashboard(dashboardData);
-    setSearchPayload(latestSearch);
-    setSimpleSearchAttempted(restoreSimpleSearch);
-    setSimpleSearchComplete(restoreSimpleSearch);
+    if (shouldApplyInitialSearchPayload(importRevisionAtStart, currentPageImportRevision.current)) {
+      setSearchPayload(latestSearch);
+      setSimpleSearchAttempted(restoreSimpleSearch);
+      setSimpleSearchComplete(restoreSimpleSearch);
+    }
     setApiKeys(keyData);
     setCollectionQuotas(quotaData);
     setQuotaDrafts(Object.fromEntries(quotaData.map((quota) => [quota.source, { dailyLimit: quota.daily_limit, enabled: quota.enabled }])));

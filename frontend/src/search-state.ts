@@ -19,6 +19,10 @@ export function shouldRestoreSimpleSearch(payload: RestorableSearchPayload): boo
   return payload.run?.status === "completed";
 }
 
+export function shouldApplyInitialSearchPayload(loadRevision: number, currentRevision: number): boolean {
+  return loadRevision === currentRevision;
+}
+
 export function isSourceItemMonitored(sourceItemId: string, products: readonly MonitorableProduct[]): boolean {
   return products.some((product) => product.source_item_id === sourceItemId && Boolean(product.monitoring_enabled));
 }
