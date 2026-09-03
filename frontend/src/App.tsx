@@ -1142,6 +1142,7 @@ export default function App() {
   const [searchPayload, setSearchPayload] = useState<SearchPayload>({ run: null, items: [], summary: { collected_count: 0, lowest_count: 0, excluded_count: 0 } });
   const importingCaptureIds = useRef(new Set<string>());
   const currentPageImportRevision = useRef(0);
+  const companionSearchInFlight = useRef<{ query: string; promise: Promise<SearchPayload> } | null>(null);
   const [apiKeys, setApiKeys] = useState<ApiKey[]>([]);
   const [collectionQuotas, setCollectionQuotas] = useState<CollectionQuota[]>([]);
   const [quotaDrafts, setQuotaDrafts] = useState<Record<string, { dailyLimit: number; enabled: boolean }>>({});
@@ -1311,11 +1312,21 @@ export default function App() {
       setCollecting(true);
       const importCurrentPage = async () => {
         let comparisonBase = searchPayload;
-        if (!canReuseCompanionSearch(comparisonBase, captureQuery)) {
+        let companionSearchError = "";
+        const inFlight = companionSearchInFlight.current;
+        if (inFlight && inFlight.query.trim() === captureQuery.trim()) {
+          setNotice(`네이버 ${capture.items?.length || 0}건을 보관했습니다. 다나와 · 에누리 · 쿠팡 자동 수집과 합치는 중...`);
+          try {
+            comparisonBase = await inFlight.promise;
+          } catch (error) {
+            companionSearchError = error instanceof Error ? error.message : "다른 쇼핑몰 자동 수집 실패";
+          }
+        }
+        if (!canReuseCompanionSearch(comparisonBase, captureQuery) && !companionSearchError) {
           const latest = await request<SearchPayload>("/price-search/latest", token).catch(() => null);
           if (latest && canReuseCompanionSearch(latest, captureQuery)) comparisonBase = latest;
         }
-        if (!canReuseCompanionSearch(comparisonBase, captureQuery)) {
+        if (!canReuseCompanionSearch(comparisonBase, captureQuery) && !companionSearchError) {
           setNotice(`네이버 ${capture.items?.length || 0}건을 보관했습니다. 다나와 · 에누리 · 쿠팡을 이어서 조사 중...`);
           comparisonBase = await request<SearchPayload>("/price-search", token, {
             method: "POST",
@@ -1337,7 +1348,7 @@ export default function App() {
             approval_scope: "user_current_page",
             merge_run_id: comparisonBase.run?.id || "",
             page_urls: { naver: capture.pageUrl || "" },
-            warnings: [...(comparisonBase.warnings || []), ...(capture.warnings || [])],
+            warnings: [...(comparisonBase.warnings || []), ...(capture.warnings || []), ...(companionSearchError ? [`자동 수집: ${companionSearchError}`] : [])],
             items: capture.items || [],
           }),
         });
@@ -1623,20 +1634,26 @@ export default function App() {
       setShowDetailScan(false);
     }
 
-    if (includesNaver) {
-      window.open(naverShoppingSearchUrl(query, sortMode), "_blank", "noopener,noreferrer");
+    let pendingCompanionSearch: { query: string; promise: Promise<SearchPayload> } | null = null;
+    if (serverSources.length) {
+      pendingCompanionSearch = {
+        query,
+        promise: request<SearchPayload>("/price-search", token, {
+          method: "POST",
+          body: JSON.stringify({ query, sort_mode: sortMode, filters: Object.keys(detailSelection), sources: serverSources }),
+        }),
+      };
+      companionSearchInFlight.current = pendingCompanionSearch;
     }
+    if (includesNaver) window.open(naverShoppingSearchUrl(query, sortMode), "_blank", "noopener,noreferrer");
     setNotice(serverSources.length
       ? `${serverSources.map(sourceLabel).join(" · ")} 수집 중...${includesNaver ? " 네이버는 열린 화면에서 확장 프로그램을 눌러 주세요." : ""}`
       : "네이버 검색 화면을 열었습니다. 결과를 확인한 뒤 PriceScan 확장 프로그램을 눌러 주세요.");
 
     try {
       let data: SearchPayload = { run: null, items: [], summary: { collected_count: 0, lowest_count: 0, excluded_count: 0 } };
-      if (serverSources.length) {
-        data = await request<SearchPayload>("/price-search", token, {
-          method: "POST",
-          body: JSON.stringify({ query, sort_mode: sortMode, filters: Object.keys(detailSelection), sources: serverSources }),
-        });
+      if (pendingCompanionSearch) {
+        data = await pendingCompanionSearch.promise;
         setSearchPayload(data);
       } else {
         setSearchPayload(data);
@@ -1655,6 +1672,9 @@ export default function App() {
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "가격수집 실패");
     } finally {
+      if (pendingCompanionSearch && companionSearchInFlight.current === pendingCompanionSearch) {
+        companionSearchInFlight.current = null;
+      }
       setCollecting(false);
     }
   };
