@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "test:search-state": "node --test tests/search-state.test.ts",
+    "test:seller-workspace": "node --test tests/seller-workspace.test.ts",
     "preview": "vite preview"
   },
   "dependencies": {

@@ -1,15 +1,17 @@
-const MAX_CANDIDATES_PER_SOURCE = 50;
-const VERSION = "0.1.4";
-const DEFAULT_NAVER_INTERVAL_MS = 60_000;
-const MIN_NAVER_INTERVAL_MS = 30_000;
-const MAX_NAVER_INTERVAL_MS = 120_000;
+const MAX_CANDIDATES_PER_SOURCE = 10;
+const VERSION = "0.1.8";
+const DEFAULT_NAVER_INTERVAL_MS = 10 * 60_000;
+const MIN_NAVER_INTERVAL_MS = 10 * 60_000;
+const MAX_NAVER_INTERVAL_MS = 60 * 60_000;
 const NAVER_SECURITY_WAIT_TIMEOUT_MS = 10 * 60_000;
+const NAVER_SUPERVISED_WAIT_TIMEOUT_MS = 10 * 60_000;
 const NAVER_COLLECTOR_TAB_KEY = "naverCollectorTabId";
 const NAVER_LAST_SEARCH_KEY = "naverLastSearchStartedAt";
 
 const SOURCE_DEFINITIONS = {
   naver: {
     label: "네이버",
+    landingUrl: "https://shopping.naver.com/",
     searchUrl: (query, sortMode) => {
       const params = new URLSearchParams({
         query,
@@ -17,7 +19,7 @@ const SOURCE_DEFINITIONS = {
       });
       return `https://search.shopping.naver.com/search/all?${params.toString()}`;
     },
-    waitMs: 4000,
+    waitMs: 8000,
   },
   danawa: {
     label: "다나와",
@@ -51,6 +53,7 @@ const SOURCE_DEFINITIONS = {
   },
 };
 
+if (typeof chrome !== "undefined") {
 chrome.runtime.onInstalled.addListener(() => {
   chrome.storage.local.set({
     pricescanCollectorVersion: VERSION,
@@ -69,13 +72,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   return true;
 });
+}
 
 async function collectSearch(payload, context) {
   const query = String(payload?.query || "").trim();
   const sortMode = String(payload?.sortMode || "lowest");
   const token = String(payload?.token || "");
   const apiBaseUrl = String(payload?.apiBaseUrl || "").replace(/\/$/, "");
-  const sources = Array.isArray(payload?.sources) ? payload.sources.filter((source) => SOURCE_DEFINITIONS[source]) : [];
+  const sources = orderSourcesForCollection(
+    Array.isArray(payload?.sources) ? payload.sources.filter((source) => SOURCE_DEFINITIONS[source]) : [],
+  );
   const closeTabsAfterCapture = Boolean(payload?.closeTabsAfterCapture);
   const naverIntervalMs = clampNumber(
     Number(payload?.naverIntervalSeconds) * 1000,
@@ -101,7 +107,12 @@ async function collectSearch(payload, context) {
 
   for (const source of sources) {
     const definition = SOURCE_DEFINITIONS[source];
-    await sendProgress(context, `${definition.label} 검색 화면을 여는 중...`);
+    await sendProgress(
+      context,
+      source === "naver"
+        ? "네이버 주시형 수집을 먼저 준비합니다. 열린 화면에서 결과를 확인해 주세요."
+        : `${definition.label} 검색 화면을 여는 중...`,
+    );
     try {
       if (source === "naver") {
         await waitForNaverSearchInterval(naverIntervalMs, context);
@@ -166,6 +177,14 @@ async function collectSource(source, query, sortMode, closeTabsAfterCapture, con
     await sleep(definition.waitMs);
     if (source === "naver") {
       await waitForNaverSecurityConfirmation(tab.id, context);
+      const decision = await waitForNaverSupervisedApproval(tab.id, query, context);
+      if (decision === "skip") {
+        return {
+          pageUrl: url,
+          items: [],
+          warnings: ["네이버: 사용자가 주시형 현재 화면 수집을 건너뛰었습니다."],
+        };
+      }
     }
     if (source === "danawa") {
       const detailUrl = await findDanawaExactDetailUrl(tab.id, query);
@@ -190,6 +209,9 @@ async function collectSource(source, query, sortMode, closeTabsAfterCapture, con
       warnings,
     };
   } finally {
+    if (source === "naver") {
+      removeNaverSupervisedPanel(tab.id).catch(() => undefined);
+    }
     if (closeTabsAfterCapture) {
       chrome.tabs.remove(tab.id).catch(() => undefined);
       if (source === "naver") chrome.storage.local.remove(NAVER_COLLECTOR_TAB_KEY).catch(() => undefined);
@@ -202,7 +224,13 @@ async function collectSource(source, query, sortMode, closeTabsAfterCapture, con
 async function findDanawaExactDetailUrl(tabId, query) {
   const injection = await chrome.scripting.executeScript({
     target: { tabId },
-    func: (modelQuery) => {
+    func: selectDanawaDetailUrl,
+    args: [query],
+  });
+  return String(injection?.[0]?.result || "");
+}
+
+function selectDanawaDetailUrl(modelQuery) {
       const cleanText = (value) => String(value || "").replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
       const normalizeModel = (value) => cleanText(value).toLowerCase().replace(/[^a-z0-9가-힣]/g, "");
       const normalizedQuery = normalizeModel(modelQuery);
@@ -230,10 +258,6 @@ async function findDanawaExactDetailUrl(tabId, query) {
       }).filter(Boolean).sort((a, b) => b.score - a.score);
 
       return matches[0]?.url || "";
-    },
-    args: [query],
-  });
-  return String(injection?.[0]?.result || "");
 }
 
 async function openCollectorTab(source, url) {
@@ -265,7 +289,12 @@ async function waitForNaverSearchInterval(intervalMs, context) {
 
   while (remainingMs > 0) {
     const remainingSeconds = Math.ceil(remainingMs / 1000);
-    await sendProgress(context, `네이버 검색 간격 조절 중 · ${remainingSeconds}초 후 자동으로 검색합니다.`);
+    const remainingMinutes = Math.floor(remainingSeconds / 60);
+    const seconds = remainingSeconds % 60;
+    const remainingLabel = remainingMinutes > 0
+      ? `${remainingMinutes}분 ${String(seconds).padStart(2, "0")}초`
+      : `${seconds}초`;
+    await sendProgress(context, `네이버 사용자 세션 보호 대기 중 · ${remainingLabel} 후 검색합니다.`);
     await sleep(Math.min(5000, remainingMs));
     remainingMs = Math.max(0, intervalMs - (Date.now() - lastStartedAt));
   }
@@ -280,7 +309,7 @@ async function waitForNaverSecurityConfirmation(tabId, context) {
   await showNaverSecurityWaitingBanner(tabId).catch(() => undefined);
   await sendProgress(
     context,
-    "네이버 보안 확인이 필요합니다. 열린 네이버 탭에서 보안 질문을 완료해 주세요. 완료되면 자동으로 수집을 계속합니다.",
+    "네이버 보안 확인이 필요합니다. 열린 탭에서 확인을 완료하면 주시형 수집 안내가 이어집니다.",
   );
 
   const startedAt = Date.now();
@@ -297,7 +326,7 @@ async function waitForNaverSecurityConfirmation(tabId, context) {
       await waitForTabComplete(tabId, 20000).catch(() => undefined);
       await sleep(SOURCE_DEFINITIONS.naver.waitMs);
       await removeNaverSecurityWaitingBanner(tabId).catch(() => undefined);
-      await sendProgress(context, "네이버 보안 확인 완료 · 가격수집을 자동으로 계속합니다.");
+      await sendProgress(context, "네이버 보안 확인 완료 · 현재 화면 수집 승인을 준비합니다.");
       return;
     }
     if (Date.now() >= nextReminderAt) {
@@ -310,6 +339,207 @@ async function waitForNaverSecurityConfirmation(tabId, context) {
   throw new Error("네이버 보안 확인 대기시간이 초과되었습니다. 같은 네이버 탭에서 확인을 완료한 뒤 다시 실행하세요.");
 }
 
+async function waitForNaverSupervisedApproval(tabId, query, context) {
+  await chrome.tabs.update(tabId, { active: true }).catch(() => undefined);
+  await showNaverSupervisedPanel(tabId, query);
+  await sendProgress(
+    context,
+    "네이버는 주시형 수집입니다. 열린 네이버 결과를 확인한 뒤 ‘현재 화면 수집’을 눌러 주세요.",
+  );
+
+  const startedAt = Date.now();
+  let nextReminderAt = startedAt + 15_000;
+  while (Date.now() - startedAt < NAVER_SUPERVISED_WAIT_TIMEOUT_MS) {
+    await sleep(1000);
+
+    if (await hasNaverSecurityChallenge(tabId).catch(() => false)) {
+      await removeNaverSupervisedPanel(tabId).catch(() => undefined);
+      await waitForNaverSecurityConfirmation(tabId, context);
+      await showNaverSupervisedPanel(tabId, query);
+    }
+
+    let decision = "waiting";
+    try {
+      decision = await readNaverSupervisedDecision(tabId);
+    } catch {
+      throw new Error("네이버 주시형 수집 탭이 닫혔습니다. 다시 검색해 주세요.");
+    }
+
+    if (decision === "capture") {
+      await markNaverSupervisedCapturing(tabId).catch(() => undefined);
+      await sendProgress(context, "네이버 사용자 확인 완료 · 현재 화면에서 최대 10개를 수집합니다.");
+      return "capture";
+    }
+    if (decision === "skip") {
+      await removeNaverSupervisedPanel(tabId).catch(() => undefined);
+      await sendProgress(context, "네이버 주시형 수집을 건너뛰고 다음 쇼핑몰로 이동합니다.");
+      return "skip";
+    }
+    if (decision === "missing") {
+      await waitForTabComplete(tabId, 20000).catch(() => undefined);
+      await showNaverSupervisedPanel(tabId, query).catch(() => undefined);
+    }
+
+    if (Date.now() >= nextReminderAt) {
+      await sendProgress(context, "네이버 화면을 확인하는 중입니다. 준비되면 ‘현재 화면 수집’을 눌러 주세요.");
+      nextReminderAt = Date.now() + 15_000;
+    }
+  }
+
+  await removeNaverSupervisedPanel(tabId).catch(() => undefined);
+  throw new Error("네이버 사용자 확인 시간이 초과되었습니다. 다시 검색해 주세요.");
+}
+
+async function showNaverSupervisedPanel(tabId, query) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    func: (searchQuery) => {
+      const panelId = "pricescan-supervised-collector";
+      const root = document.documentElement;
+      delete root.dataset.pricescanNaverDecision;
+      document.getElementById(panelId)?.remove();
+
+      const panel = document.createElement("section");
+      panel.id = panelId;
+      panel.setAttribute("role", "dialog");
+      panel.setAttribute("aria-label", "PriceScan 네이버 주시형 수집");
+      Object.assign(panel.style, {
+        position: "fixed",
+        right: "24px",
+        bottom: "24px",
+        zIndex: "2147483647",
+        width: "min(390px, calc(100vw - 48px))",
+        padding: "22px",
+        border: "1px solid #bcb3a7",
+        borderRadius: "18px",
+        background: "#fffdf9",
+        color: "#111111",
+        boxShadow: "0 18px 48px rgba(17, 17, 17, 0.16)",
+        fontFamily: "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+        lineHeight: "1.5",
+      });
+
+      const eyebrow = document.createElement("div");
+      eyebrow.textContent = "NAVER · 주시형 수집";
+      Object.assign(eyebrow.style, {
+        marginBottom: "10px",
+        color: "#5f5a52",
+        fontSize: "12px",
+        fontWeight: "800",
+      });
+
+      const title = document.createElement("strong");
+      title.textContent = "현재 검색 결과를 확인해 주세요";
+      Object.assign(title.style, {
+        display: "block",
+        marginBottom: "8px",
+        fontSize: "20px",
+        fontWeight: "800",
+      });
+
+      const description = document.createElement("p");
+      description.textContent = `‘${String(searchQuery || "").slice(0, 80)}’ 결과가 맞으면 현재 화면만 가져옵니다. 자동 스크롤이나 페이지 이동은 하지 않습니다.`;
+      Object.assign(description.style, {
+        margin: "0 0 18px",
+        color: "#5f5a52",
+        fontSize: "14px",
+      });
+
+      const actions = document.createElement("div");
+      Object.assign(actions.style, {
+        display: "flex",
+        gap: "8px",
+        justifyContent: "flex-end",
+      });
+
+      const skipButton = document.createElement("button");
+      skipButton.type = "button";
+      skipButton.textContent = "네이버 건너뛰기";
+      Object.assign(skipButton.style, {
+        minHeight: "44px",
+        padding: "0 16px",
+        border: "1px solid #ded8cf",
+        borderRadius: "999px",
+        background: "transparent",
+        color: "#5f5a52",
+        cursor: "pointer",
+        fontSize: "13px",
+        fontWeight: "700",
+      });
+
+      const captureButton = document.createElement("button");
+      captureButton.type = "button";
+      captureButton.textContent = "현재 화면 수집";
+      Object.assign(captureButton.style, {
+        minHeight: "44px",
+        padding: "0 20px",
+        border: "1px solid #111111",
+        borderRadius: "999px",
+        background: "#111111",
+        color: "#ffffff",
+        cursor: "pointer",
+        fontSize: "13px",
+        fontWeight: "800",
+      });
+
+      skipButton.addEventListener("click", () => {
+        root.dataset.pricescanNaverDecision = "skip";
+        skipButton.disabled = true;
+        captureButton.disabled = true;
+        description.textContent = "네이버를 건너뛰고 다음 쇼핑몰로 이동합니다.";
+      });
+      captureButton.addEventListener("click", () => {
+        root.dataset.pricescanNaverDecision = "capture";
+        skipButton.disabled = true;
+        captureButton.disabled = true;
+        captureButton.textContent = "수집 준비 중";
+        description.textContent = "사용자 확인이 완료되었습니다. 현재 화면에서 최대 10개를 읽습니다.";
+      });
+
+      actions.append(skipButton, captureButton);
+      panel.append(eyebrow, title, description, actions);
+      root.appendChild(panel);
+    },
+    args: [query],
+  });
+}
+
+async function readNaverSupervisedDecision(tabId) {
+  const injection = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => {
+      const decision = document.documentElement.dataset.pricescanNaverDecision;
+      if (decision === "capture" || decision === "skip") return decision;
+      return document.getElementById("pricescan-supervised-collector") ? "waiting" : "missing";
+    },
+  });
+  return String(injection?.[0]?.result || "missing");
+}
+
+async function markNaverSupervisedCapturing(tabId) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => {
+      const panel = document.getElementById("pricescan-supervised-collector");
+      if (!panel) return;
+      const title = panel.querySelector("strong");
+      const description = panel.querySelector("p");
+      if (title) title.textContent = "현재 화면을 수집하고 있습니다";
+      if (description) description.textContent = "완료되면 다나와·에누리·쿠팡 수집이 자동으로 이어집니다.";
+    },
+  });
+}
+
+async function removeNaverSupervisedPanel(tabId) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => {
+      document.getElementById("pricescan-supervised-collector")?.remove();
+      delete document.documentElement.dataset.pricescanNaverDecision;
+    },
+  });
+}
+
 async function showNaverSecurityWaitingBanner(tabId) {
   await chrome.scripting.executeScript({
     target: { tabId },
@@ -318,7 +548,7 @@ async function showNaverSecurityWaitingBanner(tabId) {
       if (document.getElementById(bannerId)) return;
       const banner = document.createElement("div");
       banner.id = bannerId;
-      banner.textContent = "PriceScan이 기다리고 있습니다. 네이버 보안 확인을 완료하면 가격수집이 자동으로 계속됩니다.";
+      banner.textContent = "PriceScan이 기다리고 있습니다. 네이버 보안 확인을 완료하면 현재 화면 수집 안내가 이어집니다.";
       Object.assign(banner.style, {
         position: "fixed",
         right: "20px",
@@ -353,10 +583,11 @@ async function hasNaverSecurityChallenge(tabId) {
   const injection = await chrome.scripting.executeScript({
     target: { tabId },
     func: () => {
+      const isLoginPage = location.hostname === "nid.naver.com";
       const bodyText = String(document.body?.innerText || "").replace(/\s+/g, " ");
       const hasChallengeElement = Boolean(document.querySelector(".captcha_wrap, .captcha_form, [class*='captcha']"));
       const hasChallengeText = /보안\s*확인을\s*완료|실제\s*사용자임을\s*확인|보안문자|자동입력\s*방지|CAPTCHA/i.test(bodyText);
-      return hasChallengeElement || hasChallengeText;
+      return isLoginPage || hasChallengeElement || hasChallengeText;
     },
   });
   return Boolean(injection?.[0]?.result);
@@ -365,6 +596,13 @@ async function hasNaverSecurityChallenge(tabId) {
 function clampNumber(value, min, max, fallback) {
   if (!Number.isFinite(value)) return fallback;
   return Math.min(max, Math.max(min, value));
+}
+
+function orderSourcesForCollection(sources) {
+  const unique = [...new Set(sources)];
+  return unique.includes("naver")
+    ? ["naver", ...unique.filter((source) => source !== "naver")]
+    : unique;
 }
 
 function waitForTabComplete(tabId, timeoutMs) {
@@ -423,6 +661,8 @@ async function captureVisibleShoppingProducts(source, maxItems, query = "") {
       "div[class*='adProduct_item']",
     ],
     danawa: [
+      ".list__mall-price > .list-item",
+      ".list__mall-price .list-item",
       "#OpenMarketMallListDiv .diff_item",
       "#StandardMallListDiv .diff_item",
       ".diff_list .diff_item",
@@ -434,6 +674,9 @@ async function captureVisibleShoppingProducts(source, maxItems, query = "") {
       "div[class*='main_prodlist'] li",
     ],
     enuri: [
+      ".product-list .product-item",
+      "li.product-item",
+      "[itemtype='https://schema.org/Product']",
       "li[class*='prod']",
       "div[class*='prod']",
       "li[class*='item']",
@@ -441,6 +684,8 @@ async function captureVisibleShoppingProducts(source, maxItems, query = "") {
     ],
     coupang: [
       "li.search-product",
+      "li[data-product-id]",
+      "li[data-vendor-item-id]",
       "li[class*='search-product']",
       "li[class*='ProductUnit']",
       "div[class*='ProductUnit']",
@@ -517,22 +762,36 @@ async function captureVisibleShoppingProducts(source, maxItems, query = "") {
   const initialScrollTop = window.scrollY;
   let stablePasses = 0;
 
-  collectCurrentCards();
-  for (let pass = 0; pass < 12 && items.length < maxItems; pass += 1) {
-    const beforeCount = items.length;
-    const beforeScrollTop = window.scrollY;
-    const scrollStep = Math.max(Math.floor(window.innerHeight * 0.85), 650);
-    window.scrollBy({ top: scrollStep, left: 0, behavior: "auto" });
-    await new Promise((resolve) => setTimeout(resolve, 850));
-    collectCurrentCards();
-
-    stablePasses = items.length === beforeCount ? stablePasses + 1 : 0;
-    const scrollingElement = document.scrollingElement || document.documentElement;
-    const reachedBottom = window.scrollY === beforeScrollTop
-      || window.scrollY + window.innerHeight >= scrollingElement.scrollHeight - 8;
-    if (reachedBottom && stablePasses >= 2) break;
+  if (source === "enuri") {
+    for (const product of parseEnuriStructuredProducts()) {
+      if (items.length >= maxItems) break;
+      addProduct(product);
+    }
   }
-  window.scrollTo({ top: initialScrollTop, left: 0, behavior: "auto" });
+
+  collectCurrentCards();
+  // This function is serialized into the shopping page; outer helpers do not exist there.
+  if (source !== "naver") {
+    for (let pass = 0; pass < 12 && items.length < maxItems; pass += 1) {
+      const beforeCount = items.length;
+      const beforeScrollTop = window.scrollY;
+      const scrollStep = Math.max(Math.floor(window.innerHeight * 0.85), 650);
+      window.scrollBy({ top: scrollStep, left: 0, behavior: "auto" });
+      await new Promise((resolve) => setTimeout(resolve, 850));
+      collectCurrentCards();
+
+      stablePasses = items.length === beforeCount ? stablePasses + 1 : 0;
+      const scrollingElement = document.scrollingElement || document.documentElement;
+      const reachedBottom = window.scrollY === beforeScrollTop
+        || window.scrollY + window.innerHeight >= scrollingElement.scrollHeight - 8;
+      if (reachedBottom && stablePasses >= 2) break;
+    }
+    window.scrollTo({ top: initialScrollTop, left: 0, behavior: "auto" });
+  }
+
+  if (source === "naver" && items.length > 0 && items.length < maxItems) {
+    warnings.push(`네이버: 로그인된 현재 화면에 로드된 ${items.length}개 결과만 수집했습니다.`);
+  }
 
   if (items.length === 0) {
     const detailProduct = parseProductCard(document.body);
@@ -559,11 +818,16 @@ async function captureVisibleShoppingProducts(source, maxItems, query = "") {
       if (!card || !document.documentElement.contains(card)) continue;
       const product = parseProductCard(card);
       if (!product) continue;
-      const key = `${product.name}|${product.price}|${product.url}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      items.push(product);
+      addProduct(product);
     }
+  }
+
+  function addProduct(product) {
+    if (!product) return;
+    const key = `${normalizeModelText(product.name)}|${product.price}|${product.url}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    items.push(product);
   }
 
   function scoreCard(card) {
@@ -573,6 +837,19 @@ async function captureVisibleShoppingProducts(source, maxItems, query = "") {
   }
 
   function parseProductCard(card) {
+    if (source === "danawa") {
+      const danawaProduct = parseDanawaProductCard(card);
+      if (danawaProduct) return danawaProduct;
+    }
+    if (source === "enuri") {
+      const enuriProduct = parseEnuriProductCard(card);
+      if (enuriProduct) return enuriProduct;
+    }
+    if (source === "coupang") {
+      const coupangProduct = parseCoupangProductCard(card);
+      if (coupangProduct) return coupangProduct;
+    }
+
     const text = cleanText(card.innerText || card.textContent || "");
     if (!text || !/[0-9][0-9,]*\s*원/.test(text)) return null;
 
@@ -598,6 +875,157 @@ async function captureVisibleShoppingProducts(source, maxItems, query = "") {
       shipping,
       total: exposurePrice + shipping,
       url,
+    };
+  }
+
+  function parseDanawaProductCard(card) {
+    const mallList = card.closest?.(".list__mall-price");
+    if (mallList) {
+      const sellPrice = card.querySelector(".sell-price");
+      const exposurePrice = parseLoosePrice(
+        sellPrice?.getAttribute("data-base-price")
+        || firstText(card, [".sell-price .text__num", ".box__price .text__num", ".price_sect strong"]),
+      );
+      if (!exposurePrice) return null;
+      const shippingFromData = parseLoosePrice(sellPrice?.getAttribute("data-delivery-price") || "", 0);
+      const shipping = shippingFromData || extractShipping(firstText(card, [".box__delivery"]) || card.innerText || "");
+      const pageTitle = firstText(document, [
+        ".top_summary .prod_tit .title",
+        ".top_summary .prod_tit",
+        "h1[itemprop='name']",
+        "h1",
+      ]).replace(/\s*:\s*다나와\s*가격비교.*$/i, "");
+      const mall = cleanText(card.querySelector(".box__logo img[alt], .d_mall img[alt]")?.getAttribute("alt") || "")
+        || firstText(card, [".box__logo", ".d_mall", ".mall"])
+        || "다나와 판매처";
+      const registeredPrice = Math.max(
+        exposurePrice,
+        parseLoosePrice(firstText(card, ["del", ".text__original-price"]), 0),
+      );
+      return {
+        source,
+        mall: mall.slice(0, 40),
+        name: (pageTitle || cleanText(query) || "다나와 상품").slice(0, 240),
+        price: exposurePrice,
+        registered_price: registeredPrice,
+        shipping,
+        total: exposurePrice + shipping,
+        url: firstUrl(card, [
+          "a.link__full-cover[href]",
+          "a.link__sell-price[href]",
+          "a.priceCompareBuyLink[href]",
+          "a[href*='loadingBridge.html']",
+        ]),
+      };
+    }
+
+    const title = firstText(card, [".prod_name a", "p.prod_name a", "a[name='productName']"]);
+    const priceRoot = card.querySelector(".prod_pricelist li.rank_one .price_sect")
+      || card.querySelector(".prod_pricelist .price_sect")
+      || card.querySelector(".price_sect");
+    const exposurePrice = parseLoosePrice(firstText(priceRoot || card, ["strong"]) || priceRoot?.innerText || "");
+    if (!title || !exposurePrice) return null;
+    const text = cleanText(card.innerText || card.textContent || "");
+    const launchPrice = text.match(/출시가\s*:\s*([0-9,]+)\s*원/i);
+    const registeredPrice = Math.max(exposurePrice, parseLoosePrice(launchPrice?.[1] || "", 0));
+    return {
+      source,
+      mall: "다나와 가격비교",
+      name: title.slice(0, 240),
+      price: exposurePrice,
+      registered_price: registeredPrice,
+      shipping: extractShipping(text),
+      total: exposurePrice + extractShipping(text),
+      url: firstUrl(card, [".prod_name a[href]", ".price_sect a[href]"]),
+    };
+  }
+
+  function parseEnuriStructuredProducts() {
+    const products = [];
+    const scripts = Array.from(document.querySelectorAll("script[type='application/ld+json']"));
+    for (const script of scripts) {
+      let data;
+      try {
+        data = JSON.parse(String(script.textContent || "").trim());
+      } catch {
+        continue;
+      }
+      const roots = Array.isArray(data) ? data : [data, ...(Array.isArray(data?.["@graph"]) ? data["@graph"] : [])];
+      for (const root of roots) {
+        if (!root || root["@type"] !== "ItemList" || !Array.isArray(root.itemListElement)) continue;
+        for (const entry of root.itemListElement) {
+          const item = entry?.item || entry;
+          const offers = item?.offers || {};
+          const price = parseLoosePrice(offers.lowPrice ?? offers.price ?? "");
+          const name = cleanText(item?.name || "");
+          if (!name || !price || isNoiseTitle(name)) continue;
+          products.push({
+            source,
+            mall: "에누리 가격비교",
+            name: name.slice(0, 240),
+            price,
+            registered_price: price,
+            shipping: 0,
+            total: price,
+            url: absoluteUrl(item?.url || location.href),
+          });
+        }
+      }
+    }
+    return products;
+  }
+
+  function parseEnuriProductCard(card) {
+    const title = firstText(card, [".product-name", "[itemprop='name']", ".prodName a", ".prod_name a"]);
+    const priceElement = card.querySelector("[itemprop='lowPrice'], .price-low, [class*='lowestPrice'], [class*='price_low']");
+    const price = parseLoosePrice(priceElement?.getAttribute("content") || priceElement?.innerText || priceElement?.textContent || "");
+    if (!title || !price) return null;
+    return {
+      source,
+      mall: "에누리 가격비교",
+      name: title.slice(0, 240),
+      price,
+      registered_price: price,
+      shipping: extractShipping(cleanText(card.innerText || card.textContent || "")),
+      total: price + extractShipping(cleanText(card.innerText || card.textContent || "")),
+      url: firstUrl(card, ["a.product-link[href]", "a[itemprop='url'][href]", "a[href*='detail.jsp?modelno=']"]),
+    };
+  }
+
+  function parseCoupangProductCard(card) {
+    const productAnchor = card.matches?.("a[href*='/vp/products/'], a[href*='/np/products/']")
+      ? card
+      : card.querySelector("a[href*='/vp/products/'], a[href*='/np/products/']");
+    if (!productAnchor) return null;
+    const imageAlt = cleanText(productAnchor.querySelector?.("img[alt]")?.getAttribute("alt") || "");
+    const title = firstText(card, [
+      ".name",
+      ".product-name",
+      "[class*='productName']",
+      "[class*='ProductName']",
+      "[data-testid='product-name']",
+    ]) || imageAlt;
+    if (!title || isNoiseTitle(title)) return null;
+    const priceElement = card.querySelector(
+      ".sale-price .price-value, .price-value, [class*='priceValue'], [class*='PriceValue'], [data-testid='price']",
+    );
+    const exposurePrice = parseLoosePrice(priceElement?.getAttribute("content") || priceElement?.innerText || priceElement?.textContent || "");
+    if (!exposurePrice) return null;
+    const registeredPrice = Math.max(
+      exposurePrice,
+      parseLoosePrice(firstText(card, ["del", ".base-price", "[class*='originalPrice']", "[class*='OriginalPrice']"]), 0),
+    );
+    const text = cleanText(card.innerText || card.textContent || "");
+    const shipping = extractShipping(text);
+    return {
+      source,
+      mall: "쿠팡",
+      name: title.slice(0, 240),
+      price: exposurePrice,
+      registered_price: registeredPrice,
+      shipping,
+      total: exposurePrice + shipping,
+      url: absoluteUrl(productAnchor.getAttribute("href") || productAnchor.href || location.href),
     };
   }
 
@@ -652,6 +1080,28 @@ async function captureVisibleShoppingProducts(source, maxItems, query = "") {
     } catch {
       return location.href;
     }
+  }
+
+  function firstUrl(root, selectors) {
+    for (const selector of selectors) {
+      const anchor = root.querySelector(selector);
+      const href = anchor?.getAttribute("href") || anchor?.href || "";
+      if (href && !/^#|javascript:/i.test(href)) return absoluteUrl(href);
+    }
+    return location.href;
+  }
+
+  function absoluteUrl(value) {
+    try {
+      return new URL(String(value || ""), location.href).href;
+    } catch {
+      return location.href;
+    }
+  }
+
+  function parseLoosePrice(value, minimum = 1000) {
+    const parsed = parseInt(String(value ?? "").replace(/[^0-9]/g, ""), 10);
+    return Number.isFinite(parsed) && parsed >= minimum ? parsed : 0;
   }
 
   function extractMall(card) {
@@ -749,4 +1199,13 @@ async function captureVisibleShoppingProducts(source, maxItems, query = "") {
     if (normalized.length < 4) return true;
     return /^(광고|찜하기|장바구니|구매하기|바로구매|무료배송|로켓배송|검색결과|정렬|필터|로그인|회원가입|쿠팡홈|카테고리)$/i.test(normalized);
   }
+}
+
+function shouldAutoScrollSource(source) {
+  return source !== "naver";
+}
+
+// The desktop host reuses the exact parser without loading an extension or credentials.
+if (typeof module !== "undefined") {
+  module.exports = { captureVisibleShoppingProducts, selectDanawaDetailUrl, SOURCE_DEFINITIONS };
 }

@@ -11,7 +11,8 @@ ZIP_PATH="$OUT_DIR/pricescan-collector-${VERSION}-webstore.zip"
 rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR/icons" "$OUT_DIR"
 
-cp "$EXT_DIR/background.js" "$BUILD_DIR/background.js"
+cp "$EXT_DIR/extension-runtime.js" "$BUILD_DIR/extension-runtime.js"
+cp "$EXT_DIR/naver-current-page.js" "$BUILD_DIR/naver-current-page.js"
 cp "$EXT_DIR/pricescan-page.js" "$BUILD_DIR/pricescan-page.js"
 cp "$EXT_DIR/popup.html" "$BUILD_DIR/popup.html"
 cp "$EXT_DIR/popup.css" "$BUILD_DIR/popup.css"
@@ -20,7 +21,8 @@ cp "$EXT_DIR/manifest.webstore.json" "$BUILD_DIR/manifest.json"
 cp "$EXT_DIR"/icons/*.png "$BUILD_DIR/icons/"
 
 python3 -m json.tool "$BUILD_DIR/manifest.json" >/dev/null
-node --check "$BUILD_DIR/background.js"
+node --check "$BUILD_DIR/extension-runtime.js"
+node --check "$BUILD_DIR/naver-current-page.js"
 node --check "$BUILD_DIR/pricescan-page.js"
 node --check "$BUILD_DIR/popup.js"
 

@@ -4,66 +4,46 @@ const path = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
 
-function loadContentScript({ runtimeId = "pricescan-test-extension", throwOnSend = true } = {}) {
+function loadContentScript(capture = null) {
   const listeners = new Map();
-  const postedMessages = [];
-  let sendMessageCalls = 0;
+  const posted = [];
+  const sent = [];
   const window = {
-    location: { origin: "http://127.0.0.1:8300" },
-    addEventListener(type, listener) {
-      listeners.set(type, listener);
-    },
-    postMessage(message) {
-      postedMessages.push(message);
-    },
+    location: { origin: "https://pricescan.d2blue.com" },
+    addEventListener(type, listener) { listeners.set(type, listener); },
+    postMessage(message) { posted.push(message); },
   };
   const chrome = {
     runtime: {
-      id: runtimeId,
+      id: "test-extension",
       lastError: null,
-      sendMessage() {
-        sendMessageCalls += 1;
-        if (throwOnSend) throw new Error("Extension context invalidated.");
+      sendMessage(message, callback) {
+        sent.push(message);
+        if (callback) callback({ ok: true, capture });
+        return Promise.resolve({ ok: true });
       },
       onMessage: { addListener() {} },
     },
   };
   const context = vm.createContext({ chrome, console, window });
-  const source = fs.readFileSync(path.join(__dirname, "pricescan-page.js"), "utf8");
-  vm.runInContext(source, context, { filename: "pricescan-page.js" });
-  return { getSendMessageCalls: () => sendMessageCalls, listeners, postedMessages, window };
+  vm.runInContext(fs.readFileSync(path.join(__dirname, "pricescan-page.js"), "utf8"), context);
+  return { listeners, posted, sent, window };
 }
 
-test("invalidated extension context returns a page-refresh instruction without throwing", () => {
-  const { listeners, postedMessages, window } = loadContentScript();
-  const listener = listeners.get("message");
-
-  assert.doesNotThrow(() => listener({
-    source: window,
-    data: {
-      type: "PRICESCAN_COLLECTOR_COLLECT_REQUEST",
-      requestId: "request-1",
-      payload: { query: "16ZB90S-GA5PK" },
-    },
-  }));
-  assert.equal(postedMessages.at(-1).type, "PRICESCAN_COLLECTOR_COLLECT_RESULT");
-  assert.equal(postedMessages.at(-1).ok, false);
-  assert.match(postedMessages.at(-1).error, /새로고침/);
+test("pending current-page capture is delivered to PriceScan", () => {
+  const capture = { id: "capture-1", items: [{ name: "상품" }] };
+  const { posted } = loadContentScript(capture);
+  assert.equal(posted.at(-1).type, "PRICESCAN_CURRENT_PAGE_CAPTURED");
+  assert.equal(posted.at(-1).capture.id, "capture-1");
 });
 
-test("missing runtime id blocks the extension API call before Chrome records an error", () => {
-  const { getSendMessageCalls, listeners, postedMessages, window } = loadContentScript({ runtimeId: null });
-  const listener = listeners.get("message");
-
-  assert.doesNotThrow(() => listener({
+test("PriceScan acknowledgement clears the matching pending capture", () => {
+  const { listeners, sent, window } = loadContentScript();
+  listeners.get("message")({
     source: window,
-    data: {
-      type: "PRICESCAN_COLLECTOR_COLLECT_REQUEST",
-      requestId: "request-2",
-      payload: { query: "16ZB90S-GA5PK" },
-    },
-  }));
-  assert.equal(getSendMessageCalls(), 0);
-  assert.equal(postedMessages.at(-1).ok, false);
-  assert.match(postedMessages.at(-1).error, /새로고침/);
+    origin: window.location.origin,
+    data: { type: "PRICESCAN_CURRENT_PAGE_CAPTURE_ACK", captureId: "capture-2" },
+  });
+  assert.equal(sent.at(-1).type, "PRICESCAN_ACK_PENDING_CAPTURE");
+  assert.equal(sent.at(-1).captureId, "capture-2");
 });

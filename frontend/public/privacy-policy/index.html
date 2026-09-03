@@ -35,16 +35,16 @@
         <a href="/pricescan/">PriceScan</a>
         <p>Chrome Extension</p>
         <h1>개인정보처리방침</h1>
-        <span>시행일 2026.08.18</span>
+        <span>시행일 2026.09.03</span>
       </header>
 
-      <p class="lead">PriceScan Collector는 사용자가 요청한 쇼핑몰 화면의 상품 가격 정보를 읽어 PriceScan 가격 비교 서비스로 전달합니다. 가격 비교에 필요한 정보만 처리합니다.</p>
+      <p class="lead">PriceScan Collector는 사용자가 확장 프로그램 버튼을 눌렀을 때 현재 열려 있는 네이버 쇼핑 화면의 상품 가격 정보를 한 번만 읽어 PriceScan 가격 비교 서비스로 전달합니다.</p>
 
       <section>
         <h2>수집하는 정보</h2>
         <ul>
-          <li>상품명</li><li>쇼핑몰 또는 판매처명</li><li>등록가와 노출가</li><li>배송비</li>
-          <li>쿠폰·혜택 표시 텍스트</li><li>상품 상세 링크</li><li>수집 시각</li>
+          <li>현재 화면에 표시된 상품명</li><li>쇼핑몰 또는 판매처명</li><li>상품 가격</li><li>배송비</li>
+          <li>상품 상세 링크</li><li>수집 시각</li>
         </ul>
       </section>
 
@@ -63,10 +63,10 @@
       <section>
         <h2>권한 사용</h2>
         <dl>
-          <div><dt>scripting</dt><dd>쇼핑몰 화면에서 상품 가격 정보를 읽습니다.</dd></div>
-          <div><dt>tabs</dt><dd>사용자가 요청한 검색 탭을 열고 수집 대상 탭을 관리합니다.</dd></div>
-          <div><dt>storage</dt><dd>검색 간격과 연결 상태 등 최소한의 설정을 기기에 저장합니다.</dd></div>
-          <div><dt>호스트 권한</dt><dd>PriceScan과 지원 쇼핑몰 화면에서만 기능을 실행합니다.</dd></div>
+          <div><dt>activeTab</dt><dd>사용자가 확장 프로그램 버튼을 누른 현재 네이버 쇼핑 탭에만 일시적으로 접근합니다.</dd></div>
+          <div><dt>scripting</dt><dd>현재 화면에 보이는 상품명, 판매처, 가격, 배송비와 상품 링크를 구조화합니다.</dd></div>
+          <div><dt>storage</dt><dd>PriceScan으로 전달할 한 번의 수집 결과를 기기에 임시 저장하고, 반영 확인 후 삭제합니다.</dd></div>
+          <div><dt>호스트 권한</dt><dd>PriceScan 웹앱과 수집 결과를 주고받는 데 사용합니다.</dd></div>
         </dl>
       </section>
 

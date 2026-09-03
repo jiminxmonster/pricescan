@@ -10,6 +10,11 @@ export default defineConfig({
   server: {
     port: 8300,
     allowedHosts: [".d2blue.com", "141.164.35.141", "127.0.0.1", "localhost"],
+    headers: {
+      "Cache-Control": "no-store, no-cache, must-revalidate",
+      Pragma: "no-cache",
+      Expires: "0",
+    },
     proxy: {
       "/api": {
         target: apiProxyTarget,

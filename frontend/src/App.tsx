@@ -1,4 +1,13 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import SellerWorkspace from "./SellerWorkspace";
+import { checkCollectorConnection, collectorConnectionCopy, launchCollectorBrowser, type BrowserLaunchStatus, type CollectorStatus } from "./collector-connection";
+import {
+  isMonitoringRefreshDue,
+  isSourceItemMonitored,
+  nextMonitoringRefreshAt,
+  shouldRestoreSimpleSearch,
+  visibleResultsBySource,
+} from "./search-state";
 
 const basePath = import.meta.env.BASE_URL.replace(/\/$/, "");
 const API_BASE = `${basePath}/api`;
@@ -6,9 +15,21 @@ const TOKEN_KEY = "pricescan_admin_token";
 const SETTINGS_KEY = "pricescan_admin_settings";
 const SETTINGS_VERSION_KEY = "pricescan_admin_settings_version";
 const SETTINGS_VERSION = "publish-slot-v1";
+const NAVER_SCAN_INTERVAL_KEY = "pricescan_naver_scan_interval_seconds";
+const DEFAULT_NAVER_SCAN_INTERVAL_SECONDS = 600;
+const MONITORING_REFRESH_HOURS_KEY = "pricescan_monitoring_refresh_hours";
+const MONITORING_AUTO_REFRESH_KEY = "pricescan_monitoring_auto_refresh";
+const MONITORING_LAST_RUN_AT_KEY = "pricescan_monitoring_last_run_at";
+const monitoringRefreshHourOptions = [1, 3, 6, 12, 24];
+const LOCAL_ADMIN_TOKEN = "pricescan-admin-token";
+const isLocalCollectorChrome = typeof window !== "undefined"
+  && ["127.0.0.1", "localhost"].includes(window.location.hostname)
+  && (new URLSearchParams(window.location.search).get("collector") === "dev"
+    || (new URLSearchParams(window.location.search).get("collector") === "desktop" && Boolean(window.PriceScanDesktop)));
 
 type FeatureKey = "publish" | "pricing" | "invoice" | "tenant";
 type Tab = "search" | "monitoring" | "api" | "settings" | FeatureKey;
+type MinimalView = "search" | "monitoring";
 
 type AdminSettings = {
   showSidebar: boolean;
@@ -64,10 +85,10 @@ const searchSourceGroups: SearchSourceGroup[] = [
     title: "쇼핑몰 / 가격비교",
     options: [
       { key: "smartstore", label: "네이버 스마트스토어", description: "판매상품은 모니터링에서 조회", enabled: false, badge: "모니터링" },
-      { key: "naver", label: "네이버 쇼핑", description: "검색 페이지 크롤러", enabled: true, badge: "사용 가능" },
+      { key: "naver", label: "네이버 쇼핑", description: "Chrome 확장 프로그램 현재 화면 가져오기", enabled: true, badge: "사용자 확인" },
       { key: "danawa", label: "다나와", description: "검색 페이지 크롤러", enabled: true, badge: "사용 가능" },
       { key: "enuri", label: "에누리", description: "검색 페이지 크롤러", enabled: true, badge: "사용 가능" },
-      { key: "coupang", label: "쿠팡", description: "검색 페이지 크롤러", enabled: true, badge: "사용 가능" },
+      { key: "coupang", label: "쿠팡", description: "사용자 승인형 브라우저 수집", enabled: true, badge: "브라우저" },
       { key: "elevenst", label: "11번가", description: "수집기 미구현", enabled: false, badge: "준비 중" },
       { key: "gmarket", label: "G마켓", description: "수집기 미구현", enabled: false, badge: "준비 중" },
       { key: "auction", label: "옥션", description: "수집기 미구현", enabled: false, badge: "준비 중" },
@@ -77,10 +98,26 @@ const searchSourceGroups: SearchSourceGroup[] = [
 
 const readySourceKeys = new Set(searchSourceGroups.flatMap((group) => group.options.filter((option) => option.enabled).map((option) => option.key)));
 const priceReadySourceKeys = new Set(["naver", "danawa", "enuri", "coupang"]);
+const minimalPriceSources = ["naver", "danawa", "enuri", "coupang"];
 const apiPlatformOrder = ["smartstore", "danawa", "enuri", "coupang", "naver", "elevenst", "gmarket", "auction", "google_search", "naver_search"];
 const serviceUrl = "https://pricescan.d2blue.com/";
+const localHelperBase = import.meta.env.VITE_PRICESCAN_LOCAL_HELPER_URL || "http://127.0.0.1:8401";
+const PRICESCAN_CURRENT_PAGE_CAPTURED = "PRICESCAN_CURRENT_PAGE_CAPTURED";
+const PRICESCAN_CURRENT_PAGE_CAPTURE_ACK = "PRICESCAN_CURRENT_PAGE_CAPTURE_ACK";
+const naverScanIntervalOptions = [
+  { value: 600, label: "네이버 간격 10분 (권장)" },
+  { value: 1200, label: "네이버 간격 20분" },
+  { value: 1800, label: "네이버 간격 30분" },
+  { value: 3600, label: "네이버 간격 60분" },
+];
 const productInfoNoticeTypes = ["기타 재화", "전자제품", "가전제품", "의류", "신발", "가방", "식품", "화장품"];
 const deliveryMethods = ["택배/소포/등기", "직접배송", "방문수령", "퀵서비스"];
+
+function naverShoppingSearchUrl(query: string, sortMode: string) {
+  const params = new URLSearchParams({ query });
+  if (sortMode === "lowest") params.set("sort", "price_asc");
+  return `https://search.shopping.naver.com/ns/search?${params.toString()}`;
+}
 
 type NaverApiGuide = {
   title: string;
@@ -161,12 +198,21 @@ type SearchPayload = {
   };
 };
 
+type CoupangBrowserCollectorState = {
+  open: boolean;
+  rawText: string;
+  approvalScope: "once" | "session";
+  pageUrl: string;
+  submitting: boolean;
+};
+
 type PriceItem = {
   id: string;
   source: string;
   mall: string;
   name: string;
   price: number;
+  registered_price?: number;
   shipping: number;
   total: number;
   url: string;
@@ -257,6 +303,8 @@ type CompetitorSnapshot = {
   exclusion_reason: string;
   collected_at: string;
 };
+
+type ComparisonHistory = Record<ComparisonPlatform, CompetitorSnapshot[]>;
 
 type PreparedProduct = {
   id: string;
@@ -495,6 +543,7 @@ async function request<T>(path: string, token: string, options: RequestInit = {}
   return response.json() as Promise<T>;
 }
 
+
 function apiAssetUrl(path: string): string {
   if (path.startsWith("http://") || path.startsWith("https://")) return path;
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
@@ -547,6 +596,8 @@ function statusLabel(status: string): string {
     cancelled: "취소",
     purchase_complete: "구매완료",
     exception: "예외 확인",
+    browser_required: "브라우저 수집 필요",
+    browser_success: "브라우저 수집 완료",
   };
   return labels[status] || status;
 }
@@ -565,6 +616,17 @@ function sourceLabel(source: string): string {
     naver_search: "네이버 일반검색",
   };
   return labels[source] || source;
+}
+
+function coupangBrowserSearchUrl(query: string, sortMode: string): string {
+  const params = new URLSearchParams({
+    component: "",
+    q: query,
+    channel: "user",
+    listSize: "40",
+    sorter: sortMode === "lowest" ? "salePriceAsc" : "scoreDesc",
+  });
+  return `https://www.coupang.com/np/search?${params.toString()}`;
 }
 
 const comparisonPlatformOptions: { key: ComparisonPlatform; label: string; placeholder: string }[] = [
@@ -593,6 +655,7 @@ function apiStatusLabel(status: string): string {
 }
 
 function apiStatusDetail(item: ApiKey): string {
+  if (item.platform === "coupang") return "사용자 승인형 브라우저 수집";
   if (item.status === "ready") return "크롤러 사용 가능";
   return item.last_tested_at || "테스트 전";
 }
@@ -1042,27 +1105,40 @@ function LoginScreen({ onLogin }: { onLogin: (token: string) => void }) {
   };
 
   return (
-    <main className="login-page">
-      <section className="login-card">
-        <span className="eyebrow">PriceScan Admin</span>
-        <h1>셀러 가격수집 자동화</h1>
-        <p>관리자 계정으로 로그인하면 실제 백엔드 API와 연결된 복구 버전을 사용할 수 있습니다.</p>
+    <main className="login-page minimal-login-page">
+      <header className="minimal-login-topbar">
+        <button type="button" disabled>전용브라우저</button>
+        <button type="button" aria-current="page">로그인</button>
+        <button type="button" disabled>관리자설정</button>
+      </header>
+      <form className="login-card" onSubmit={(event) => {
+        event.preventDefault();
+        submit();
+      }}>
         <input className="input" value={username} onChange={(event) => setUsername(event.target.value)} placeholder="아이디" />
         <input className="input" type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="비밀번호" />
         {error && <p className="error-text">{error}</p>}
-        <button className="btn primary" onClick={submit}>로그인</button>
-        <p className="hint">기본 계정: admin / admin</p>
-      </section>
+        <button className="btn primary" type="submit">로그인</button>
+      </form>
     </main>
   );
 }
 
 export default function App() {
-  const [token, setToken] = useState(() => localStorage.getItem(TOKEN_KEY) || "");
+  const [token, setToken] = useState(() => {
+    const savedToken = localStorage.getItem(TOKEN_KEY) || "";
+    if (savedToken) return savedToken;
+    if (isLocalCollectorChrome) {
+      localStorage.setItem(TOKEN_KEY, LOCAL_ADMIN_TOKEN);
+      return LOCAL_ADMIN_TOKEN;
+    }
+    return "";
+  });
   const [tab, setTab] = useState<Tab>("search");
   const [settings, setSettings] = useState<AdminSettings>(readSettings);
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [searchPayload, setSearchPayload] = useState<SearchPayload>({ run: null, items: [], summary: { collected_count: 0, lowest_count: 0, excluded_count: 0 } });
+  const importingCaptureIds = useRef(new Set<string>());
   const [apiKeys, setApiKeys] = useState<ApiKey[]>([]);
   const [collectionQuotas, setCollectionQuotas] = useState<CollectionQuota[]>([]);
   const [quotaDrafts, setQuotaDrafts] = useState<Record<string, { dailyLimit: number; enabled: boolean }>>({});
@@ -1073,9 +1149,32 @@ export default function App() {
   const [imageAssets, setImageAssets] = useState<ImageAsset[]>([]);
   const [preparedProducts, setPreparedProducts] = useState<PreparedProduct[]>([]);
   const [comparisonScanningId, setComparisonScanningId] = useState("");
-  const [keyword, setKeyword] = useState("노트북");
+  const [monitoringRefreshing, setMonitoringRefreshing] = useState(false);
+  const [monitoringClock, setMonitoringClock] = useState(() => Date.now());
+  const [monitoringRefreshHours, setMonitoringRefreshHours] = useState(() => {
+    const saved = Number(localStorage.getItem(MONITORING_REFRESH_HOURS_KEY));
+    return monitoringRefreshHourOptions.includes(saved) ? saved : 6;
+  });
+  const [monitoringAutoRefresh, setMonitoringAutoRefresh] = useState(
+    () => localStorage.getItem(MONITORING_AUTO_REFRESH_KEY) === "true",
+  );
+  const [monitoringLastRunAt, setMonitoringLastRunAt] = useState(() => {
+    const saved = Number(localStorage.getItem(MONITORING_LAST_RUN_AT_KEY));
+    return Number.isFinite(saved) && saved > 0 ? saved : 0;
+  });
+  const [minimalView, setMinimalView] = useState<MinimalView>("search");
+  const [minimalMonitoringSavingId, setMinimalMonitoringSavingId] = useState("");
+  const [keyword, setKeyword] = useState("");
   const [sortMode, setSortMode] = useState("lowest");
+  const [naverScanIntervalSeconds, setNaverScanIntervalSeconds] = useState(() => {
+    const saved = Number(localStorage.getItem(NAVER_SCAN_INTERVAL_KEY));
+    return naverScanIntervalOptions.some((option) => option.value === saved)
+      ? saved
+      : DEFAULT_NAVER_SCAN_INTERVAL_SECONDS;
+  });
   const [collecting, setCollecting] = useState(false);
+  const [simpleSearchAttempted, setSimpleSearchAttempted] = useState(false);
+  const [simpleSearchComplete, setSimpleSearchComplete] = useState(false);
   const [benefitScanning, setBenefitScanning] = useState(false);
   const [selectedBenefitIds, setSelectedBenefitIds] = useState<string[]>([]);
   const [apiPlatform, setApiPlatform] = useState("smartstore");
@@ -1085,13 +1184,24 @@ export default function App() {
   const [selectedOrders, setSelectedOrders] = useState<string[]>([]);
   const [selectedDetailFilters, setSelectedDetailFilters] = useState<SelectedDetailFilters>({});
   const [showDetailScan, setShowDetailScan] = useState(false);
-  const [selectedSources, setSelectedSources] = useState<string[]>(["naver", "danawa", "enuri", "coupang"]);
+  const [selectedSources, setSelectedSources] = useState<string[]>(minimalPriceSources);
+  const [coupangCollector, setCoupangCollector] = useState<CoupangBrowserCollectorState>({
+    open: false,
+    rawText: "",
+    approvalScope: "once",
+    pageUrl: "",
+    submitting: false,
+  });
   const [smartstorePayload, setSmartstorePayload] = useState<SmartstorePayload>({ items: [], count: 0, page: 1, size: 50 });
   const [smartstoreLoading, setSmartstoreLoading] = useState(false);
   const [smartstoreError, setSmartstoreError] = useState("");
+  const [comparisonHistories, setComparisonHistories] = useState<Record<string, ComparisonHistory>>({});
   const [showSourcePanel, setShowSourcePanel] = useState(false);
   const [searchResultView, setSearchResultView] = useState<"line" | "active" | "excluded">("line");
   const [showSearchExceptions, setShowSearchExceptions] = useState(false);
+  const [extensionStatus, setExtensionStatus] = useState<CollectorStatus>("unknown");
+  const [showCollectorConnection, setShowCollectorConnection] = useState(false);
+  const [browserLaunchStatus, setBrowserLaunchStatus] = useState<BrowserLaunchStatus>("idle");
   const [searchExceptionTerms, setSearchExceptionTerms] = useState<string[]>([]);
   const [searchExceptionDraft, setSearchExceptionDraft] = useState("");
   const [draftSourceItem, setDraftSourceItem] = useState<DraftSourceItem | null>(null);
@@ -1125,8 +1235,113 @@ export default function App() {
     asGuideContent: "구매처 고객센터로 문의해 주세요.",
   });
 
+  const checkPriceScanExtension = async (): Promise<boolean> => {
+    setExtensionStatus("checking");
+    try {
+      const result = await checkCollectorConnection(window, isLocalCollectorChrome ? 8000 : 3000);
+      setExtensionStatus(result.installed ? "installed" : "missing");
+      return result.installed;
+    } catch {
+      setExtensionStatus("missing");
+      return false;
+    }
+  };
+
+  const showBrowserConnection = () => {
+    setBrowserLaunchStatus("idle");
+    setShowCollectorConnection(true);
+    void checkPriceScanExtension();
+  };
+
+  const openDedicatedBrowser = async () => {
+    if (browserLaunchStatus === "opening") return;
+    setBrowserLaunchStatus("opening");
+    try {
+      await launchCollectorBrowser(localHelperBase, window.location.hostname);
+      setBrowserLaunchStatus("opened");
+    } catch {
+      setBrowserLaunchStatus("failed");
+    }
+  };
+
   useEffect(() => {
-    if (!draftSourceItem && !editingDraft && !sellCandidate) return undefined;
+    let disposed = false;
+    const startupNotice = "내장 수집기에 자동 연결 중입니다…";
+    if (isLocalCollectorChrome) setNotice(startupNotice);
+    const check = () => {
+      void checkPriceScanExtension().then((installed) => {
+        if (disposed || !isLocalCollectorChrome) return;
+        setNotice((current) => current === startupNotice ? "" : current);
+        setShowCollectorConnection(!installed);
+      });
+    };
+    check();
+    // Returning from a shopping tab can also follow a collector update/reconnect.
+    const onFocus = () => { if (isLocalCollectorChrome) check(); };
+    window.addEventListener("focus", onFocus);
+    return () => {
+      disposed = true;
+      window.removeEventListener("focus", onFocus);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!token) return undefined;
+    const receiveCurrentPageCapture = (event: MessageEvent) => {
+      if (event.source !== window || event.origin !== window.location.origin) return;
+      const message = event.data as {
+        type?: string;
+        capture?: {
+          id?: string;
+          query?: string;
+          sortMode?: string;
+          pageUrl?: string;
+          warnings?: string[];
+          items?: Array<Record<string, unknown>>;
+        };
+      } | null;
+      if (message?.type !== PRICESCAN_CURRENT_PAGE_CAPTURED || !message.capture?.id) return;
+      const capture = message.capture;
+      if (importingCaptureIds.current.has(capture.id)) return;
+      importingCaptureIds.current.add(capture.id);
+      const captureQuery = String(capture.query || keyword || "네이버 쇼핑").trim();
+      const mergeRunId = searchPayload.run?.query.trim() === captureQuery ? searchPayload.run.id : "";
+      setCollecting(true);
+      setNotice(`네이버 현재 화면 ${capture.items?.length || 0}건을 PriceScan에 반영 중...`);
+      void request<SearchPayload>("/price-search/extension-results", token, {
+        method: "POST",
+        body: JSON.stringify({
+          query: captureQuery,
+          sort_mode: capture.sortMode || "lowest",
+          approval_scope: "user_current_page",
+          merge_run_id: mergeRunId,
+          page_urls: { naver: capture.pageUrl || "" },
+          warnings: capture.warnings || [],
+          items: capture.items || [],
+        }),
+      }).then(async (data) => {
+        setKeyword(captureQuery);
+        setSearchPayload(data);
+        setSimpleSearchAttempted(true);
+        setSimpleSearchComplete(true);
+        setSearchResultView("line");
+        setTab("search");
+        setNotice(`네이버 현재 화면 ${data.items.filter((item) => item.source === "naver").length}건을 반영했습니다.`);
+        window.dispatchEvent(new CustomEvent("pricescan:current-page-imported", { detail: { runId: data.run?.id || "" } }));
+        window.postMessage({ type: PRICESCAN_CURRENT_PAGE_CAPTURE_ACK, captureId: capture.id }, window.location.origin);
+        await request<Dashboard>("/dashboard", token).then(setDashboard).catch(() => undefined);
+        await refreshLogs().catch(() => undefined);
+      }).catch((error) => {
+        importingCaptureIds.current.delete(capture.id!);
+        setNotice(error instanceof Error ? error.message : "네이버 현재 화면 반영 실패");
+      }).finally(() => setCollecting(false));
+    };
+    window.addEventListener("message", receiveCurrentPageCapture);
+    return () => window.removeEventListener("message", receiveCurrentPageCapture);
+  }, [token, keyword, searchPayload.run?.id, searchPayload.run?.query]);
+
+  useEffect(() => {
+    if (!draftSourceItem && !editingDraft && !sellCandidate && !coupangCollector.open) return undefined;
     const previousOverflow = document.body.style.overflow;
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
@@ -1134,6 +1349,7 @@ export default function App() {
         setSellCandidate(null);
         setEditingDraft(null);
         setEditingDraftForm(null);
+        setCoupangCollector((current) => ({ ...current, open: false, submitting: false }));
       }
     };
     document.body.style.overflow = "hidden";
@@ -1142,7 +1358,7 @@ export default function App() {
       document.body.style.overflow = previousOverflow;
       window.removeEventListener("keydown", closeOnEscape);
     };
-  }, [draftSourceItem, editingDraft, sellCandidate]);
+  }, [draftSourceItem, editingDraft, sellCandidate, coupangCollector.open]);
 
   const loadAll = async () => {
     if (!token) return;
@@ -1159,8 +1375,11 @@ export default function App() {
       request<PreparedProduct[]>("/prepared-products", token),
       request<SearchExceptions>("/search-exceptions", token),
     ]);
+    const restoreSimpleSearch = shouldRestoreSimpleSearch(latestSearch);
     setDashboard(dashboardData);
     setSearchPayload(latestSearch);
+    setSimpleSearchAttempted(restoreSimpleSearch);
+    setSimpleSearchComplete(restoreSimpleSearch);
     setApiKeys(keyData);
     setCollectionQuotas(quotaData);
     setQuotaDrafts(Object.fromEntries(quotaData.map((quota) => [quota.source, { dailyLimit: quota.daily_limit, enabled: quota.enabled }])));
@@ -1257,9 +1476,40 @@ export default function App() {
     }
   };
 
+  const comparisonHistoryPlatforms = comparisonPlatformOptions.map((platform) => platform.key).join(",");
+  const refreshComparisonHistories = async (preparedItems: PreparedProduct[]) => {
+    const activePrepared = preparedItems.filter((item) => item.monitoring_enabled);
+    const histories = activePrepared.map(async (item): Promise<[string, ComparisonHistory]> => {
+      try {
+        const history = await request<ComparisonHistory>(
+          `/prepared-products/${item.id}/comparison-history?platforms=${encodeURIComponent(comparisonHistoryPlatforms)}&limit=24`,
+          token,
+        );
+        return [item.id, history];
+      } catch {
+        return [item.id, { naver: [], danawa: [], enuri: [], coupang: [] }];
+      }
+    });
+    const result = Object.fromEntries(await Promise.all(histories));
+    setComparisonHistories(result);
+  };
+
+  const refreshComparisonHistory = async (preparedId: string) => {
+    try {
+      const history = await request<ComparisonHistory>(
+        `/prepared-products/${preparedId}/comparison-history?platforms=${encodeURIComponent(comparisonHistoryPlatforms)}&limit=24`,
+        token,
+      );
+      setComparisonHistories((current) => ({ ...current, [preparedId]: history }));
+    } catch {
+      setComparisonHistories((current) => ({ ...current, [preparedId]: { naver: [], danawa: [], enuri: [], coupang: [] } }));
+    }
+  };
+
   const refreshMonitoring = async () => {
     const preparedData = await request<PreparedProduct[]>("/prepared-products", token);
     setPreparedProducts(preparedData);
+    await refreshComparisonHistories(preparedData);
     if (isSmartstoreActive(apiKeys)) await loadSmartstoreProducts("");
   };
 
@@ -1315,6 +1565,157 @@ export default function App() {
     }
   };
 
+  const startProductScan = async (mode: "simple" | "detail" = "simple", requestedQuery?: string) => {
+    const keywordValue = (requestedQuery ?? keyword).trim();
+    if (!keywordValue) {
+      setNotice("검색어를 입력하세요.");
+      return;
+    }
+    const sources = selectedSources.filter((source) => readySourceKeys.has(source));
+    const priceSources = sources.filter((source) => priceReadySourceKeys.has(source));
+    if (!priceSources.length) {
+      setNotice("사용 가능한 검색 소스를 최소 1개 선택하세요.");
+      return;
+    }
+
+    const templateFilters = templateDetailFilters(keywordValue);
+    const detailSelection = mode === "detail" ? sanitizeSelectedFilters(selectedDetailFilters, templateFilters) : {};
+    const query = mode === "detail" ? buildDetailSearchQuery(keywordValue, detailSelection) : keywordValue;
+    const serverSources = priceSources.filter((source) => source !== "naver");
+    const includesNaver = priceSources.includes("naver");
+
+    setKeyword(keywordValue);
+    setCollecting(true);
+    setSimpleSearchAttempted(true);
+    setSimpleSearchComplete(false);
+    setSelectedBenefitIds([]);
+    if (mode === "simple") {
+      setSelectedDetailFilters({});
+      setShowDetailScan(false);
+    }
+
+    if (includesNaver) {
+      window.open(naverShoppingSearchUrl(query, sortMode), "_blank", "noopener,noreferrer");
+    }
+    setNotice(serverSources.length
+      ? `${serverSources.map(sourceLabel).join(" · ")} 수집 중...${includesNaver ? " 네이버는 열린 화면에서 확장 프로그램을 눌러 주세요." : ""}`
+      : "네이버 검색 화면을 열었습니다. 결과를 확인한 뒤 PriceScan 확장 프로그램을 눌러 주세요.");
+
+    try {
+      let data: SearchPayload = { run: null, items: [], summary: { collected_count: 0, lowest_count: 0, excluded_count: 0 } };
+      if (serverSources.length) {
+        data = await request<SearchPayload>("/price-search", token, {
+          method: "POST",
+          body: JSON.stringify({ query, sort_mode: sortMode, filters: Object.keys(detailSelection), sources: serverSources }),
+        });
+        setSearchPayload(data);
+      } else {
+        setSearchPayload(data);
+      }
+      setSimpleSearchComplete(true);
+      setSearchResultView("line");
+      if (mode === "detail") setSelectedDetailFilters(detailSelection);
+      await request<Dashboard>("/dashboard", token).then(setDashboard).catch(() => undefined);
+      await refreshLogs().catch(() => undefined);
+      await refreshCollectionQuotas().catch(() => undefined);
+      const serverMessage = serverSources.length ? `${data.items.length}건 수집 완료` : "";
+      const naverMessage = includesNaver ? "네이버는 결과 화면에서 확장 프로그램의 ‘현재 화면 가져오기’를 누르면 이 결과에 합쳐집니다." : "";
+      setNotice([serverMessage, naverMessage].filter(Boolean).join(" · "));
+      setTab("search");
+      return data;
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "가격수집 실패");
+    } finally {
+      setCollecting(false);
+    }
+  };
+
+  const openCoupangBrowserCollector = () => {
+    const keywordValue = keyword.trim();
+    if (!keywordValue) {
+      setNotice("쿠팡 브라우저 수집을 실행할 모델명을 먼저 입력하세요.");
+      return;
+    }
+    const pageUrl = coupangBrowserSearchUrl(keywordValue, sortMode);
+    window.open(pageUrl, "_blank", "noopener,noreferrer");
+    setCoupangCollector({
+      open: true,
+      rawText: "",
+      approvalScope: "once",
+      pageUrl,
+      submitting: false,
+    });
+    setNotice("쿠팡 검색 페이지를 열었습니다. 화면에서 확인한 TOP 10 결과를 붙여넣고 저장하세요.");
+  };
+
+  const runCoupangAutoCollection = async () => {
+    const keywordValue = keyword.trim();
+    if (!keywordValue) {
+      setNotice("쿠팡 자동수집을 실행할 모델명을 먼저 입력하세요.");
+      return;
+    }
+    setCollecting(true);
+    setNotice("쿠팡 자동수집 브라우저를 여는 중입니다. 보안확인이 뜨면 열린 브라우저에서 한 번만 승인하세요.");
+    try {
+      const data = await request<SearchPayload>("/price-search/coupang-auto", token, {
+        method: "POST",
+        body: JSON.stringify({
+          query: keywordValue,
+          sort_mode: sortMode,
+          detail_limit: 10,
+          approval_scope: "session",
+          approval_wait_seconds: 45,
+        }),
+      });
+      setSearchPayload(data);
+      setSearchResultView("line");
+      setSelectedBenefitIds([]);
+      setTab("search");
+      setDashboard(await request<Dashboard>("/dashboard", token));
+      await refreshLogs();
+      await refreshCollectionQuotas().catch(() => undefined);
+      const warningText = data.warnings?.length ? ` · 확인 필요 ${data.warnings.length}건` : "";
+      setNotice(`쿠팡 자동수집 완료 · ${data.items.length}건${warningText}`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "쿠팡 자동수집 실패");
+    } finally {
+      setCollecting(false);
+    }
+  };
+
+  const submitCoupangBrowserResults = async () => {
+    const rawText = coupangCollector.rawText.trim();
+    if (!rawText) {
+      setNotice("쿠팡 상품명/가격 결과를 먼저 붙여넣으세요.");
+      return;
+    }
+    setCoupangCollector((current) => ({ ...current, submitting: true }));
+    try {
+      const data = await request<SearchPayload>("/price-search/browser-results", token, {
+        method: "POST",
+        body: JSON.stringify({
+          platform: "coupang",
+          query: keyword.trim(),
+          sort_mode: sortMode,
+          page_url: coupangCollector.pageUrl,
+          raw_text: rawText,
+          approval_scope: coupangCollector.approvalScope,
+        }),
+      });
+      setSearchPayload(data);
+      setSearchResultView("line");
+      setSelectedBenefitIds([]);
+      setDashboard(await request<Dashboard>("/dashboard", token));
+      await refreshLogs();
+      await refreshCollectionQuotas().catch(() => undefined);
+      setCoupangCollector((current) => ({ ...current, open: false, rawText: "", submitting: false }));
+      setNotice(`쿠팡 브라우저 수집 저장 완료 · ${data.items.length}건`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "쿠팡 브라우저 수집 저장 실패");
+      setCoupangCollector((current) => ({ ...current, submitting: false }));
+    }
+  };
+
   const scanBenefits = async (itemIds: string[]) => {
     const uniqueIds = [...new Set(itemIds)].slice(0, 10);
     if (uniqueIds.length === 0) {
@@ -1322,7 +1723,7 @@ export default function App() {
       return;
     }
     setBenefitScanning(true);
-    setNotice(`${uniqueIds.length}개 상품의 쿠폰·행사·카드·배송비를 상세조사 중...`);
+    setNotice(`${uniqueIds.length}개 상품의 쿠폰·행사·카드 정보를 상세조사해 등록가를 보정 중...`);
     try {
       const data = await request<SearchPayload>("/price-search/benefits", token, {
         method: "POST",
@@ -1453,6 +1854,7 @@ export default function App() {
     setPreparedProducts((current) => [prepared, ...current.filter((entry) => entry.id !== prepared.id)]);
     setNotice("모니터링판매에 등록했습니다.");
     await refreshLogs();
+    return prepared;
   };
 
   const deletePreparedProduct = async (preparedId: string) => {
@@ -1479,8 +1881,32 @@ export default function App() {
       method: "PATCH",
       body: JSON.stringify(payload),
     });
-    setPreparedProducts((current) => current.map((entry) => entry.id === saved.id ? saved : entry));
+    setPreparedProducts((current) => [saved, ...current.filter((entry) => entry.id !== saved.id)]);
     setNotice(payload.monitoring_enabled ? "모니터링을 시작했습니다." : "모니터링판매 대기 상태로 변경했습니다.");
+  };
+
+  const toggleMinimalMonitoring = async (item: PriceItem) => {
+    setMinimalMonitoringSavingId(item.id);
+    try {
+      const existing = preparedProducts.find((product) => product.source_item_id === item.id);
+      const prepared = existing || await prepareProduct({
+        sourceItemId: item.id,
+        source: item.source,
+        mall: item.mall,
+        name: item.name,
+        salePrice: item.registered_price || item.price,
+        displayPrice: item.price,
+        shippingFee: item.shipping,
+        url: item.url,
+      });
+      await updatePreparedMonitoring(prepared, {
+        monitoring_enabled: prepared.monitoring_enabled ? 0 : 1,
+        seller_sale_price: prepared.seller_sale_price || item.registered_price || item.price,
+        seller_display_price: prepared.seller_display_price || item.price,
+      });
+    } finally {
+      setMinimalMonitoringSavingId("");
+    }
   };
 
   const saveComparisonTargets = async (item: PreparedProduct, targets: { platform: ComparisonPlatform; comparison_url: string; enabled: boolean }[]) => {
@@ -1501,6 +1927,7 @@ export default function App() {
         body: JSON.stringify({ platforms: [] }),
       });
       setPreparedProducts((current) => current.map((entry) => entry.id === saved.id ? saved : entry));
+      await refreshComparisonHistory(item.id);
       const warnings = saved.scan_warnings || [];
       setNotice(warnings.length ? `경쟁가 스캔 완료 · 확인 필요 ${warnings.length}건` : "경쟁가 스캔 완료");
       await refreshLogs();
@@ -1509,6 +1936,92 @@ export default function App() {
       setComparisonScanningId("");
     }
   };
+
+  const refreshMonitoredProducts = async (automatic = false) => {
+    if (monitoringRefreshing) return;
+    const monitored = preparedProducts.filter((item) => Boolean(item.monitoring_enabled));
+    const scannable = monitored.filter((item) => (item.comparison_targets || []).some(
+      (target) => target.enabled && Boolean(target.comparison_url),
+    ));
+    if (scannable.length === 0) {
+      setNotice(monitored.length === 0
+        ? "모니터링 ON 상품이 없습니다."
+        : "재검색할 가격비교 URL이 없습니다. 상품별 비교 URL을 먼저 연결하세요.");
+      return;
+    }
+
+    const startedAt = Date.now();
+    setMonitoringRefreshing(true);
+    setMonitoringLastRunAt(startedAt);
+    localStorage.setItem(MONITORING_LAST_RUN_AT_KEY, String(startedAt));
+    setNotice(`${automatic ? "자동 " : ""}모니터링 상품 재검색 중 · 0/${scannable.length}`);
+    let completed = 0;
+    let failed = 0;
+    try {
+      for (const item of scannable) {
+        setComparisonScanningId(item.id);
+        try {
+          const saved = await request<PreparedProduct>(`/prepared-products/${item.id}/comparison-scan`, token, {
+            method: "POST",
+            body: JSON.stringify({ platforms: [] }),
+          });
+          setPreparedProducts((current) => current.map((entry) => entry.id === saved.id ? saved : entry));
+          await refreshComparisonHistory(item.id);
+          completed += 1;
+        } catch {
+          failed += 1;
+        }
+        setNotice(`${automatic ? "자동 " : ""}모니터링 상품 재검색 중 · ${completed + failed}/${scannable.length}`);
+      }
+      setMonitoringClock(Date.now());
+      setNotice(`모니터링 상품 갱신 완료 · 성공 ${completed}건${failed ? ` · 실패 ${failed}건` : ""}`);
+      await refreshLogs();
+    } finally {
+      setComparisonScanningId("");
+      setMonitoringRefreshing(false);
+    }
+  };
+
+  const changeMonitoringRefreshHours = (hours: number) => {
+    setMonitoringRefreshHours(hours);
+    localStorage.setItem(MONITORING_REFRESH_HOURS_KEY, String(hours));
+    setMonitoringClock(Date.now());
+  };
+
+  const changeMonitoringAutoRefresh = (enabled: boolean) => {
+    setMonitoringAutoRefresh(enabled);
+    localStorage.setItem(MONITORING_AUTO_REFRESH_KEY, String(enabled));
+    setMonitoringClock(Date.now());
+    setNotice(enabled ? `${monitoringRefreshHours}시간 자동 갱신을 시작했습니다.` : "자동 갱신을 껐습니다.");
+  };
+
+  useEffect(() => {
+    if (minimalView !== "monitoring") return;
+    const timer = window.setInterval(() => setMonitoringClock(Date.now()), 30_000);
+    return () => window.clearInterval(timer);
+  }, [minimalView]);
+
+  const monitoredScanSignature = preparedProducts
+    .filter((item) => Boolean(item.monitoring_enabled))
+    .map((item) => `${item.id}:${item.last_competitor_scanned_at || ""}:${(item.comparison_targets || []).filter((target) => target.enabled && target.comparison_url).length}`)
+    .join("|");
+
+  useEffect(() => {
+    if (!monitoringAutoRefresh || minimalView !== "monitoring" || monitoringRefreshing) return;
+    const monitored = preparedProducts.filter((item) => Boolean(item.monitoring_enabled));
+    const scannable = monitored.filter((item) => (item.comparison_targets || []).some(
+      (target) => target.enabled && Boolean(target.comparison_url),
+    ));
+    if (scannable.length === 0) return;
+    const latestProductScan = Math.max(
+      0,
+      ...scannable.map((item) => Date.parse(item.last_competitor_scanned_at || "") || 0),
+    );
+    const scheduleAnchor = Math.max(monitoringLastRunAt, latestProductScan);
+    if (isMonitoringRefreshDue(monitoringClock, scheduleAnchor, monitoringRefreshHours)) {
+      refreshMonitoredProducts(true).catch((error) => setNotice(error instanceof Error ? error.message : "자동 갱신 실패"));
+    }
+  }, [monitoringAutoRefresh, monitoringClock, monitoringRefreshHours, monitoringLastRunAt, monitoringRefreshing, minimalView, monitoredScanSignature]);
 
   const preparedToDraftSource = (item: PreparedProduct): DraftSourceItem => ({
     sourceItemId: item.source_item_id,
@@ -1941,9 +2454,12 @@ export default function App() {
     ...searchPayload,
     items: sortedPriceItems(filterPriceItems(searchPayload.items, activeDetailFilters), sortMode),
   };
+  const minimalPriceItems = visibleResultsBySource(searchPayload.items, minimalPriceSources, 10);
+  const minimalMonitoredProducts = preparedProducts.filter((item) => Boolean(item.monitoring_enabled));
+  const collectorCopy = collectorConnectionCopy(extensionStatus, isLocalCollectorChrome, browserLaunchStatus);
 
   return (
-    <div className={`app ${settings.showSidebar ? "with-sidebar" : ""}`}>
+    <div className="app minimal-mode">
       {settings.showSidebar && (
         <aside className="sidebar">
           <div className="brand">
@@ -1965,6 +2481,48 @@ export default function App() {
       )}
 
       <main className="main">
+        <div className="minimal-pricescan-shell seller-workspace-shell">
+          <SellerWorkspace
+            token={token}
+            busy={collecting}
+            progress={notice}
+            selectedSources={selectedSources}
+            onToggleSource={toggleSearchSource}
+            onSearch={(query) => startProductScan("simple", query)}
+            onBrowser={showBrowserConnection}
+            onSettings={() => setTab((current) => current === "settings" ? "search" : "settings")}
+            onLogout={logout}
+          />
+
+          {tab === "settings" && (
+            <div className="minimal-settings-backdrop" role="presentation" onMouseDown={(event) => {
+              if (event.target === event.currentTarget) setTab("search");
+            }}>
+              <section className="minimal-settings-panel" role="dialog" aria-modal="true" aria-label="관리자설정">
+                <div className="minimal-settings-head">
+                  <strong>관리자설정</strong>
+                  <button type="button" onClick={() => setTab("search")} aria-label="닫기">×</button>
+                </div>
+                {isLocalCollectorChrome && <label>
+                  <span>네이버 사용자 세션 최소 간격</span>
+                  <select
+                    value={naverScanIntervalSeconds}
+                    onChange={(event) => {
+                      const nextValue = Number(event.target.value);
+                      setNaverScanIntervalSeconds(nextValue);
+                      localStorage.setItem(NAVER_SCAN_INTERVAL_KEY, String(nextValue));
+                    }}
+                  >
+                    {naverScanIntervalOptions.map((option) => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                  </select>
+                </label>}
+              </section>
+            </div>
+          )}
+        </div>
+
         <header className="top-shell">
           <div className="top-brand">
             <strong>PriceScan</strong>
@@ -1978,6 +2536,15 @@ export default function App() {
             ))}
           </nav>
           <div className="top-actions">
+            <button
+              className={`btn small chrome-extension-button ${extensionStatus === "installed" ? "connected" : ""} ${extensionStatus === "missing" ? "missing" : ""}`}
+              onClick={showBrowserConnection}
+              aria-label="수집기 연결 상태"
+              title="PriceScan 내장 수집기"
+            >
+              <span className="chrome-extension-icon" aria-hidden="true">🧩</span>
+              <span className="chrome-extension-label">{extensionStatus === "installed" ? "수집기 연결됨" : "가격수집기"}</span>
+            </button>
             {tab === "search" && (
               <div className="source-popover-wrap">
                 <button className={`btn small icon-btn ${showSourcePanel ? "active" : ""}`} onClick={() => setShowSourcePanel((current) => !current)}>
@@ -2022,7 +2589,25 @@ export default function App() {
                 <option value="margin">마진높은순</option>
                 <option value="recent">최근검색순</option>
               </select>
-              <button className="btn primary" onClick={() => runSearch("simple")} disabled={collecting}>스캔</button>
+              {isLocalCollectorChrome && selectedSources.includes("naver") && (
+                <select
+                  className="naver-speed-select"
+                  value={naverScanIntervalSeconds}
+                  onChange={(event) => {
+                    const nextValue = Number(event.target.value);
+                    setNaverScanIntervalSeconds(nextValue);
+                    localStorage.setItem(NAVER_SCAN_INTERVAL_KEY, String(nextValue));
+                  }}
+                  aria-label="네이버 검색 간격"
+                  title="로그인된 전용 브라우저에서 연속 네이버 주시형 검색 사이의 최소 대기시간"
+                  disabled={collecting}
+                >
+                  {naverScanIntervalOptions.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              )}
+              <button className="btn primary" onClick={() => startProductScan("simple")} disabled={collecting}>가격수집 시작</button>
               <button className="btn danger" onClick={stopSearch} disabled={!collecting}>수집 중지</button>
             </div>
             {Boolean(searchPayload.warnings?.length) && (
@@ -2097,6 +2682,7 @@ export default function App() {
               onSaveComparisonTargets={saveComparisonTargets}
               onScanComparisonTargets={scanComparisonTargets}
               comparisonScanningId={comparisonScanningId}
+              comparisonHistories={comparisonHistories}
               onCopySmartstore={copySmartstoreToPrepared}
               onUpdateProcurement={updateProcurement}
               onOpenApi={() => {
@@ -2112,7 +2698,7 @@ export default function App() {
             <div className="section-head">
               <div>
                 <h2>검색설정</h2>
-                <p>네이버 가격검색은 API 없이 다나와/에누리처럼 검색 페이지를 수집합니다. 키 입력은 판매자 API가 필요한 채널만 사용합니다.</p>
+                <p>네이버는 전용 브라우저에서 사용자가 확인한 현재 화면만 수집합니다. 다나와·에누리·쿠팡은 쇼핑몰별 파서로 이어서 처리합니다.</p>
               </div>
               <span className="pill blue">{dashboard?.stats.connected_apis ?? 0} connected</span>
             </div>
@@ -2331,6 +2917,104 @@ export default function App() {
           </section>
         )}
 
+        {showCollectorConnection && (
+          <aside className={`collector-connection ${extensionStatus}`} aria-label="수집기 연결 상태"
+            onKeyDown={(event) => { if (event.key === "Escape") setShowCollectorConnection(false); }}>
+            <span className="collector-connection-dot" aria-hidden="true" />
+            <div className="collector-connection-copy" role="status">
+              <strong>{collectorCopy.title}</strong>
+              <p>{collectorCopy.detail}</p>
+            </div>
+            <button className="collector-connection-close" type="button" aria-label="연결 안내 닫기" onClick={() => setShowCollectorConnection(false)}>×</button>
+            <button className="collector-connection-action" type="button" disabled={collectorCopy.kind === "waiting"} onClick={() => {
+              if (collectorCopy.kind === "open") void openDedicatedBrowser();
+              else if (collectorCopy.kind === "reload") window.location.reload();
+              else if (collectorCopy.kind === "close") setShowCollectorConnection(false);
+            }}>{collectorCopy.action}</button>
+          </aside>
+        )}
+
+        {coupangCollector.open && (
+          <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setCoupangCollector((current) => ({ ...current, open: false, submitting: false }));
+          }}>
+            <div className="browser-collector-modal" role="dialog" aria-modal="true" aria-label="쿠팡 브라우저 수집">
+              <div className="section-head">
+                <div>
+                  <span className="eyebrow">사용자 승인형 수집</span>
+                  <h2>쿠팡 브라우저 수집</h2>
+                  <p>현재 브라우저에 보이는 쿠팡 검색 결과 DOM/HTML에서 가격 비교용 정보만 PriceScan에 저장합니다.</p>
+                </div>
+                <button
+                  className="btn modal-close-button"
+                  onClick={() => setCoupangCollector((current) => ({ ...current, open: false, submitting: false }))}
+                  aria-label="닫기"
+                >
+                  ×
+                </button>
+              </div>
+              <div className="browser-collector-guide">
+                <section>
+                  <strong>1. 쿠팡 검색 페이지</strong>
+                  <p>모델명으로 생성된 검색 URL입니다. 로그인/캡차가 나오면 사용자가 직접 처리합니다.</p>
+                  <a href={coupangCollector.pageUrl} target="_blank" rel="noreferrer">{coupangCollector.pageUrl}</a>
+                </section>
+                <section>
+                  <strong>2. 승인 범위</strong>
+                  <label>
+                    <input
+                      type="radio"
+                      checked={coupangCollector.approvalScope === "once"}
+                      onChange={() => setCoupangCollector((current) => ({ ...current, approvalScope: "once" }))}
+                    />
+                    이번 1회만 허용
+                  </label>
+                  <label>
+                    <input
+                      type="radio"
+                      checked={coupangCollector.approvalScope === "session"}
+                      onChange={() => setCoupangCollector((current) => ({ ...current, approvalScope: "session" }))}
+                    />
+                    이번 세션 허용
+                  </label>
+                </section>
+              </div>
+              <div className="browser-collector-consent">
+                <strong>저장 범위</strong>
+                <span>상품명, 등록가, 노출가, 배송비, 상세링크, 수집시간만 저장합니다. 쿠팡 아이디/비밀번호/쿠키/결제정보는 저장하지 않습니다.</span>
+              </div>
+              <label className="browser-collector-input">
+                <span>쿠팡 DOM/HTML 또는 TOP 10 결과 붙여넣기</span>
+                <textarea
+                  className="input"
+                  value={coupangCollector.rawText}
+                  onChange={(event) => setCoupangCollector((current) => ({ ...current, rawText: event.target.value }))}
+                  placeholder={`지원 형식\n1) 쿠팡 검색결과 HTML/DOM\n<li class="search-product">...<del>3,152,670원</del><strong>2,742,830원</strong>...</li>\n\n2) 텍스트\n삼성전자 갤럭시북6 프로 NT940XJG-K51A\n등록가 3,152,670원 노출가 2,742,830원 무료배송\nhttps://www.coupang.com/vp/products/...\n\n3) JSON\n[{"name":"상품명","registeredPrice":3152670,"price":2742830,"shipping":0,"detailUrl":"https://..."}]`}
+                />
+              </label>
+              <p className="hint">DOM/HTML을 넣으면 상품카드 파서가 상품명·가격·배송비·상세링크를 자동 추출합니다. 다음 단계에서 확장 프로그램/로컬 브라우저 컨트롤러가 이 DOM을 자동 제출하게 연결합니다.</p>
+              <div className="modal-actions">
+                <button
+                  className="btn"
+                  onClick={() => window.open(coupangCollector.pageUrl, "_blank", "noopener,noreferrer")}
+                >
+                  쿠팡 다시 열기
+                </button>
+                <button
+                  className="btn"
+                  onClick={() => setCoupangCollector((current) => ({ ...current, open: false, submitting: false }))}
+                  disabled={coupangCollector.submitting}
+                >
+                  취소
+                </button>
+                <button className="btn primary" onClick={submitCoupangBrowserResults} disabled={coupangCollector.submitting}>
+                  {coupangCollector.submitting ? "저장 중" : "PriceScan에 반영"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {showSearchExceptions && (
           <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
             if (event.target === event.currentTarget) setShowSearchExceptions(false);
@@ -2509,6 +3193,117 @@ function MonitoringPriceStack({ registeredPrice, exposurePrice, shippingFee = 0 
   );
 }
 
+function MonitoringPriceHistoryChart({
+  comparisonHistory,
+  limit = 10,
+}: {
+  comparisonHistory: ComparisonHistory;
+  limit?: number;
+}) {
+  const platformSeries = comparisonPlatformOptions.map((platform) => {
+    const rows = (comparisonHistory[platform.key] || []).slice(-limit).filter((item) => item.total_price > 0 && Boolean(item.collected_at));
+    const sortedRows = [...rows].sort((a, b) => new Date(a.collected_at).getTime() - new Date(b.collected_at).getTime());
+    return { ...platform, rows: sortedRows };
+  })
+    .filter((platform) => platform.rows.length > 0);
+
+  const buckets = Array.from(
+    new Set(
+      platformSeries.flatMap((platform) =>
+        platform.rows.map((item) => `${new Date(item.collected_at).getTime()}`),
+      ),
+    ),
+  )
+    .map((value) => Number(value))
+    .filter((value) => Number.isFinite(value))
+    .sort((a, b) => a - b)
+    .filter((value, index, allValues) => allValues.indexOf(value) === index);
+
+  if (platformSeries.length === 0) {
+    return (
+      <section className="monitoring-comparison-history">
+        <div className="comparison-monitor-head"><strong>가격 추이</strong><span>점검한 경쟁가 히스토리가 없습니다.</span></div>
+      </section>
+    );
+  }
+
+  const limitedBuckets = buckets.slice(-Math.max(2, Math.min(limit, buckets.length)));
+  const bucketIndex = new Map<number, number>(limitedBuckets.map((bucket, index) => [bucket, index]));
+
+  const allPrices = platformSeries.flatMap((platform) => platform.rows.map((item) => item.total_price));
+  const minPrice = allPrices.length ? Math.min(...allPrices) : 0;
+  const maxPrice = allPrices.length ? Math.max(...allPrices) : 0;
+  const plotPoints = platformSeries.map((platform) => {
+    const points = platform.rows
+      .filter((item) => item.total_price > 0 && limitedBuckets.includes(new Date(item.collected_at).getTime()))
+      .map((item, index) => {
+        const xIndex = bucketIndex.get(new Date(item.collected_at).getTime()) ?? index;
+        const x = limitedBuckets.length <= 1 ? 50 : (xIndex / (Math.max(1, limitedBuckets.length - 1))) * 100;
+        const y = maxPrice === minPrice ? 50 : 88 - ((item.total_price - minPrice) / (maxPrice - minPrice)) * 76;
+        return {
+          platform: platform.key,
+          row: item,
+          x: Math.min(Math.max(x, 0), 100),
+          y: Math.min(Math.max(y, 12), 88),
+        };
+      });
+    return {
+      ...platform,
+      points,
+      linePoints: points.map((point) => `${point.x},${point.y}`).join(" "),
+    };
+  });
+
+  return (
+    <section className="monitoring-comparison-history">
+      <div className="comparison-monitor-head">
+        <div>
+          <strong>가격 추이</strong>
+          <span>최근 10회 경쟁가(최저가) 추적 내역</span>
+        </div>
+        <div className="comparison-monitor-kpis">
+          <span>축 최저 {money(minPrice)}</span>
+          <span>축 최고 {money(maxPrice)}</span>
+        </div>
+      </div>
+      <div className="monitoring-price-history-plot" role="group" aria-label="모니터링 중인 경쟁가 가격 추이">
+        <svg className="monitoring-price-history-chart" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+          <line className="price-source-grid-line" x1="0" y1="12" x2="100" y2="12" />
+          <line className="price-source-grid-line" x1="0" y1="50" x2="100" y2="50" />
+          <line className="price-source-grid-line" x1="0" y1="88" x2="100" y2="88" />
+          {plotPoints.map((series) => (
+            <polyline
+              className="monitoring-price-history-line"
+              key={`history-line-${series.key}`}
+              points={series.linePoints}
+              stroke={comparisonPlatformColors[series.key]}
+            />
+          ))}
+        </svg>
+        {plotPoints.flatMap((series) => series.points).map((point, index) => (
+          <button
+            className="monitoring-price-history-point"
+            style={{ left: `${point.x}%`, top: `${point.y}%`, backgroundColor: comparisonPlatformColors[point.platform] }}
+            key={`history-point-${point.platform}-${point.row.id}-${index}`}
+            title={`${point.row.mall} ${money(point.row.total_price)} · ${new Date(point.row.collected_at).toLocaleString("ko-KR")}`}
+            type="button"
+          >
+            {point.row.rank}
+          </button>
+        ))}
+      </div>
+      <div className="monitoring-price-history-legend">
+        {platformSeries.map((platform) => (
+          <span key={`history-legend-${platform.key}`}>
+            <i style={{ backgroundColor: comparisonPlatformColors[platform.key] }} />
+            {platform.label} {platform.rows.length}개
+          </span>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function MonitoringEditablePriceInputs({
   salePrice,
   displayPrice,
@@ -2596,13 +3391,14 @@ function MonitoringWaitingRow({ item, onUpdate, onDelete }: {
   );
 }
 
-function MonitoringActiveRow({ item, onUpdate, onSell, onSaveComparisonTargets, onScanComparisonTargets, comparisonScanning }: {
+function MonitoringActiveRow({ item, onUpdate, onSell, onSaveComparisonTargets, onScanComparisonTargets, comparisonScanning, comparisonHistory }: {
   item: PreparedProduct;
   onUpdate: (item: PreparedProduct, updates: Partial<PreparedProduct>) => Promise<void>;
   onSell: (item: PreparedProduct) => void;
   onSaveComparisonTargets: (item: PreparedProduct, targets: { platform: ComparisonPlatform; comparison_url: string; enabled: boolean }[]) => Promise<PreparedProduct>;
   onScanComparisonTargets: (item: PreparedProduct) => Promise<PreparedProduct | undefined>;
   comparisonScanning: boolean;
+  comparisonHistory: ComparisonHistory;
 }) {
   const [feeRate, setFeeRate] = useState(item.fee_rate || 0);
   const [sellerSalePrice, setSellerSalePrice] = useState(item.seller_sale_price || item.sale_price);
@@ -2675,11 +3471,11 @@ function MonitoringActiveRow({ item, onUpdate, onSell, onSaveComparisonTargets, 
         </table>
       </div>
       <div className="comparison-monitor-box">
-            <div className="comparison-monitor-head">
-              <div>
-                <strong>가격비교 URL 추적</strong>
-                <span>{comparisonPlatformLabelText} 가격비교 상세 URL 기준으로 경쟁 판매처 TOP 5를 저장합니다.</span>
-              </div>
+              <div className="comparison-monitor-head">
+                <div>
+                  <strong>가격비교 URL 추적</strong>
+                  <span>{comparisonPlatformLabelText} 가격비교 상세 URL 기준으로 경쟁 판매처 TOP 3을 저장합니다.</span>
+                </div>
               <div className="comparison-monitor-kpis">
                 <span>최저 경쟁가 {money(item.lowest_competitor_total || 0)}</span>
                 <span>추천 노출가 {money(item.recommended_display_price || sellerDisplayPrice)}</span>
@@ -2710,12 +3506,12 @@ function MonitoringActiveRow({ item, onUpdate, onSell, onSaveComparisonTargets, 
             </div>
             <div className="comparison-snapshot-grid">
               {comparisonPlatformOptions.map((platform) => {
-                const rows = competitors.filter((competitor) => competitor.platform === platform.key).sort((a, b) => a.rank - b.rank).slice(0, 5);
+                const rows = competitors.filter((competitor) => competitor.platform === platform.key).sort((a, b) => a.rank - b.rank).slice(0, 3);
                 return (
                   <section key={platform.key}>
-                    <strong>{platform.label} TOP 5</strong>
-                    {rows.length === 0 && <p>아직 스캔 결과 없음</p>}
-                    {rows.map((competitor) => (
+                <strong>{platform.label} TOP 3</strong>
+                {rows.length === 0 && <p>아직 스캔 결과 없음</p>}
+                {rows.map((competitor) => (
                       <div className={`comparison-snapshot-item ${competitor.is_excluded ? "excluded" : ""}`} key={competitor.id}>
                         <span>{competitor.rank}위</span>
                         <b>{competitor.mall}</b>
@@ -2728,6 +3524,7 @@ function MonitoringActiveRow({ item, onUpdate, onSell, onSaveComparisonTargets, 
                 );
               })}
             </div>
+            <MonitoringPriceHistoryChart comparisonHistory={comparisonHistory} />
             <div className="comparison-margin-simulator">
               <div className="comparison-monitor-head compact">
                 <div>
@@ -2779,6 +3576,7 @@ function MonitoringBoard({
   onSaveComparisonTargets,
   onScanComparisonTargets,
   comparisonScanningId,
+  comparisonHistories,
   onCopySmartstore,
   onUpdateProcurement,
   onOpenApi,
@@ -2799,6 +3597,7 @@ function MonitoringBoard({
   onSaveComparisonTargets: (item: PreparedProduct, targets: { platform: ComparisonPlatform; comparison_url: string; enabled: boolean }[]) => Promise<PreparedProduct>;
   onScanComparisonTargets: (item: PreparedProduct) => Promise<PreparedProduct | undefined>;
   comparisonScanningId: string;
+  comparisonHistories: Record<string, ComparisonHistory>;
   onCopySmartstore: (item: SmartstoreProduct) => void;
   onUpdateProcurement: (order: Order, status: string, source?: PreparedProduct, updates?: Partial<Order>) => void;
   onOpenApi: () => void;
@@ -2884,6 +3683,7 @@ function MonitoringBoard({
               onSaveComparisonTargets={onSaveComparisonTargets}
               onScanComparisonTargets={onScanComparisonTargets}
               comparisonScanning={comparisonScanningId === item.id}
+              comparisonHistory={comparisonHistories[item.id] || ({} as ComparisonHistory)}
             />
           ) : (
             <MonitoringWaitingRow key={item.id} item={item} onUpdate={onUpdateMonitoring} onDelete={onDeletePrepared} />
@@ -3772,6 +4572,7 @@ type SearchResultRow = {
   collectionSource: string;
   name: string;
   mall: string;
+  registeredPrice: number;
   salePrice: number;
   displayPrice: number;
   shippingFee: number;
@@ -3797,6 +4598,7 @@ const EXTRACTION_METHOD_META: Record<string, { icon: string; label: string }> = 
   crawl: { icon: "(c)", label: "크롤링" },
   playwright: { icon: "(p)", label: "Playwright" },
   scrapling: { icon: "(s)", label: "Scrapling" },
+  browser: { icon: "(b)", label: "사용자 브라우저" },
 };
 
 function extractionMethods(item: PriceItem): string[] {
@@ -4131,6 +4933,487 @@ function compactLineProductName(rows: SearchResultRow[], keyword: string): strin
   return selected.length > 72 ? `${selected.slice(0, 72)}…` : selected;
 }
 
+function MinimalMonitorIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24">
+      <rect x="3" y="4" width="18" height="13" rx="2" />
+      <path d="M8 21h8M12 17v4" />
+      <path d="M7 12l3-3 2 2 4-4 2 2" />
+    </svg>
+  );
+}
+
+function MinimalSearchPriceGraph({ items }: { items: PriceItem[] }) {
+  const groups = comparisonPlatformOptions.map((platform) => {
+    const rows = items
+      .filter((item) => item.source === platform.key && item.total > 0 && !item.is_excluded && item.status !== "abnormal")
+      .sort((left, right) => left.total - right.total || left.price - right.price)
+      .slice(0, 10);
+    return { ...platform, rows };
+  }).filter((group) => group.rows.length > 0);
+  const allPrices = groups.flatMap((group) => group.rows.map((item) => item.total));
+  if (allPrices.length === 0) return null;
+  const minPrice = Math.min(...allPrices);
+  const maxPrice = Math.max(...allPrices);
+  const chartGroups = groups.map((group) => {
+    const points = group.rows.map((item, index) => ({
+      item,
+      x: group.rows.length === 1 ? 50 : (index / (group.rows.length - 1)) * 100,
+      y: maxPrice === minPrice ? 50 : 84 - ((item.total - minPrice) / (maxPrice - minPrice)) * 68,
+    }));
+    return { ...group, points, linePoints: points.map((point) => `${point.x},${point.y}`).join(" ") };
+  });
+
+  return (
+    <section className="minimal-search-price-graph" aria-label="검색 결과 쇼핑몰별 가격 분포 그래프">
+      <div className="minimal-chart-head">
+        <div><span>PRICE RANGE</span><strong>쇼핑몰별 가격 흐름</strong></div>
+        <p><b>{money(minPrice)}</b><span>—</span><b>{money(maxPrice)}</b></p>
+      </div>
+      <div className="minimal-search-chart-plot" role="img" aria-label={`최저 ${money(minPrice)}, 최고 ${money(maxPrice)} 순위별 가격 분포`}>
+        <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+          <line x1="0" y1="16" x2="100" y2="16" />
+          <line x1="0" y1="50" x2="100" y2="50" />
+          <line x1="0" y1="84" x2="100" y2="84" />
+          {chartGroups.map((group) => group.points.length > 1 && (
+            <polyline key={group.key} points={group.linePoints} style={{ stroke: comparisonPlatformColors[group.key] }} />
+          ))}
+        </svg>
+        {chartGroups.flatMap((group) => group.points.map((point, index) => (
+          <span
+            className="minimal-chart-point"
+            key={`${group.key}-${point.item.id}`}
+            style={{ left: `${point.x}%`, top: `${point.y}%`, backgroundColor: comparisonPlatformColors[group.key] }}
+            title={`${group.label} ${index + 1}위 · ${point.item.mall} · ${money(point.item.total)}`}
+          />
+        )))}
+        <div className="minimal-search-chart-axis"><span>1위</span><span>가격 순위</span><span>10위</span></div>
+      </div>
+      <div className="minimal-chart-legend">
+        {chartGroups.map((group) => (
+          <span key={group.key}><i style={{ backgroundColor: comparisonPlatformColors[group.key] }} />{group.label}<b>{group.rows.length}</b></span>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function MinimalPriceResults({ items, selectedSources, preparedProducts, savingId, onToggleMonitoring, onOpenMonitoring }: {
+  items: PriceItem[];
+  selectedSources: string[];
+  preparedProducts: PreparedProduct[];
+  savingId: string;
+  onToggleMonitoring: (item: PriceItem) => Promise<void>;
+  onOpenMonitoring: () => void;
+}) {
+  const monitoredCount = preparedProducts.filter((item) => Boolean(item.monitoring_enabled)).length;
+  const resultSources = minimalPriceSources.filter((source) => selectedSources.includes(source));
+  const [activeSource, setActiveSource] = useState(resultSources[0] || "naver");
+
+  useEffect(() => {
+    if (!resultSources.includes(activeSource)) setActiveSource(resultSources[0] || "naver");
+  }, [activeSource, resultSources.join("|")]);
+
+  const activeItems = items.filter((item) => item.source === activeSource).slice(0, 10);
+  return (
+    <section className="minimal-naver-results" aria-label="쇼핑몰별 가격 조사 결과">
+      <MinimalSearchPriceGraph items={items} />
+      <div className="minimal-results-head">
+        <strong>가격 조사 결과</strong>
+        <div className="minimal-results-actions">
+          <span>쇼핑몰별 최대 10개 · 총 {items.length}개</span>
+          <button className="minimal-monitor-nav" type="button" onClick={onOpenMonitoring} aria-label={`모니터링 페이지 열기, ${monitoredCount}개 활성`}>
+            <MinimalMonitorIcon />
+            <b>{monitoredCount}</b>
+          </button>
+        </div>
+      </div>
+      <div className="minimal-result-source-tabs" role="tablist" aria-label="쇼핑몰별 결과">
+        {resultSources.map((source) => {
+          const count = items.filter((item) => item.source === source).length;
+          return (
+            <button
+              type="button"
+              role="tab"
+              key={source}
+              aria-selected={activeSource === source}
+              className={activeSource === source ? "is-active" : ""}
+              onClick={() => setActiveSource(source)}
+            >
+              {sourceLabel(source)} <b>{count}</b>
+            </button>
+          );
+        })}
+      </div>
+      {activeItems.length === 0 ? (
+        <p className="minimal-results-empty">검색 결과 없음</p>
+      ) : (
+        <div className="minimal-results-table-wrap">
+          <table>
+            <thead>
+              <tr><th>순위</th><th>상품</th><th>쇼핑몰</th><th>등록가</th><th>노출가</th><th>모니터링</th></tr>
+            </thead>
+            <tbody>
+              {activeItems.map((item, index) => {
+                const monitored = isSourceItemMonitored(item.id, preparedProducts);
+                return (
+                <tr className={monitored ? "is-monitored" : ""} key={item.id}>
+                  <td>{index + 1}</td>
+                  <td><a className="minimal-product-name" href={item.url} target="_blank" rel="noreferrer">{item.name}</a></td>
+                  <td>{item.mall}</td>
+                  <td className="minimal-registered-price">{money(item.registered_price || item.price)}</td>
+                  <td className="minimal-exposure-price">{money(item.price)}</td>
+                  <td>
+                    <button
+                      className={`minimal-monitor-toggle ${monitored ? "on" : ""}`}
+                      type="button"
+                      disabled={savingId === item.id}
+                      aria-pressed={monitored}
+                      onClick={() => onToggleMonitoring(item)}
+                    >
+                      <span />{savingId === item.id ? "저장중" : monitored ? "ON" : "OFF"}
+                    </button>
+                  </td>
+                </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function MinimalProductPriceTrend({ history }: { history: ComparisonHistory }) {
+  const series = comparisonPlatformOptions.map((platform) => {
+    const rows = [...(history[platform.key] || [])]
+      .filter((item) => item.total_price > 0 && Boolean(item.collected_at))
+      .sort((left, right) => Date.parse(left.collected_at) - Date.parse(right.collected_at))
+      .slice(-24);
+    return { ...platform, rows };
+  }).filter((group) => group.rows.length > 0);
+  const allRows = series.flatMap((group) => group.rows);
+
+  if (allRows.length === 0) {
+    return (
+      <section className="minimal-product-trend is-empty" aria-label="상품 가격 시간대별 추이">
+        <div className="minimal-product-trend-head"><strong>시간대별 가격 추이</strong><span>갱신 기록이 쌓이면 표시됩니다.</span></div>
+        <div className="minimal-product-trend-empty"><i /><span>아직 비교 가격 기록이 없습니다.</span></div>
+      </section>
+    );
+  }
+
+  const times = allRows.map((item) => Date.parse(item.collected_at)).filter(Number.isFinite);
+  const prices = allRows.map((item) => item.total_price);
+  const minTime = Math.min(...times);
+  const maxTime = Math.max(...times);
+  const minPrice = Math.min(...prices);
+  const maxPrice = Math.max(...prices);
+  const plottedSeries = series.map((group) => {
+    const points = group.rows.map((item) => {
+      const timestamp = Date.parse(item.collected_at);
+      return {
+        item,
+        x: maxTime === minTime ? 50 : ((timestamp - minTime) / (maxTime - minTime)) * 100,
+        y: maxPrice === minPrice ? 50 : 84 - ((item.total_price - minPrice) / (maxPrice - minPrice)) * 68,
+      };
+    });
+    return { ...group, points, linePoints: points.map((point) => `${point.x},${point.y}`).join(" ") };
+  });
+
+  return (
+    <section className="minimal-product-trend" aria-label="상품 가격 시간대별 추이">
+      <div className="minimal-product-trend-head">
+        <div><strong>시간대별 가격 추이</strong><span>최근 24회 최저가 기록</span></div>
+        <p><b>{money(minPrice)}</b><span>—</span><b>{money(maxPrice)}</b></p>
+      </div>
+      <div className="minimal-product-trend-plot" role="img" aria-label={`시간대별 최저 ${money(minPrice)}, 최고 ${money(maxPrice)}`}>
+        <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+          <line x1="0" y1="16" x2="100" y2="16" />
+          <line x1="0" y1="50" x2="100" y2="50" />
+          <line x1="0" y1="84" x2="100" y2="84" />
+          {plottedSeries.map((group) => group.points.length > 1 && (
+            <polyline key={group.key} points={group.linePoints} style={{ stroke: comparisonPlatformColors[group.key] }} />
+          ))}
+        </svg>
+        {plottedSeries.flatMap((group) => group.points.map((point) => (
+          <span
+            className="minimal-product-trend-point"
+            key={`${group.key}-${point.item.id}-${point.item.collected_at}`}
+            style={{ left: `${point.x}%`, top: `${point.y}%`, backgroundColor: comparisonPlatformColors[group.key] }}
+            title={`${group.label} · ${money(point.item.total_price)} · ${new Date(point.item.collected_at).toLocaleString("ko-KR")}`}
+          />
+        )))}
+        <div className="minimal-product-trend-axis"><time>{minimalMonitoringTime(minTime)}</time><time>{minimalMonitoringTime(maxTime)}</time></div>
+      </div>
+      <div className="minimal-product-trend-legend">
+        {plottedSeries.map((group) => {
+          const latest = group.rows[group.rows.length - 1];
+          return <span key={group.key}><i style={{ backgroundColor: comparisonPlatformColors[group.key] }} />{group.label}<b>{money(latest.total_price)}</b></span>;
+        })}
+      </div>
+    </section>
+  );
+}
+
+function MinimalSellerPriceRow({ item, comparisonHistory, onUpdate }: {
+  item: PreparedProduct;
+  comparisonHistory: ComparisonHistory;
+  onUpdate: (item: PreparedProduct, updates: Partial<PreparedProduct>) => Promise<void>;
+}) {
+  const [salePrice, setSalePrice] = useState(item.seller_sale_price || item.sale_price);
+  const [displayPrice, setDisplayPrice] = useState(item.seller_display_price || item.display_price);
+  const [feeRate, setFeeRate] = useState(item.fee_rate || 0);
+  const [saving, setSaving] = useState(false);
+  const metrics = monitoringMetrics(item, feeRate, displayPrice);
+
+  useEffect(() => {
+    setSalePrice(item.seller_sale_price || item.sale_price);
+    setDisplayPrice(item.seller_display_price || item.display_price);
+    setFeeRate(item.fee_rate || 0);
+  }, [item.id, item.seller_sale_price, item.seller_display_price, item.fee_rate, item.sale_price, item.display_price]);
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      await onUpdate(item, {
+        monitoring_enabled: 1,
+        seller_sale_price: salePrice,
+        seller_display_price: displayPrice,
+        fee_rate: feeRate,
+      });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <article className="minimal-owned-product">
+      <div className="minimal-owned-title">
+        <span>{item.mall || sourceLabel(item.source)}</span>
+        {item.source_url ? <a href={item.source_url} target="_blank" rel="noreferrer">{item.title}</a> : <strong>{item.title}</strong>}
+      </div>
+      <label><span>등록가</span><input type="number" min="0" step="1000" value={salePrice} onChange={(event) => setSalePrice(Number(event.target.value))} /></label>
+      <label><span>판매가</span><input type="number" min="0" step="1000" value={displayPrice} onChange={(event) => setDisplayPrice(Number(event.target.value))} /></label>
+      <label><span>수수료</span><div className="minimal-suffix-input"><input type="number" min="0" max="100" step="0.1" value={feeRate} onChange={(event) => setFeeRate(Number(event.target.value))} /><i>%</i></div></label>
+      <div className="minimal-live-margin">
+        <span>예상 마진율</span>
+        <strong className={metrics.margin >= 0 ? "positive" : "negative"}>{metrics.marginRate.toFixed(1)}%</strong>
+        <small>{money(metrics.margin)}</small>
+      </div>
+      <button className="minimal-save-price" type="button" onClick={save} disabled={saving}>{saving ? "저장중" : "저장"}</button>
+      <MinimalProductPriceTrend history={comparisonHistory} />
+    </article>
+  );
+}
+
+type MinimalHourlyRefreshRecord = {
+  key: string;
+  startedAt: number;
+  productCount: number;
+  platforms: ComparisonPlatform[];
+};
+
+function buildMinimalHourlyRefreshRecords(
+  histories: Record<string, ComparisonHistory>,
+  limit = 8,
+): MinimalHourlyRefreshRecord[] {
+  const grouped = new Map<string, { startedAt: number; productIds: Set<string>; platforms: Set<ComparisonPlatform> }>();
+  for (const [productId, history] of Object.entries(histories)) {
+    for (const [platform, snapshots] of Object.entries(history) as [ComparisonPlatform, CompetitorSnapshot[]][]) {
+      for (const snapshot of snapshots || []) {
+        const startedAt = Date.parse(snapshot.collected_at || "");
+        if (!Number.isFinite(startedAt)) continue;
+        const date = new Date(startedAt);
+        const key = [
+          date.getFullYear(),
+          String(date.getMonth() + 1).padStart(2, "0"),
+          String(date.getDate()).padStart(2, "0"),
+          String(date.getHours()).padStart(2, "0"),
+        ].join("-");
+        const record = grouped.get(key) || { startedAt, productIds: new Set<string>(), platforms: new Set<ComparisonPlatform>() };
+        record.startedAt = Math.max(record.startedAt, startedAt);
+        record.productIds.add(productId);
+        record.platforms.add(platform);
+        grouped.set(key, record);
+      }
+    }
+  }
+  return Array.from(grouped.entries())
+    .map(([key, record]) => ({
+      key,
+      startedAt: record.startedAt,
+      productCount: record.productIds.size,
+      platforms: Array.from(record.platforms),
+    }))
+    .sort((left, right) => right.startedAt - left.startedAt)
+    .slice(0, limit);
+}
+
+function minimalMonitoringTime(value: string | number | null | undefined): string {
+  const timestamp = typeof value === "number" ? value : Date.parse(value || "");
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return "기록 없음";
+  return new Intl.DateTimeFormat("ko-KR", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(new Date(timestamp));
+}
+
+function minimalRemainingTime(now: number, target: number): string {
+  if (!target || target <= now) return "지금 갱신 예정";
+  const remainingMinutes = Math.max(1, Math.ceil((target - now) / 60_000));
+  const hours = Math.floor(remainingMinutes / 60);
+  const minutes = remainingMinutes % 60;
+  if (hours === 0) return `${minutes}분 후`;
+  if (minutes === 0) return `${hours}시간 후`;
+  return `${hours}시간 ${minutes}분 후`;
+}
+
+function MinimalMonitoringView({
+  products,
+  comparisonHistories,
+  refreshHours,
+  autoRefresh,
+  lastRunAt,
+  now,
+  refreshing,
+  onBack,
+  onUpdate,
+  onRefresh,
+  onRefreshHoursChange,
+  onAutoRefreshChange,
+}: {
+  products: PreparedProduct[];
+  comparisonHistories: Record<string, ComparisonHistory>;
+  refreshHours: number;
+  autoRefresh: boolean;
+  lastRunAt: number;
+  now: number;
+  refreshing: boolean;
+  onBack: () => void;
+  onUpdate: (item: PreparedProduct, updates: Partial<PreparedProduct>) => Promise<void>;
+  onRefresh: () => Promise<void>;
+  onRefreshHoursChange: (hours: number) => void;
+  onAutoRefreshChange: (enabled: boolean) => void;
+}) {
+  const latestProductScanAt = Math.max(
+    0,
+    ...products.map((item) => Date.parse(item.last_competitor_scanned_at || "") || 0),
+  );
+  const scheduleAnchor = Math.max(lastRunAt, latestProductScanAt);
+  const nextRefreshAt = nextMonitoringRefreshAt(scheduleAnchor, refreshHours);
+  const hourlyRecords = buildMinimalHourlyRefreshRecords(comparisonHistories);
+  const nextRefreshLabel = autoRefresh
+    ? minimalRemainingTime(now, nextRefreshAt)
+    : "자동 갱신 꺼짐";
+
+  return (
+    <div className="minimal-monitoring-page">
+      <header className="minimal-monitoring-header">
+        <button type="button" onClick={onBack} aria-label="검색 결과로 돌아가기">←</button>
+        <div className="minimal-monitoring-title"><span>PriceScan</span><strong>모니터링</strong></div>
+        <div className="minimal-monitoring-header-status">
+          <div className="minimal-next-refresh"><span>다음 갱신</span><strong>{nextRefreshLabel}</strong></div>
+          <em>{products.length} ON</em>
+        </div>
+      </header>
+
+      <div className="minimal-monitoring-content">
+        <section className="minimal-refresh-panel" aria-labelledby="minimal-refresh-title">
+          <div className="minimal-refresh-controls">
+            <div className="minimal-refresh-copy">
+              <strong id="minimal-refresh-title">모니터링 상품만 재검색</strong>
+              <span>ON 상품만 다시 확인합니다. 자동 갱신은 이 화면이 열려 있을 때 동작합니다.</span>
+            </div>
+            <label>
+              <span>갱신 주기</span>
+              <select value={refreshHours} onChange={(event) => onRefreshHoursChange(Number(event.target.value))} disabled={refreshing}>
+                {monitoringRefreshHourOptions.map((hours) => <option key={hours} value={hours}>{hours}시간마다{hours === 6 ? " (권장)" : ""}</option>)}
+              </select>
+            </label>
+            <button
+              className={`minimal-auto-refresh ${autoRefresh ? "is-on" : ""}`}
+              type="button"
+              aria-pressed={autoRefresh}
+              disabled={refreshing}
+              onClick={() => onAutoRefreshChange(!autoRefresh)}
+            >
+              <span />자동 {autoRefresh ? "ON" : "OFF"}
+            </button>
+            <button className="minimal-refresh-now" type="button" disabled={refreshing || products.length === 0} onClick={onRefresh}>
+              {refreshing ? <><span className="minimal-search-button-spinner" />갱신 중</> : "지금 갱신"}
+            </button>
+          </div>
+
+          <div className="minimal-hourly-records">
+            <div className="minimal-hourly-records-head">
+              <strong>시간별 갱신 기록</strong>
+              <span>최근 갱신 {minimalMonitoringTime(Math.max(lastRunAt, latestProductScanAt))}</span>
+            </div>
+            <div className="minimal-hourly-record-list">
+              {hourlyRecords.map((record) => (
+                <article key={record.key}>
+                  <time dateTime={new Date(record.startedAt).toISOString()}>{minimalMonitoringTime(record.startedAt)}</time>
+                  <span>{record.productCount}개 상품</span>
+                  <small>{record.platforms.map(sourceLabel).join(" · ")}</small>
+                </article>
+              ))}
+              {hourlyRecords.length === 0 && <p>첫 갱신 후 시간대별 기록이 표시됩니다.</p>}
+            </div>
+          </div>
+        </section>
+
+        <section className="minimal-owned-section" aria-labelledby="minimal-owned-title">
+          <div className="minimal-monitoring-section-head">
+            <div><strong id="minimal-owned-title">내가 팔고 있는 상품</strong><span>가격을 바꾸면 마진율이 바로 계산됩니다.</span></div>
+          </div>
+          <div className="minimal-owned-list">
+            {products.map((item) => (
+              <MinimalSellerPriceRow
+                key={item.id}
+                item={item}
+                comparisonHistory={comparisonHistories[item.id] || ({} as ComparisonHistory)}
+                onUpdate={onUpdate}
+              />
+            ))}
+            {products.length === 0 && <p className="minimal-monitoring-empty">검색 결과에서 모니터링을 ON 해주세요.</p>}
+          </div>
+        </section>
+
+        <section className="minimal-watched-section" aria-labelledby="minimal-watched-title">
+          <div className="minimal-monitoring-section-head">
+            <div><strong id="minimal-watched-title">모니터링 상품</strong><span>각 쇼핑몰의 조사 가격을 한 줄씩 비교합니다.</span></div>
+            <b>{products.length}</b>
+          </div>
+          <div className="minimal-watched-table-wrap">
+            <table>
+              <thead><tr><th>상품</th><th>쇼핑몰</th><th>등록가</th><th>노출가</th><th>배송비</th><th>최근 갱신</th><th>상태</th></tr></thead>
+              <tbody>
+                {products.map((item) => (
+                  <tr key={item.id}>
+                    <td>{item.source_url ? <a href={item.source_url} target="_blank" rel="noreferrer">{item.title}</a> : item.title}</td>
+                    <td>{item.mall || sourceLabel(item.source)}</td>
+                    <td>{money(item.sale_price)}</td>
+                    <td><strong>{money(item.display_price)}</strong></td>
+                    <td>{item.shipping_fee ? money(item.shipping_fee) : "무료"}</td>
+                    <td>{minimalMonitoringTime(item.last_competitor_scanned_at)}</td>
+                    <td><button className="minimal-monitor-toggle on" type="button" aria-pressed="true" onClick={() => onUpdate(item, { monitoring_enabled: 0 })}><span />ON</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {products.length === 0 && <p className="minimal-monitoring-empty">모니터링 중인 상품이 없습니다.</p>}
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+}
+
 function sortResultRows(rows: SearchResultRow[], sortMode: string, lowestTotal: number): SearchResultRow[] {
   const sorted = [...rows];
   const exclusionWeight = (row: SearchResultRow) => (row.isExcluded || row.status === "abnormal" ? 1 : 0);
@@ -4150,10 +5433,10 @@ function sortResultRows(rows: SearchResultRow[], sortMode: string, lowestTotal: 
 }
 
 function effectivePurchasePrice(row: SearchResultRow): number {
-  if (row.benefitStatus === "confirmed" && row.benefitPrice > 0) {
-    return row.benefitPrice + row.benefitShipping;
+  if (row.benefitPrice > 0) {
+    return row.registeredPrice || row.benefitPrice;
   }
-  return row.displayPrice;
+  return row.salePrice;
 }
 
 function benefitStatusLabel(status: SearchResultRow["benefitStatus"]): string {
@@ -4197,6 +5480,7 @@ function SearchResultList({
     collectionSource: item.source,
     name: item.name,
     mall: item.mall,
+    registeredPrice: item.registered_price || item.price,
     salePrice: item.price,
     displayPrice: item.total,
     shippingFee: item.shipping,
@@ -4265,23 +5549,10 @@ function SearchResultList({
         <td><span className="source-chip">{sourceLabel(row.collectionSource)}</span></td>
         <td><ExtractionMethodBadges methods={row.extractionMethods} /></td>
         <td>{row.mall}</td>
-        <td className="number-cell">{money(row.salePrice)}</td>
-        <td className="number-cell">{money(row.shippingFee)}</td>
-        <td className={`number-cell ${isLowest ? "lowest-price-cell" : ""}`}>{money(row.displayPrice)}</td>
+        <td className="number-cell">{money(row.registeredPrice || row.salePrice)}</td>
+        <td className={`number-cell ${isLowest ? "lowest-price-cell" : ""}`}>{money(row.salePrice)}</td>
         <td className="number-cell">{percent(compareRate)}</td>
         <td className="number-cell">{percent(marginRate)}</td>
-        <td>
-          <span className="benefit-price-stack">
-            {row.couponPrice > 0 && <span>쿠폰 {money(row.couponPrice)}</span>}
-            {row.eventPrice > 0 && <span>행사 {money(row.eventPrice)}</span>}
-            {row.cardPrice > 0 && <span>카드 {money(row.cardPrice)}</span>}
-            {!row.couponPrice && !row.eventPrice && !row.cardPrice && <span>-</span>}
-          </span>
-        </td>
-        <td className="number-cell">
-          {row.benefitPrice > 0 ? money(row.benefitPrice + row.benefitShipping) : money(row.displayPrice)}
-          {row.benefitStatus === "conditional" && <small className="conditional-price">조건부</small>}
-        </td>
         <td>
           <span className={`benefit-status benefit-${row.benefitStatus}`}>{benefitStatusLabel(row.benefitStatus)}</span>
           {row.detailMethods.length > 0 && <ExtractionMethodBadges methods={row.detailMethods} />}
@@ -4302,8 +5573,8 @@ function SearchResultList({
               source: row.collectionSource,
               mall: row.mall,
               name: row.name,
-              salePrice: row.salePrice,
-              displayPrice: row.displayPrice,
+              salePrice: row.registeredPrice,
+              displayPrice: row.salePrice,
               shippingFee: row.shippingFee,
               url: row.url,
               })}>{isPrepared ? "모니터등록" : "모니터링 등록"}</button>
@@ -4324,7 +5595,6 @@ function SearchResultList({
   );
 
   const renderLineRow = (row: SearchResultRow, rank: number) => {
-    const finalPurchasePrice = effectivePurchasePrice(row);
     const isPrepared = preparedSourceIds.has(row.sourceItemId);
     const lineExcluded = Boolean(row.isExcluded) || row.status === "abnormal";
     const mallLabel = (() => {
@@ -4362,13 +5632,8 @@ function SearchResultList({
           {mallLabel}
           {lineExcluded && <small className="line-exclusion-reason">{row.exclusionReason || (row.status === "abnormal" ? "가격 이상치" : "제외됨")}</small>}
         </td>
+        <td className="number-cell">{money(row.registeredPrice || row.salePrice)}</td>
         <td className="number-cell">{money(row.salePrice)}</td>
-        <td className="number-cell">{money(row.shippingFee)}</td>
-        <td className="number-cell">{money(row.displayPrice)}</td>
-        <td className="number-cell">
-          <strong>{money(finalPurchasePrice)}</strong>
-          {row.benefitStatus === "conditional" && <small className="conditional-price">조건부</small>}
-        </td>
         <td>{renderBenefitInfo(row)}</td>
         <td><a href={row.url} target="_blank" rel="noreferrer">link</a></td>
         <td>
@@ -4377,8 +5642,8 @@ function SearchResultList({
             source: row.collectionSource,
             mall: row.mall,
             name: row.name,
-            salePrice: row.salePrice,
-            displayPrice: row.displayPrice,
+            salePrice: row.registeredPrice,
+            displayPrice: row.salePrice,
             shippingFee: row.shippingFee,
             url: row.url,
           })}>{isPrepared ? "등록됨" : "모니터링"}</button>
@@ -4407,7 +5672,7 @@ function SearchResultList({
           <div className="benefit-scan-toolbar">
             <div>
               <strong>체크 항목 상세스캔</strong>
-              <span>선택한 쇼핑정보 링크에서 쿠폰·행사·카드·배송비를 읽어와 같은 라인에 표시합니다. 1회 최대 10개</span>
+              <span>선택한 쇼핑정보 링크에서 쿠폰·행사·카드 정보를 읽어 등록가를 보정합니다. 1회 최대 10개</span>
             </div>
             <span className="benefit-scan-actions">
               <button className="btn" disabled={benefitScanning || selectedBenefitIds.length === 0} onClick={() => onBenefitScan(selectedBenefitIds)}>
@@ -4446,7 +5711,7 @@ function SearchResultList({
                           aria-label={`${group.label} 라인 전체 선택`}
                         />
                       </th>
-                      <th>순위</th><th>쇼핑몰</th><th>판매가</th><th>배송비</th><th>노출가</th><th>상세스캔가</th><th>쿠폰/혜택</th><th>링크</th><th>관리</th>
+                      <th>순위</th><th>쇼핑몰</th><th>등록가</th><th>노출가</th><th>혜택상태</th><th>링크</th><th>관리</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -4455,7 +5720,7 @@ function SearchResultList({
                       <tr className="line-placeholder-row" key={`${group.key}-empty-${emptyIndex}`}>
                         <td className="result-select-cell"></td>
                         <td className="number-cell">{group.rows.length + emptyIndex + 1}</td>
-                        <td colSpan={8}>수집된 후보가 없습니다. 해당 모델의 판매처가 부족하거나 수집이 차단된 상태입니다.</td>
+                        <td colSpan={6}>수집된 후보가 없습니다. 해당 모델의 판매처가 부족하거나 수집이 차단된 상태입니다.</td>
                       </tr>
                     ))}
                   </tbody>
@@ -4481,7 +5746,7 @@ function SearchResultList({
         <div className="benefit-scan-toolbar">
           <div>
             <strong>2차 혜택 상세조사</strong>
-            <span>선택한 상품 상세페이지에서 쿠폰·행사·카드·배송비를 확인합니다. 1회 최대 10개</span>
+            <span>선택한 상품 상세페이지에서 쿠폰·행사·카드 정보를 확인해 등록가를 보정합니다. 1회 최대 10개</span>
           </div>
           <span className="benefit-scan-actions">
             <button
@@ -4513,16 +5778,16 @@ function SearchResultList({
                   aria-label="혜택 상세조사 전체 선택"
                 />
               </th>
-              <th>상품종류</th><th>모델명</th><th>소스</th><th>추출방식</th><th>쇼핑몰</th><th>판매가</th><th>배송비</th><th>노출가</th><th>비교율</th><th>마진율</th><th>혜택가</th><th>최종구매가</th><th>혜택상태</th><th>가격상태</th><th>작업</th>
+              <th>상품종류</th><th>모델명</th><th>소스</th><th>추출방식</th><th>쇼핑몰</th><th>등록가</th><th>노출가</th><th>비교율</th><th>마진율</th><th>혜택상태</th><th>가격상태</th><th>작업</th>
             </tr>
           </thead>
           <tbody>
             {view === "active" && lowestRows.map((row) => renderResultRow(row, true))}
             {view === "active" && lowestRows.length > 0 && comparisonRows.length > 0 && (
-              <tr className="result-divider"><td colSpan={16}>최저가 외 비교 대상</td></tr>
+              <tr className="result-divider"><td colSpan={13}>최저가 외 비교 대상</td></tr>
             )}
             {(view === "excluded" ? rows : comparisonRows).map((row) => renderResultRow(row, false))}
-            {rows.length === 0 && <tr><td className="empty-result-cell" colSpan={16}>표시할 상품이 없습니다.</td></tr>}
+            {rows.length === 0 && <tr><td className="empty-result-cell" colSpan={13}>표시할 상품이 없습니다.</td></tr>}
           </tbody>
         </table>
       </div>

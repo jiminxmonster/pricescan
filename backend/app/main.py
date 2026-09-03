@@ -10,6 +10,9 @@ import html
 import json
 import socket
 import sqlite3
+import subprocess
+import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -35,6 +38,7 @@ from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
+from .seller_workspace import create_seller_router, init_seller_workspace
 
 
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -43,11 +47,17 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 UPLOAD_DIR = DATA_DIR / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 DATABASE_PATH = Path(os.getenv("DATABASE_PATH", DATA_DIR / "pricescan.db"))
+PRICESCAN_EXTENSION_LOCAL_PATH = Path(os.getenv("PRICESCAN_EXTENSION_LOCAL_PATH", BASE_DIR.parent / "extensions" / "pricescan-collector")).resolve()
+PRICESCAN_WEB_LOCAL_URL = os.getenv("PRICESCAN_WEB_LOCAL_URL", "http://127.0.0.1:8300/pricescan/")
+PRICESCAN_EXTENSION_DEV_PROFILE_DIR = DATA_DIR / "browser_sessions" / "pricescan_extension_dev"
 ADMIN_TOKEN = "pricescan-admin-token"
 HTTP_TIMEOUT_SECONDS = 8
 PLAYWRIGHT_TIMEOUT_MS = int(os.getenv("PLAYWRIGHT_TIMEOUT_MS", "18000"))
 PLAYWRIGHT_SEARCH_ENABLED = os.getenv("PLAYWRIGHT_SEARCH_ENABLED", "1") == "1"
 SCRAPLING_SEARCH_ENABLED = os.getenv("SCRAPLING_SEARCH_ENABLED", "1") == "1"
+COUPANG_SERVER_CRAWL_ENABLED = os.getenv("COUPANG_SERVER_CRAWL_ENABLED", "0") == "1"
+COUPANG_BROWSER_AUTOMATION_ENABLED = os.getenv("COUPANG_BROWSER_AUTOMATION_ENABLED", "1") == "1"
+COUPANG_REAL_CHROME_ENABLED = os.getenv("COUPANG_REAL_CHROME_ENABLED", "1") == "1"
 CRAWLER_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 NAVER_COMMERCE_API_BASE = "https://api.commerce.naver.com/external"
 MAX_IMAGE_UPLOAD_BYTES = 8 * 1024 * 1024
@@ -75,8 +85,22 @@ COMPARISON_PLATFORM_LABELS = {
     "enuri": "에누리",
     "coupang": "쿠팡",
 }
-MAX_COMPETITOR_SNAPSHOT_ROWS = 5
+MAX_COMPETITOR_SNAPSHOT_ROWS = 3
 SEARCH_LINE_SOURCE_LIMIT = 80
+MAX_BROWSER_COLLECTION_ROWS = 10
+MAX_EXTENSION_CANDIDATES_PER_SOURCE = 50
+MAX_EXTENSION_COLLECTION_ROWS = MAX_EXTENSION_CANDIDATES_PER_SOURCE * len(COMPARISON_TARGET_PLATFORMS)
+COUPANG_BROWSER_SESSION_DIR = DATA_DIR / "browser_sessions" / "coupang"
+COUPANG_BROWSER_LOCK = threading.Lock()
+LOCAL_BROWSER_EXECUTABLES = [
+    Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+    Path("/Applications/Chromium.app/Contents/MacOS/Chromium"),
+    Path("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
+]
+EXTENSION_COMPATIBLE_BROWSER_EXECUTABLES = [
+    Path("/Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"),
+    Path("/Applications/Chromium.app/Contents/MacOS/Chromium"),
+]
 
 
 app = FastAPI(title="PriceScan API", version="0.1.0")
@@ -148,6 +172,14 @@ def parse_price(value: str | int | float | None) -> int:
         return int(value)
     digits = re.sub(r"[^\d]", "", value)
     return int(digits) if digits else 0
+
+
+def parse_first_won_price(value: str | int | float | None) -> int:
+    if not isinstance(value, str):
+        return parse_price(value)
+    text = clean_text(value)
+    match = re.search(r"(\d{1,3}(?:,\d{3})+|\d{4,9})\s*원", text)
+    return parse_price(match.group(1) if match else value)
 
 
 def read_url(url: str, headers: dict[str, str] | None = None) -> tuple[int, str]:
@@ -236,6 +268,7 @@ def init_db() -> None:
                 mall TEXT NOT NULL,
                 name TEXT NOT NULL,
                 price INTEGER NOT NULL,
+                registered_price INTEGER NOT NULL DEFAULT 0,
                 shipping INTEGER NOT NULL DEFAULT 0,
                 total INTEGER NOT NULL,
                 url TEXT NOT NULL,
@@ -404,6 +437,7 @@ def init_db() -> None:
         if "extraction_methods_json" not in price_item_columns:
             db.execute("ALTER TABLE price_items ADD COLUMN extraction_methods_json TEXT NOT NULL DEFAULT '[]'")
         benefit_column_migrations = [
+            ("registered_price", "ALTER TABLE price_items ADD COLUMN registered_price INTEGER NOT NULL DEFAULT 0"),
             ("benefit_status", "ALTER TABLE price_items ADD COLUMN benefit_status TEXT NOT NULL DEFAULT 'not_checked'"),
             ("coupon_price", "ALTER TABLE price_items ADD COLUMN coupon_price INTEGER NOT NULL DEFAULT 0"),
             ("event_price", "ALTER TABLE price_items ADD COLUMN event_price INTEGER NOT NULL DEFAULT 0"),
@@ -582,6 +616,8 @@ def init_db() -> None:
 @app.on_event("startup")
 def startup() -> None:
     init_db()
+    with connect() as db:
+        init_seller_workspace(db)
 
 
 class LoginRequest(BaseModel):
@@ -605,6 +641,52 @@ class PriceSearchRequest(BaseModel):
     sort_mode: str = "lowest"
     filters: list[str] = []
     sources: list[str] = []
+
+
+class BrowserPriceItemInput(BaseModel):
+    name: str = ""
+    mall: str = "쿠팡"
+    price: int = Field(default=0, ge=0)
+    registered_price: int = Field(default=0, ge=0)
+    shipping: int = Field(default=0, ge=0)
+    total: int = Field(default=0, ge=0)
+    url: str = ""
+
+
+class BrowserPriceResultsPayload(BaseModel):
+    platform: str = "coupang"
+    query: str = Field(min_length=1)
+    sort_mode: str = "lowest"
+    page_url: str = ""
+    raw_text: str = ""
+    approval_scope: str = "once"
+    items: list[BrowserPriceItemInput] = Field(default_factory=list, max_length=MAX_BROWSER_COLLECTION_ROWS)
+
+
+class ExtensionPriceItemInput(BrowserPriceItemInput):
+    source: str = "coupang"
+
+
+class ExtensionPriceResultsPayload(BaseModel):
+    query: str = Field(min_length=1)
+    sort_mode: str = "lowest"
+    approval_scope: str = "extension"
+    merge_run_id: str = ""
+    page_urls: dict[str, str] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list, max_length=40)
+    items: list[ExtensionPriceItemInput] = Field(default_factory=list, max_length=MAX_EXTENSION_COLLECTION_ROWS)
+
+
+class DesktopPriceResultsPayload(ExtensionPriceResultsPayload):
+    collection_id: str = Field(pattern=r"^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$")
+
+
+class CoupangAutoCollectPayload(BaseModel):
+    query: str = Field(min_length=1)
+    sort_mode: str = "lowest"
+    detail_limit: int = Field(default=10, ge=1, le=MAX_BROWSER_COLLECTION_ROWS)
+    approval_scope: str = "session"
+    approval_wait_seconds: int = Field(default=35, ge=5, le=180)
 
 
 class BenefitScanRequest(BaseModel):
@@ -840,6 +922,56 @@ def prepared_product_row_to_dict(db: sqlite3.Connection, row: sqlite3.Row) -> di
     data["last_competitor_scanned_at"] = max(scanned_at_values) if scanned_at_values else None
     data.update(prepared_recommendation(data, competitors))
     return data
+
+
+def parse_platform_filter(value: str) -> set[str]:
+    if not value:
+        return set()
+    selected: set[str] = set()
+    for platform in value.split(","):
+        platform = platform.strip().lower()
+        if platform and platform in COMPARISON_TARGET_PLATFORMS:
+            selected.add(platform)
+    return selected
+
+
+def build_comparison_history_rows(
+    db: sqlite3.Connection,
+    prepared_id: str,
+    selected_platforms: set[str],
+    limit: int,
+) -> dict[str, list[sqlite3.Row]]:
+    rows = db.execute(
+        """
+        SELECT platform, rank, mall, title, sale_price, shipping_fee, total_price, detail_url, is_excluded, collected_at
+        FROM competitor_snapshots
+        WHERE prepared_product_id = ?
+        ORDER BY collected_at DESC, platform ASC, rank ASC
+        """,
+        (prepared_id,),
+    ).fetchall()
+    grouped: dict[str, list[sqlite3.Row]] = {}
+    seen_keys: dict[str, set[str]] = {}
+    for row in rows:
+        platform = str(row["platform"])
+        if not row["collected_at"] or row["is_excluded"]:
+            continue
+        if selected_platforms and platform not in selected_platforms:
+            continue
+        if row["rank"] != 1:
+            continue
+        if platform not in grouped:
+            grouped[platform] = []
+            seen_keys[platform] = set()
+        if row["collected_at"] in seen_keys[platform]:
+            continue
+        if len(grouped[platform]) >= limit:
+            continue
+        grouped[platform].append(row)
+        seen_keys[platform].add(row["collected_at"])
+    for platform, items in grouped.items():
+        grouped[platform] = list(reversed(items))
+    return grouped
 
 
 def listing_draft_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -1936,35 +2068,169 @@ def coupang_search_url(query: str, sort_mode: str = "lowest", display: int = 40)
     sorter = "salePriceAsc" if sort_mode == "lowest" else "scoreDesc"
     params = urllib.parse.urlencode(
         {
-            "component": "",
             "q": query,
-            "channel": "user",
-            "listSize": min(max(display, 1), 100),
             "sorter": sorter,
+            "listSize": min(max(display, 1), 60),
         }
     )
     return f"https://www.coupang.com/np/search?{params}"
 
 
-def parse_coupang_products(document: str, search_url: str, limit: int = 30) -> list[dict[str, Any]]:
+def coupang_product_blocks(document: str) -> list[str]:
     starts = [
         match.start()
         for match in re.finditer(
-            r"<li\b[^>]*class=[\"'][^\"']*search-product[^\"']*[\"']",
+            r"<(?:li|div)\b[^>]*class=[\"'][^\"']*(?:search-product|baby-product|productUnit|ProductUnit|product-card|ProductCard)[^\"']*[\"']",
             document,
             flags=re.IGNORECASE,
         )
     ]
     blocks = [document[start : starts[index + 1] if index + 1 < len(starts) else len(document)] for index, start in enumerate(starts)]
-    if not blocks:
-        blocks = [
-            match.group(0)
-            for match in re.finditer(
-                r"<(?P<tag>li|div)\b[^>]*(?:data-product-id|data-item-id|search-product|baby-product)[^>]*>.*?</(?P=tag)>",
-                document,
-                flags=re.IGNORECASE | re.DOTALL,
-            )
-        ]
+    if blocks:
+        return blocks
+
+    blocks = [
+        match.group(0)
+        for match in re.finditer(
+            r"<(?P<tag>li|div)\b[^>]*(?:data-product-id|data-item-id|data-vendor-item-id|search-product|baby-product)[^>]*>.*?</(?P=tag)>",
+            document,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+    ]
+    if blocks:
+        return blocks
+
+    href_matches = list(re.finditer(r"<a\b[^>]+href=[\"']([^\"']*(?:/vp/products/|/np/products/|/products/)[^\"']*)[\"']", document, flags=re.IGNORECASE))
+    window_blocks: list[str] = []
+    seen_ranges: set[tuple[int, int]] = set()
+    for match in href_matches:
+        start_window = max(0, match.start() - 3500)
+        end_window = min(len(document), match.end() + 4500)
+        nearest_li = document.rfind("<li", start_window, match.start())
+        nearest_div = document.rfind("<div", start_window, match.start())
+        start = max(nearest_li, nearest_div, start_window)
+        closing_li = document.find("</li>", match.end(), end_window)
+        end = closing_li + len("</li>") if closing_li >= 0 else end_window
+        block_range = (start, end)
+        if block_range in seen_ranges:
+            continue
+        seen_ranges.add(block_range)
+        window_blocks.append(document[start:end])
+    return window_blocks
+
+
+def extract_coupang_name(block: str) -> str:
+    name_patterns = (
+        r"class=[\"'][^\"']*(?:name|prod-name|product-title|productName|ProductUnit_productName|title)[^\"']*[\"'][^>]*>(.*?)</(?:div|span|strong|p|em|a)>",
+        r"\bdata-product-name=[\"']([^\"']{4,240})[\"']",
+        r"\btitle=[\"']([^\"']{4,240})[\"']",
+        r"\baria-label=[\"']([^\"']{4,240})[\"']",
+        r"\balt=[\"']([^\"']{4,240})[\"']",
+    )
+    for pattern in name_patterns:
+        match = re.search(pattern, block, flags=re.IGNORECASE | re.DOTALL)
+        if not match:
+            continue
+        candidate = clean_text(match.group(1))
+        if candidate and not re.search(r"^\d[\d,]*\s*원?$|무료배송|장바구니|광고", candidate):
+            return candidate[:240]
+
+    text = clean_text(block)
+    price_match = re.search(r"(\d{1,3}(?:,\d{3})+|\d{4,9})\s*원", text)
+    if not price_match:
+        return ""
+    before_price = text[: price_match.start()]
+    before_price = re.sub(r"^(?:광고|AD)\s*", "", before_price, flags=re.IGNORECASE)
+    before_price = re.sub(r"(?:와우할인가|쿠폰가|즉시할인가|판매가|가격)\s*$", "", before_price).strip(" -·:/")
+    tokens = [segment.strip(" -·:/") for segment in re.split(r"\s{2,}|(?<=\])\s*", before_price) if segment.strip()]
+    return (tokens[-1] if tokens else before_price)[-240:]
+
+
+COUPANG_REGISTERED_PRICE_CONTEXT = re.compile(
+    r"original|base[-_ ]?price|list[-_ ]?price|retail|regular|normal|before|was|strike|strikethrough|del|discount[-_ ]?rate|정가|정상가|할인전|할인\s*전|원가|등록가",
+    flags=re.IGNORECASE,
+)
+
+
+def extract_coupang_price(block: str) -> int:
+    price_class_matches = re.finditer(
+        r"<(?P<tag>strong|span|em|div|p|b)\b(?P<attrs>[^>]*)>(?P<body>.*?)</(?P=tag)>",
+        block,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    for match in price_class_matches:
+        attrs = match.group("attrs")
+        body = match.group("body")
+        target = f"{attrs} {body[:160]}"
+        if not re.search(r"price-value|sale-price|sales-price|final-price|discount-price|price", attrs, flags=re.IGNORECASE):
+            continue
+        if COUPANG_REGISTERED_PRICE_CONTEXT.search(target):
+            continue
+        price = parse_first_won_price(body)
+        if price > 0:
+            return price
+
+    for data_price_match in re.finditer(r"data-[^=]*(?:price|amount)=[\"']([\d,]+)[\"']", block, flags=re.IGNORECASE):
+        context = block[max(0, data_price_match.start() - 80) : min(len(block), data_price_match.end() + 80)]
+        if COUPANG_REGISTERED_PRICE_CONTEXT.search(context):
+            continue
+        price = parse_price(data_price_match.group(1))
+        if price > 0:
+            return price
+
+    text = clean_text(block)
+    candidates: list[int] = []
+    for match in re.finditer(r"(\d{1,3}(?:,\d{3})+|\d{4,9})\s*원", text):
+        context = text[max(0, match.start() - 25) : min(len(text), match.end() + 25)]
+        if COUPANG_REGISTERED_PRICE_CONTEXT.search(context):
+            continue
+        if re.search(r"적립|캐시|배송비|월\s*\d|개월|카드", context):
+            continue
+        candidates.append(parse_price(match.group(1)))
+    if candidates:
+        return candidates[0]
+    fallback = re.search(r"(\d{1,3}(?:,\d{3})+|\d{4,9})\s*원", text)
+    return parse_price(fallback.group(1) if fallback else "")
+
+
+def extract_coupang_registered_price(block: str, exposure_price: int) -> int:
+    candidates: list[int] = []
+    for match in re.finditer(
+        r"<(?P<tag>del|s)\b[^>]*>(?P<body>.*?)</(?P=tag)>",
+        block,
+        flags=re.IGNORECASE | re.DOTALL,
+    ):
+        price = parse_first_won_price(match.group("body"))
+        if price > exposure_price:
+            candidates.append(price)
+
+    for match in re.finditer(
+        r"<(?P<tag>strong|span|em|div|p|b)\b(?P<attrs>[^>]*)>(?P<body>.*?)</(?P=tag)>",
+        block,
+        flags=re.IGNORECASE | re.DOTALL,
+    ):
+        target = f"{match.group('attrs')} {match.group('body')[:160]}"
+        if not COUPANG_REGISTERED_PRICE_CONTEXT.search(target):
+            continue
+        price = parse_first_won_price(match.group("body"))
+        if price > exposure_price:
+            candidates.append(price)
+
+    text = clean_text(block)
+    for match in re.finditer(
+        r"(?:정가|정상가|할인전|할인\s*전|원가|등록가)[^\d]{0,30}(\d{1,3}(?:,\d{3})+|\d{4,9})\s*원",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        price = parse_price(match.group(1))
+        if price > exposure_price:
+            candidates.append(price)
+
+    return candidates[0] if candidates else exposure_price
+
+
+def parse_coupang_products(document: str, search_url: str, limit: int = 30) -> list[dict[str, Any]]:
+    blocks = coupang_product_blocks(document)
 
     products: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -1980,30 +2246,11 @@ def parse_coupang_products(document: str, search_url: str, limit: int = 30) -> l
         if not href_match:
             href_match = re.search(r"<a\b[^>]+href=[\"']([^\"']+)[\"']", block, flags=re.IGNORECASE)
 
-        name_match = re.search(
-            r"class=[\"'][^\"']*(?:name|prod-name|product-title|title)[^\"']*[\"'][^>]*>(.*?)</(?:div|span|strong|p)>",
-            block,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-        name = clean_text(name_match.group(1)) if name_match else ""
-        if not name:
-            alt_match = re.search(r"\balt=[\"']([^\"']{4,200})[\"']", block, flags=re.IGNORECASE)
-            name = clean_text(alt_match.group(1)) if alt_match else ""
-
-        price_match = re.search(
-            r"class=[\"'][^\"']*(?:price-value|sale-price|final-price|price)[^\"']*[\"'][^>]*>(.*?)</(?:strong|span|em|div)>",
-            block,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-        price = parse_price(price_match.group(1) if price_match else "")
-        if price <= 0:
-            data_price_match = re.search(r"data-[^=]*(?:price|amount)=[\"']([\d,]+)[\"']", block, flags=re.IGNORECASE)
-            price = parse_price(data_price_match.group(1) if data_price_match else "")
-        if price <= 0:
-            text_price_match = re.search(r"(\d{1,3}(?:,\d{3})+|\d{4,9})\s*원", text)
-            price = parse_price(text_price_match.group(1) if text_price_match else "")
+        name = extract_coupang_name(block)
+        price = extract_coupang_price(block)
         if not name or price <= 0:
             continue
+        registered_price = extract_coupang_registered_price(block, price)
 
         shipping = 0
         shipping_match = re.search(r"배송비[^\d]{0,20}(\d{1,3}(?:,\d{3})+|\d{3,7})\s*원", text)
@@ -2021,6 +2268,7 @@ def parse_coupang_products(document: str, search_url: str, limit: int = 30) -> l
                 "mall": "쿠팡",
                 "name": name,
                 "price": price,
+                "registered_price": registered_price,
                 "shipping": shipping,
                 "total": price + shipping,
                 "url": detail_url,
@@ -2344,17 +2592,25 @@ def dedupe_products(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     indexes: dict[str, int] = {}
     unique_items: list[dict[str, Any]] = []
     for item in items:
-        total = parse_price(item.get("total"))
+        price = parse_price(item.get("price"))
+        shipping = parse_price(item.get("shipping"))
+        total = parse_price(item.get("total")) or price + shipping
         key = f"{item.get('mall')}:{normalize_title(str(item.get('name', '')))}:{total}"
         methods = [str(method) for method in item.get("extraction_methods", []) if method]
         if key in indexes:
             existing = unique_items[indexes[key]]
             existing_methods = list(existing.get("extraction_methods", []))
             existing["extraction_methods"] = list(dict.fromkeys([*existing_methods, *methods]))
+            registered_price = parse_price(item.get("registered_price"))
+            if registered_price > parse_price(existing.get("registered_price")):
+                existing["registered_price"] = registered_price
             continue
         normalized = dict(item)
-        normalized["price"] = parse_price(normalized.get("price"))
-        normalized["shipping"] = parse_price(normalized.get("shipping"))
+        normalized["price"] = price
+        normalized["registered_price"] = parse_price(normalized.get("registered_price")) or normalized["price"]
+        if normalized["registered_price"] < normalized["price"]:
+            normalized["registered_price"] = normalized["price"]
+        normalized["shipping"] = shipping
         normalized["total"] = normalized["price"] + normalized["shipping"]
         normalized["extraction_methods"] = list(dict.fromkeys(methods))
         indexes[key] = len(unique_items)
@@ -2363,7 +2619,7 @@ def dedupe_products(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 BENEFIT_KEYWORDS = {
-    "쿠폰": ("쿠폰적용가", "쿠폰 적용가", "쿠폰가", "쿠폰할인가", "쿠폰 할인가"),
+    "쿠폰": ("쿠폰적용가", "쿠폰 적용가", "쿠폰가", "쿠폰할인가", "쿠폰 할인가", "쿠폰할인", "쿠폰 할인"),
     "행사": ("행사가", "특가", "즉시할인가", "즉시 할인가", "할인판매가"),
     "카드": ("카드할인가", "카드 할인가", "카드혜택가", "카드 혜택가"),
 }
@@ -2415,7 +2671,32 @@ def benefit_price_near_keywords(text: str, keywords: tuple[str, ...], reference_
     return min(candidates, default=0)
 
 
+def detail_price_stack(text: str, reference_price: int) -> dict[str, int]:
+    price_area = text[:80_000]
+    lower_bound = int(reference_price * 0.35) if reference_price else 1_000
+    upper_bound = int(reference_price * 1.45) if reference_price else 20_000_000
+    prices: list[int] = []
+    for match in re.finditer(r"(\d{1,3}(?:,\d{3})+|\d{4,9})\s*원", price_area):
+        context = price_area[max(0, match.start() - 35) : min(len(price_area), match.end() + 35)]
+        if re.search(r"배송비|반품|교환|적립|캐시|월\s*\d|개월|할부|판매자\s*평가|리뷰|문의", context):
+            continue
+        price = parse_price(match.group(1))
+        if lower_bound <= price <= upper_bound:
+            prices.append(price)
+
+    unique_prices = list(dict.fromkeys(prices))
+    if not unique_prices:
+        return {"registered_price": 0, "display_price": 0}
+
+    display_price = min(unique_prices)
+    registered_price = max(unique_prices)
+    if registered_price < display_price:
+        registered_price = display_price
+    return {"registered_price": registered_price, "display_price": display_price}
+
+
 def parse_benefit_detail(text: str, reference_price: int, fallback_shipping: int) -> dict[str, Any]:
+    price_stack = detail_price_stack(text, reference_price)
     coupon_price = benefit_price_near_keywords(text, BENEFIT_KEYWORDS["쿠폰"], reference_price)
     event_price = benefit_price_near_keywords(text, BENEFIT_KEYWORDS["행사"], reference_price)
     card_price = benefit_price_near_keywords(text, BENEFIT_KEYWORDS["카드"], reference_price)
@@ -2434,6 +2715,8 @@ def parse_benefit_detail(text: str, reference_price: int, fallback_shipping: int
 
     price_candidates = [price for price in (coupon_price, event_price, card_price) if price > 0]
     benefit_price = min(price_candidates, default=0)
+    if price_stack["display_price"] > 0 and (not reference_price or price_stack["display_price"] <= reference_price):
+        benefit_price = min([price for price in (benefit_price, price_stack["display_price"]) if price > 0], default=0)
     if benefit_price:
         status = "conditional" if condition_terms or card_price == benefit_price else "confirmed"
     elif detected_labels or condition_terms:
@@ -2451,6 +2734,8 @@ def parse_benefit_detail(text: str, reference_price: int, fallback_shipping: int
         "event_price": event_price,
         "card_price": card_price,
         "benefit_price": benefit_price,
+        "registered_price": price_stack["registered_price"],
+        "display_price": price_stack["display_price"],
         "benefit_shipping": shipping,
         "benefit_summary": " · ".join(dict.fromkeys(summary_parts)),
         "benefit_condition": " · ".join(dict.fromkeys(condition_terms)),
@@ -2509,6 +2794,8 @@ def fetch_benefit_detail(url: str, reference_price: int, fallback_shipping: int)
             "event_price": 0,
             "card_price": 0,
             "benefit_price": 0,
+            "registered_price": 0,
+            "display_price": 0,
             "benefit_shipping": fallback_shipping,
             "benefit_summary": "",
             "benefit_condition": " · ".join(errors)[:500] or "상세페이지 확인 실패",
@@ -2517,6 +2804,505 @@ def fetch_benefit_detail(url: str, reference_price: int, fallback_shipping: int)
     parsed = parse_benefit_detail(" ".join(texts), reference_price, fallback_shipping)
     parsed["detail_methods"] = list(dict.fromkeys(methods))
     return parsed
+
+
+def coupang_browser_detail_targets(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
+    targets: list[dict[str, Any]] = []
+    for row in rows:
+        url = str(row["url"] or "")
+        if row["source"] == "coupang" or "coupang.com" in url:
+            targets.append(
+                {
+                    "id": row["id"],
+                    "url": url,
+                    "name": row["name"],
+                    "total": int(row["total"] or row["price"] or 0),
+                    "shipping": int(row["shipping"] or 0),
+                }
+            )
+    return targets
+
+
+def access_denied_text(text: str) -> bool:
+    return bool(re.search(r"access denied|forbidden|권한|접근이\s*거부|captcha", text, flags=re.IGNORECASE))
+
+
+def require_coupang_browser_automation() -> None:
+    if not COUPANG_BROWSER_AUTOMATION_ENABLED:
+        raise RuntimeError("쿠팡 브라우저 자동수집이 비활성화됨")
+    if sync_playwright is None:
+        raise RuntimeError("Playwright 브라우저 자동수집 모듈이 설치되지 않음")
+
+
+def local_browser_executable() -> str | None:
+    for executable in LOCAL_BROWSER_EXECUTABLES:
+        if executable.exists():
+            return str(executable)
+    return None
+
+
+def playwright_browser_executables() -> list[Path]:
+    cache_dir = Path.home() / "Library" / "Caches" / "ms-playwright"
+    if not cache_dir.exists():
+        return []
+    patterns = [
+        "chromium-*/chrome-mac*/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+        "chromium-*/chrome-mac*/Chromium.app/Contents/MacOS/Chromium",
+    ]
+    candidates: list[Path] = []
+    for pattern in patterns:
+        candidates.extend(path for path in cache_dir.glob(pattern) if path.exists())
+    return sorted(candidates, key=lambda path: path.stat().st_mtime, reverse=True)
+
+
+def extension_browser_executable() -> tuple[str | None, bool]:
+    configured = os.getenv("PRICESCAN_EXTENSION_BROWSER_EXECUTABLE")
+    if configured:
+        path = Path(configured)
+        if path.exists():
+            return str(path), "Chrome for Testing" in path.name or "Chromium" in path.name
+    for executable in playwright_browser_executables():
+        return str(executable), True
+    for executable in EXTENSION_COMPATIBLE_BROWSER_EXECUTABLES:
+        if executable.exists():
+            return str(executable), True
+    fallback = local_browser_executable()
+    return fallback, False
+
+
+def launch_coupang_browser_context(playwright: Any, timeout_ms: int) -> Any:
+    executable_path = local_browser_executable()
+    launch_options: dict[str, Any] = {
+        "headless": False,
+        "locale": "ko-KR",
+        "viewport": {"width": 1420, "height": 980},
+        "args": ["--start-maximized"],
+        "chromium_sandbox": True,
+        "ignore_default_args": ["--enable-automation"],
+        "slow_mo": 180,
+        "timeout": timeout_ms,
+    }
+    if executable_path:
+        launch_options["executable_path"] = executable_path
+    try:
+        return playwright.chromium.launch_persistent_context(str(COUPANG_BROWSER_SESSION_DIR), **launch_options)
+    except Exception as error:
+        if executable_path:
+            raise
+        raise RuntimeError("브라우저 실행파일이 없습니다. backend/.venv312/bin/python -m playwright install chromium 실행이 필요합니다.") from error
+
+
+def open_coupang_search_like_user(page: Any, query: str, sort_mode: str, timeout_ms: int) -> str:
+    search_url = coupang_search_url(query, sort_mode, SEARCH_LINE_SOURCE_LIMIT)
+    page.goto("https://www.coupang.com/", wait_until="domcontentloaded", timeout=timeout_ms)
+    page.wait_for_timeout(1400)
+    body_text = page.locator("body").inner_text(timeout=min(timeout_ms, 8000))[:80_000]
+    if access_denied_text(body_text):
+        raise RuntimeError("쿠팡 홈 화면이 접근 거부 상태입니다. 열린 Chrome에서 일반 쿠팡 접속이 가능한지 먼저 확인하세요.")
+
+    search_input = None
+    selectors = (
+        "input[name='q']",
+        "input#headerSearchKeyword",
+        "input[title*='검색']",
+        "input[placeholder*='검색']",
+        "input[placeholder*='찾고']",
+    )
+    for selector in selectors:
+        locator = page.locator(selector).first
+        try:
+            if locator.count() > 0 and locator.is_visible(timeout=1200):
+                search_input = locator
+                break
+        except Exception:
+            continue
+
+    if search_input is None:
+        page.goto(search_url, wait_until="domcontentloaded", timeout=timeout_ms)
+    else:
+        search_input.click(timeout=3000)
+        search_input.fill(query, timeout=3000)
+        search_input.press("Enter", timeout=3000)
+
+    try:
+        page.wait_for_url(re.compile(r"/np/search|/np/campaigns|/vp/products"), timeout=timeout_ms)
+    except Exception:
+        pass
+    page.wait_for_timeout(1800)
+
+    if sort_mode == "lowest":
+        try:
+            lowest_link = page.locator("a:has-text('낮은 가격순'), button:has-text('낮은 가격순'), a:has-text('가격 낮은순'), button:has-text('가격 낮은순')").first
+            if lowest_link.count() > 0 and lowest_link.is_visible(timeout=1200):
+                lowest_link.click(timeout=3000)
+                page.wait_for_timeout(1200)
+        except Exception:
+            pass
+
+    return page.url or search_url
+
+
+def visible_coupang_detail_details(targets: list[dict[str, Any]], approval_wait_seconds: int = 35) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    if not targets:
+        return {}, []
+    require_coupang_browser_automation()
+    COUPANG_BROWSER_SESSION_DIR.mkdir(parents=True, exist_ok=True)
+    details: dict[str, dict[str, Any]] = {}
+    warnings: list[str] = []
+    timeout_ms = max(PLAYWRIGHT_TIMEOUT_MS, approval_wait_seconds * 1000)
+
+    with COUPANG_BROWSER_LOCK:
+        with sync_playwright() as playwright:
+            context = launch_coupang_browser_context(playwright, timeout_ms)
+            page = context.pages[0] if context.pages else context.new_page()
+            try:
+                for index, target in enumerate(targets):
+                    url = assert_public_product_url(str(target["url"]))
+                    try:
+                        page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+                        page.wait_for_timeout(1600 if index else 2400)
+                        body_text = page.locator("body").inner_text(timeout=min(timeout_ms, 8000))[:500_000]
+                        if access_denied_text(body_text):
+                            raise RuntimeError("쿠팡 브라우저 화면이 접근 거부/보안확인 상태입니다. 열린 브라우저에서 확인을 완료한 뒤 다시 실행하세요.")
+                        detail = parse_benefit_detail(body_text, int(target["total"]), int(target["shipping"]))
+                        detail["detail_methods"] = ["browser"]
+                        if detail["display_price"] <= 0 and detail["benefit_price"] <= 0:
+                            detail["benefit_status"] = "conditional"
+                            detail["benefit_condition"] = "브라우저 화면에서 가격 묶음을 찾지 못함"
+                        details[str(target["id"])] = detail
+                    except Exception as error:
+                        warnings.append(f"{str(target['name'])[:36]}: {error}")
+                        details[str(target["id"])] = {
+                            "benefit_status": "failed",
+                            "coupon_price": 0,
+                            "event_price": 0,
+                            "card_price": 0,
+                            "benefit_price": 0,
+                            "registered_price": 0,
+                            "display_price": 0,
+                            "benefit_shipping": int(target["shipping"]),
+                            "benefit_summary": "",
+                            "benefit_condition": str(error)[:500],
+                            "detail_methods": ["browser"],
+                        }
+                    page.wait_for_timeout(700)
+            finally:
+                context.close()
+    return details, warnings
+
+
+def apply_detail_to_product(product: dict[str, Any], detail: dict[str, Any]) -> dict[str, Any]:
+    updated = dict(product)
+    next_price = int(detail.get("display_price") or detail.get("benefit_price") or updated.get("price") or 0)
+    next_shipping = int(detail.get("benefit_shipping") if detail.get("benefit_shipping") is not None else updated.get("shipping") or 0)
+    next_registered_price = int(detail.get("registered_price") or updated.get("registered_price") or next_price)
+    if next_registered_price < next_price:
+        next_registered_price = next_price
+    updated.update(
+        {
+            "price": next_price,
+            "registered_price": next_registered_price,
+            "shipping": next_shipping,
+            "total": next_price + next_shipping,
+            "benefit_status": detail.get("benefit_status", "none"),
+            "coupon_price": int(detail.get("coupon_price") or 0),
+            "event_price": int(detail.get("event_price") or 0),
+            "card_price": int(detail.get("card_price") or 0),
+            "benefit_price": int(detail.get("benefit_price") or 0),
+            "benefit_shipping": next_shipping,
+            "benefit_summary": str(detail.get("benefit_summary") or ""),
+            "benefit_condition": str(detail.get("benefit_condition") or ""),
+            "detail_methods": list(detail.get("detail_methods") or ["browser"]),
+            "benefit_checked_at": now(),
+        }
+    )
+    return updated
+
+
+def applescript_quote(value: str) -> str:
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def run_osascript(script: str, timeout_seconds: int = 30) -> str:
+    try:
+        completed = subprocess.run(
+            ["osascript"],
+            input=script,
+            text=True,
+            capture_output=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except FileNotFoundError as error:
+        raise RuntimeError("macOS AppleScript 실행기가 없습니다.") from error
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError("Chrome 응답 대기 시간이 초과되었습니다.") from error
+    if completed.returncode != 0:
+        message = (completed.stderr or completed.stdout or "").strip()
+        if "Allow JavaScript from Apple Events" in message or "not allowed" in message or "JavaScript" in message:
+            raise RuntimeError("Chrome에서 '보기 > 개발자 > Apple Events에서 JavaScript 허용'을 먼저 켜야 합니다.")
+        raise RuntimeError(message or "Chrome AppleScript 실행 실패")
+    return completed.stdout.strip()
+
+
+def chrome_execute_javascript(js: str, timeout_seconds: int = 30) -> str:
+    script = f"""
+tell application "Google Chrome"
+  activate
+  if (count of windows) = 0 then make new window
+  execute javascript {applescript_quote(js)} in active tab of front window
+end tell
+"""
+    return run_osascript(script, timeout_seconds=timeout_seconds)
+
+
+def chrome_open_url(url: str, timeout_seconds: int = 20) -> None:
+    script = f"""
+tell application "Google Chrome"
+  activate
+  if (count of windows) = 0 then make new window
+  set URL of active tab of front window to {applescript_quote(url)}
+end tell
+"""
+    run_osascript(script, timeout_seconds=timeout_seconds)
+
+
+def chrome_current_url(timeout_seconds: int = 10) -> str:
+    script = """
+tell application "Google Chrome"
+  if (count of windows) = 0 then return ""
+  return URL of active tab of front window
+end tell
+"""
+    return run_osascript(script, timeout_seconds=timeout_seconds)
+
+
+def chrome_wait_for_text(timeout_seconds: int = 35) -> str:
+    deadline = time.time() + timeout_seconds
+    last_text = ""
+    while time.time() < deadline:
+        try:
+            text = chrome_execute_javascript("document.body ? document.body.innerText : ''", timeout_seconds=8)
+            if text:
+                last_text = text
+                if "로딩" not in text[:200] or "원" in text or access_denied_text(text):
+                    return text
+        except Exception:
+            pass
+        time.sleep(1.0)
+    return last_text
+
+
+def chrome_extract_coupang_rows(timeout_seconds: int = 20) -> list[dict[str, str]]:
+    js = r"""
+(() => {
+  const seen = new Set();
+  const rows = [];
+  const anchors = Array.from(document.querySelectorAll("a[href*='/vp/products/'], a[href*='/np/products/'], a[href*='/products/']"));
+  for (const anchor of anchors) {
+    const href = anchor.href || "";
+    if (!href || seen.has(href)) continue;
+    let card = anchor.closest("li, [class*='search-product'], [class*='ProductUnit'], [class*='product'], [class*='ProductCard']");
+    if (!card) card = anchor;
+    const text = (card.innerText || anchor.innerText || "").trim();
+    if (!text || !/[0-9][0-9,]*\s*원/.test(text)) continue;
+    seen.add(href);
+    rows.push({url: href, text});
+    if (rows.length >= 20) break;
+  }
+  return JSON.stringify(rows);
+})()
+"""
+    raw = chrome_execute_javascript(js, timeout_seconds=timeout_seconds)
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    return [row for row in data if isinstance(row, dict)]
+
+
+def product_from_coupang_browser_row(row: dict[str, str], fallback_url: str) -> dict[str, Any] | None:
+    text = str(row.get("text") or "")
+    lines = [clean_text(line) for line in text.splitlines() if clean_text(line)]
+    price_lines = [
+        line
+        for line in lines
+        if re.search(r"\d[\d,]*\s*원|\d{4,}", line)
+        and not re.search(r"배송비|월\s*\d|개월|적립|캐시|리뷰|평점", line)
+    ]
+    price_values = [parse_price(line) for line in price_lines if parse_price(line) > 0]
+    if not price_values:
+        return None
+    exposure_price = min(price_values) if len(price_values) >= 2 and re.search(r"쿠폰|할인|정가|즉시", text) else price_values[0]
+    registered_price = max(price_values) if len(price_values) >= 2 else exposure_price
+
+    price_index = next((index for index, line in enumerate(lines) if line in price_lines), 0)
+    name_candidates = [
+        line
+        for line in lines[: max(price_index, 1) + 1]
+        if not looks_like_non_product_coupang_line(line)
+        and not re.search(r"\d[\d,]*\s*원|무료배송|로켓|광고|별점|평점|리뷰", line)
+    ]
+    name = name_candidates[-1] if name_candidates else (lines[0] if lines else "")
+    if not name or parse_price(name) > 0:
+        return None
+    return product_from_browser_input(
+        BrowserPriceItemInput(
+            name=name,
+            mall="쿠팡",
+            price=exposure_price,
+            registered_price=registered_price,
+            shipping=0 if "무료배송" in text.replace(" ", "") else 0,
+            url=str(row.get("url") or ""),
+        ),
+        "coupang",
+        fallback_url,
+    )
+
+
+def chrome_search_coupang_like_user(query: str, sort_mode: str, approval_wait_seconds: int) -> str:
+    if not COUPANG_REAL_CHROME_ENABLED:
+        raise RuntimeError("실제 Chrome 세션 수집이 비활성화됨")
+    chrome_open_url("https://www.coupang.com/")
+    time.sleep(2.0)
+    home_text = chrome_wait_for_text(timeout_seconds=max(8, min(approval_wait_seconds, 25)))
+    if access_denied_text(home_text):
+        raise RuntimeError("일반 Chrome에서도 쿠팡 홈이 Access Denied 상태입니다. 브라우저에서 쿠팡 접속이 정상인지 먼저 확인해야 합니다.")
+
+    query_json = json.dumps(query, ensure_ascii=False)
+    js = f"""
+(() => {{
+  const query = {query_json};
+  const selectors = ["input[name='q']", "input#headerSearchKeyword", "input[title*='검색']", "input[placeholder*='검색']", "input[placeholder*='찾고']"];
+  let input = null;
+  for (const selector of selectors) {{
+    input = document.querySelector(selector);
+    if (input) break;
+  }}
+  if (!input) return "NO_INPUT";
+  input.focus();
+  input.value = query;
+  input.dispatchEvent(new Event("input", {{ bubbles: true }}));
+  input.dispatchEvent(new Event("change", {{ bubbles: true }}));
+  const form = input.closest("form");
+  if (form) {{
+    form.submit();
+  }} else {{
+    input.dispatchEvent(new KeyboardEvent("keydown", {{ key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true }}));
+  }}
+  return "OK";
+}})()
+"""
+    result = chrome_execute_javascript(js, timeout_seconds=12)
+    if result != "OK":
+        chrome_open_url(coupang_search_url(query, sort_mode, SEARCH_LINE_SOURCE_LIMIT))
+    time.sleep(3.0)
+    return chrome_current_url() or coupang_search_url(query, sort_mode, SEARCH_LINE_SOURCE_LIMIT)
+
+
+def collect_coupang_real_chrome_products(payload: CoupangAutoCollectPayload) -> tuple[list[dict[str, Any]], list[str], str]:
+    query = payload.query.strip()
+    warnings: list[str] = []
+    search_url = chrome_search_coupang_like_user(query, payload.sort_mode, payload.approval_wait_seconds)
+    body_text = chrome_wait_for_text(timeout_seconds=payload.approval_wait_seconds)
+    if access_denied_text(body_text):
+        raise RuntimeError("실제 Chrome 세션에서도 쿠팡 검색결과가 Access Denied 상태입니다.")
+
+    rows = chrome_extract_coupang_rows(timeout_seconds=18)
+    products = [
+        product
+        for product in (product_from_coupang_browser_row(row, search_url) for row in rows)
+        if product
+    ]
+    if not products:
+        products = parse_browser_raw_text_products(body_text, "coupang", search_url)
+    products = dedupe_products(mark_extraction_method(products, "browser"))[:MAX_BROWSER_COLLECTION_ROWS]
+    if not products:
+        raise RuntimeError("실제 Chrome 화면에서 쿠팡 검색 결과를 찾지 못했습니다.")
+
+    enriched: list[dict[str, Any]] = []
+    for index, product in enumerate(products):
+        if index >= payload.detail_limit or "coupang.com" not in str(product.get("url", "")):
+            enriched.append(product)
+            continue
+        try:
+            chrome_open_url(str(product["url"]))
+            time.sleep(2.2)
+            detail_text = chrome_wait_for_text(timeout_seconds=max(10, min(payload.approval_wait_seconds, 35)))
+            if access_denied_text(detail_text):
+                raise RuntimeError("상세페이지 Access Denied")
+            detail = parse_benefit_detail(detail_text, int(product["total"]), int(product["shipping"]))
+            detail["detail_methods"] = ["browser"]
+            enriched.append(apply_detail_to_product(product, detail))
+        except Exception as error:
+            warnings.append(f"{str(product['name'])[:36]} 상세수집 실패: {error}")
+            enriched.append(product)
+        time.sleep(0.8)
+    return enriched, warnings, search_url
+
+
+def collect_coupang_visible_browser_products(payload: CoupangAutoCollectPayload) -> tuple[list[dict[str, Any]], list[str], str]:
+    require_coupang_browser_automation()
+    COUPANG_BROWSER_SESSION_DIR.mkdir(parents=True, exist_ok=True)
+    query = payload.query.strip()
+    search_url = coupang_search_url(query, payload.sort_mode, SEARCH_LINE_SOURCE_LIMIT)
+    timeout_ms = max(PLAYWRIGHT_TIMEOUT_MS, payload.approval_wait_seconds * 1000)
+    warnings: list[str] = []
+
+    with COUPANG_BROWSER_LOCK:
+        with sync_playwright() as playwright:
+            context = launch_coupang_browser_context(playwright, timeout_ms)
+            page = context.pages[0] if context.pages else context.new_page()
+            try:
+                search_url = open_coupang_search_like_user(page, query, payload.sort_mode, timeout_ms)
+                try:
+                    page.wait_for_selector("a[href*='/vp/products/'], li.search-product, [class*='ProductUnit']", timeout=timeout_ms)
+                except Exception:
+                    pass
+                page.wait_for_timeout(1800)
+                body_text = page.locator("body").inner_text(timeout=min(timeout_ms, 8000))[:500_000]
+                if access_denied_text(body_text):
+                    raise RuntimeError("쿠팡 검색 화면이 접근 거부/보안확인 상태입니다. 열린 브라우저에서 확인을 완료한 뒤 다시 실행하세요.")
+                products = parse_coupang_products(page.content(), search_url, limit=MAX_BROWSER_COLLECTION_ROWS)
+                if not products:
+                    products = parse_browser_raw_text_products(body_text, "coupang", search_url)
+                products = dedupe_products(mark_extraction_method(products, "browser"))[:MAX_BROWSER_COLLECTION_ROWS]
+                if not products:
+                    raise RuntimeError("쿠팡 브라우저 화면에서 검색 결과를 찾지 못했습니다.")
+
+                detail_targets = [
+                    {
+                        "id": str(index),
+                        "url": product["url"],
+                        "name": product["name"],
+                        "total": product["total"],
+                        "shipping": product["shipping"],
+                    }
+                    for index, product in enumerate(products[: payload.detail_limit])
+                    if "coupang.com" in str(product.get("url", ""))
+                ]
+                detail_map: dict[str, dict[str, Any]] = {}
+                for target in detail_targets:
+                    try:
+                        page.goto(str(target["url"]), wait_until="domcontentloaded", timeout=timeout_ms)
+                        page.wait_for_timeout(1600)
+                        detail_text = page.locator("body").inner_text(timeout=min(timeout_ms, 8000))[:500_000]
+                        if access_denied_text(detail_text):
+                            raise RuntimeError("상세페이지 접근 거부/보안확인")
+                        detail = parse_benefit_detail(detail_text, int(target["total"]), int(target["shipping"]))
+                        detail["detail_methods"] = ["browser"]
+                        detail_map[str(target["id"])] = detail
+                    except Exception as error:
+                        warnings.append(f"{str(target['name'])[:36]} 상세수집 실패: {error}")
+                    page.wait_for_timeout(700)
+
+                enriched: list[dict[str, Any]] = []
+                for index, product in enumerate(products):
+                    detail = detail_map.get(str(index))
+                    enriched.append(apply_detail_to_product(product, detail) if detail else product)
+            finally:
+                context.close()
+    return enriched, warnings, search_url
 
 
 READY_SEARCH_SOURCES = {"naver", "danawa", "enuri", "coupang"}
@@ -2535,6 +3321,226 @@ class CollectionQuotaExceeded(RuntimeError):
 def normalize_sources(sources: list[str]) -> list[str]:
     selected = [source for source in sources if source in READY_SEARCH_SOURCES]
     return selected or ["naver", "danawa", "enuri", "coupang"]
+
+
+def safe_browser_result_url(value: str, fallback_url: str = "") -> str:
+    url = clean_text(value).rstrip("),.;")
+    if not url:
+        url = fallback_url
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        return url
+    return fallback_url if urllib.parse.urlparse(fallback_url).scheme in {"http", "https"} else ""
+
+
+def looks_like_non_product_coupang_line(line: str) -> bool:
+    normalized = re.sub(r"\s+", "", line.lower())
+    blocked_terms = (
+        "쿠팡홈", "장바구니", "마이쿠팡", "로그인", "회원가입", "로켓배송",
+        "검색결과", "광고", "정렬", "필터", "카테고리", "고객센터",
+    )
+    return any(term.lower() in normalized for term in blocked_terms)
+
+
+def product_from_browser_input(item: BrowserPriceItemInput, platform: str, fallback_url: str) -> dict[str, Any] | None:
+    name = clean_text(item.name)[:240]
+    price = parse_price(item.price)
+    registered_price = parse_price(item.registered_price) or price
+    shipping = parse_price(item.shipping)
+    total = parse_price(item.total) or price + shipping
+    if total and price <= 0:
+        price = max(total - shipping, 0)
+    if registered_price < price:
+        registered_price = price
+    if not name or price <= 0:
+        return None
+    return {
+        "source": platform,
+        "mall": clean_text(item.mall)[:80] or COMPARISON_PLATFORM_LABELS.get(platform, platform),
+        "name": name,
+        "price": price,
+        "registered_price": registered_price,
+        "shipping": shipping,
+        "total": price + shipping,
+        "url": safe_browser_result_url(item.url, fallback_url),
+        "extraction_methods": ["browser"],
+    }
+
+
+def browser_products_from_json(data: Any, platform: str, fallback_url: str) -> list[dict[str, Any]]:
+    rows = data.get("items", data.get("products", [])) if isinstance(data, dict) else data
+    if not isinstance(rows, list):
+        return []
+    products: list[dict[str, Any]] = []
+    for row in rows[:MAX_BROWSER_COLLECTION_ROWS]:
+        if not isinstance(row, dict):
+            continue
+        product = product_from_browser_input(
+            BrowserPriceItemInput(
+                name=str(row.get("name") or row.get("title") or row.get("productName") or ""),
+                mall=str(row.get("mall") or row.get("mallName") or row.get("seller") or "쿠팡"),
+                price=parse_price(row.get("price") or row.get("sale_price") or row.get("salePrice") or row.get("display_price")),
+                registered_price=parse_price(
+                    row.get("registered_price")
+                    or row.get("registeredPrice")
+                    or row.get("original_price")
+                    or row.get("originalPrice")
+                    or row.get("list_price")
+                    or row.get("listPrice")
+                    or row.get("basePrice")
+                ),
+                shipping=parse_price(row.get("shipping") or row.get("shipping_fee") or row.get("deliveryFee") or row.get("delivery_fee")),
+                total=parse_price(row.get("total") or row.get("total_price") or row.get("totalPrice")),
+                url=str(row.get("url") or row.get("link") or row.get("detail_url") or row.get("detailUrl") or row.get("productUrl") or ""),
+            ),
+            platform,
+            fallback_url,
+        )
+        if product:
+            products.append(product)
+    return products
+
+
+def parse_browser_raw_text_products(raw_text: str, platform: str, fallback_url: str) -> list[dict[str, Any]]:
+    text = raw_text.strip()
+    if not text:
+        return []
+    if text.startswith("{") or text.startswith("["):
+        try:
+            products = browser_products_from_json(json.loads(text), platform, fallback_url)
+            if products:
+                return products
+        except json.JSONDecodeError:
+            pass
+
+    if platform == "coupang" and "<" in text and re.search(r"coupang|/vp/products/|/np/products/|search-product|productUnit", text, flags=re.IGNORECASE):
+        products = parse_coupang_products(text, fallback_url, limit=MAX_BROWSER_COLLECTION_ROWS)
+        if products:
+            return mark_extraction_method(products, "browser")
+
+    products: list[dict[str, Any]] = []
+    pending_names: list[str] = []
+    lines = [clean_text(line) for line in text.splitlines()]
+    for line in lines:
+        if not line:
+            continue
+        urls = re.findall(r"https?://[^\s]+", line)
+        line_without_urls = re.sub(r"https?://[^\s]+", " ", line)
+        if "\t" in line:
+            cells = [clean_text(cell) for cell in line.split("\t") if clean_text(cell)]
+            price_cells = [cell for cell in cells if re.search(r"\d[\d,]*\s*원|\d{4,}", cell)]
+            sale_price_cells = [cell for cell in price_cells if not re.search(r"배송|월\s*\d|개월|적립|캐시", cell)]
+            if price_cells:
+                name_cell = next((cell for cell in cells if cell not in price_cells and not cell.startswith("http")), "")
+                price_values = [parse_price(cell) for cell in sale_price_cells] or [parse_price(price_cells[0])]
+                registered_price = max(price_values) if len(price_values) > 1 else 0
+                price = min(price_values) if len(price_values) > 1 else price_values[0]
+                shipping = 0
+                shipping_cell = next((cell for cell in cells if "배송" in cell and cell != price_cells[0]), "")
+                if shipping_cell and "무료" not in shipping_cell:
+                    shipping = parse_price(shipping_cell)
+                product = product_from_browser_input(
+                    BrowserPriceItemInput(
+                        name=name_cell or (pending_names[-1] if pending_names else ""),
+                        mall="쿠팡",
+                        price=price,
+                        registered_price=registered_price,
+                        shipping=shipping,
+                        url=urls[0] if urls else "",
+                    ),
+                    platform,
+                    fallback_url,
+                )
+                if product:
+                    products.append(product)
+                    pending_names.clear()
+                if len(products) >= MAX_BROWSER_COLLECTION_ROWS:
+                    break
+                continue
+
+        price_matches = list(re.finditer(r"(\d{1,3}(?:,\d{3})+|\d{4,9})\s*원", line_without_urls))
+        price_match = price_matches[0] if price_matches else None
+        if not price_match:
+            if len(line) >= 4 and not looks_like_non_product_coupang_line(line):
+                pending_names.append(line)
+                pending_names = pending_names[-3:]
+            continue
+
+        title_text = clean_text(line_without_urls[: price_match.start()])
+        title_text = re.sub(r"(?:판매가|쿠폰가|즉시할인가|가격|원)$", "", title_text).strip(" -·:/")
+        if len(title_text) < 4 and pending_names:
+            title_text = pending_names[-1]
+        shipping = 0
+        if "무료배송" not in line_without_urls.replace(" ", ""):
+            shipping_match = re.search(r"배송비[^\d]{0,20}(\d{1,3}(?:,\d{3})+|\d{3,7})\s*원", line_without_urls)
+            if shipping_match:
+                shipping = parse_price(shipping_match.group(1))
+        price_values = [
+            parse_price(match.group(1))
+            for match in price_matches
+            if not re.search(r"배송비|월\s*\d|개월|적립|캐시", line_without_urls[max(0, match.start() - 18) : min(len(line_without_urls), match.end() + 18)])
+        ]
+        registered_price = 0
+        exposure_price = parse_price(price_match.group(1))
+        if len(price_values) >= 2 and re.search(r"정가|정상가|할인전|할인\s*전|원가|등록가|취소선", line_without_urls):
+            registered_price = max(price_values)
+            exposure_price = min(price_values)
+        product = product_from_browser_input(
+            BrowserPriceItemInput(
+                name=title_text,
+                mall="쿠팡",
+                price=exposure_price,
+                registered_price=registered_price,
+                shipping=shipping,
+                url=urls[0] if urls else "",
+            ),
+            platform,
+            fallback_url,
+        )
+        if product:
+            products.append(product)
+            pending_names.clear()
+        if len(products) >= MAX_BROWSER_COLLECTION_ROWS:
+            break
+    return products
+
+
+def browser_payload_products(payload: BrowserPriceResultsPayload) -> list[dict[str, Any]]:
+    platform = payload.platform.strip().lower()
+    if platform != "coupang":
+        raise HTTPException(status_code=422, detail="현재 브라우저 수집은 쿠팡부터 지원합니다.")
+    fallback_url = safe_browser_result_url(payload.page_url, coupang_search_url(payload.query, payload.sort_mode, MAX_BROWSER_COLLECTION_ROWS))
+    products = [
+        product
+        for product in (product_from_browser_input(item, platform, fallback_url) for item in payload.items)
+        if product
+    ]
+    if payload.raw_text.strip():
+        products.extend(parse_browser_raw_text_products(payload.raw_text, platform, fallback_url))
+    return dedupe_products(products)[:MAX_BROWSER_COLLECTION_ROWS]
+
+
+def extension_payload_products(payload: ExtensionPriceResultsPayload) -> list[dict[str, Any]]:
+    products: list[dict[str, Any]] = []
+    for item in payload.items:
+        source = item.source.strip().lower()
+        if source not in COMPARISON_TARGET_PLATFORMS:
+            continue
+        fallback_url = safe_browser_result_url(payload.page_urls.get(source, ""), "")
+        product = product_from_browser_input(item, source, fallback_url)
+        if product:
+            product["extraction_methods"] = ["chrome_extension"]
+            products.append(product)
+
+    limited_products: list[dict[str, Any]] = []
+    per_source_counts: dict[str, int] = {}
+    for product in dedupe_products(products):
+        source = str(product.get("source") or "").strip().lower()
+        if per_source_counts.get(source, 0) >= MAX_EXTENSION_CANDIDATES_PER_SOURCE:
+            continue
+        limited_products.append(product)
+        per_source_counts[source] = per_source_counts.get(source, 0) + 1
+    return limited_products[:MAX_EXTENSION_COLLECTION_ROWS]
 
 
 def collection_quota_rows(db: sqlite3.Connection) -> list[dict[str, Any]]:
@@ -2667,26 +3673,29 @@ def collect_price_products(db: sqlite3.Connection, query: str, sort_mode: str, s
 
     if "coupang" in selected_sources:
         try:
-            reserve_collection_request(db, "coupang")
-            method_successes = 0
-            collectors = (
-                ("크롤링", fetch_coupang_products),
-                ("Playwright", fetch_coupang_playwright_products),
-                ("Scrapling", fetch_coupang_scrapling_products),
-            )
-            for label, collector in collectors:
-                try:
-                    collected = collector(query, sort_mode, display=SEARCH_LINE_SOURCE_LIMIT)
-                    products.extend(collected)
-                    if collected:
-                        method_successes += 1
-                    if label == "크롤링" and len(collected) >= 10:
-                        break
-                except Exception as error:
-                    warnings.append(f"쿠팡 {label}: {error}")
-            complete_collection_request(db, "coupang", "success" if method_successes else "error")
-            if method_successes == 0:
-                warnings.append("쿠팡의 모든 추출 방식이 실패함")
+            if not COUPANG_SERVER_CRAWL_ENABLED:
+                warnings.append("쿠팡: 서버 직접 수집은 기본 비활성화됨 · 쿠팡 브라우저 수집 버튼을 사용하세요.")
+            else:
+                reserve_collection_request(db, "coupang")
+                method_successes = 0
+                collectors = (
+                    ("크롤링", fetch_coupang_products),
+                    ("Playwright", fetch_coupang_playwright_products),
+                    ("Scrapling", fetch_coupang_scrapling_products),
+                )
+                for label, collector in collectors:
+                    try:
+                        collected = collector(query, sort_mode, display=SEARCH_LINE_SOURCE_LIMIT)
+                        products.extend(collected)
+                        if collected:
+                            method_successes += 1
+                        if label == "크롤링" and len(collected) >= 10:
+                            break
+                    except Exception as error:
+                        warnings.append(f"쿠팡 {label}: {error}")
+                complete_collection_request(db, "coupang", "success" if method_successes else "error")
+                if method_successes == 0:
+                    warnings.append("쿠팡의 모든 추출 방식이 실패함")
         except Exception as error:
             if not isinstance(error, CollectionQuotaExceeded):
                 complete_collection_request(db, "coupang", "error")
@@ -3039,6 +4048,135 @@ def health() -> dict[str, str]:
     return {"status": "ok", "service": "pricescan"}
 
 
+@app.post("/extension/local-install-helper", dependencies=[Depends(require_admin)])
+def open_extension_local_install_helper() -> dict[str, Any]:
+    if not PRICESCAN_EXTENSION_LOCAL_PATH.exists():
+        raise HTTPException(status_code=404, detail=f"익스텐션 폴더를 찾지 못했습니다: {PRICESCAN_EXTENSION_LOCAL_PATH}")
+    if sys.platform != "darwin":
+        raise HTTPException(status_code=422, detail="로컬 설치 보조 기능은 현재 macOS Chrome에서만 지원합니다.")
+
+    opened: list[str] = []
+    errors: list[str] = []
+    for target in ("chrome://extensions/", PRICESCAN_WEB_LOCAL_URL):
+        try:
+            subprocess.run(
+                ["open", "-a", "Google Chrome", target],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=8,
+            )
+            opened.append(target)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+            errors.append(str(error))
+    try:
+        subprocess.run(
+            ["open", "-R", str(PRICESCAN_EXTENSION_LOCAL_PATH / "manifest.json")],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+        opened.append(str(PRICESCAN_EXTENSION_LOCAL_PATH))
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        errors.append(str(error))
+
+    if not opened:
+        raise HTTPException(status_code=502, detail="Google Chrome을 열지 못했습니다. Chrome이 설치되어 있는지 확인하세요.")
+
+    return {
+        "status": "opened",
+        "opened": opened,
+        "extension_path": str(PRICESCAN_EXTENSION_LOCAL_PATH),
+        "instructions": [
+            "Chrome 확장 프로그램 화면에서 개발자 모드를 켭니다.",
+            "압축해제된 확장 프로그램을 로드합니다.",
+            "복사된 PriceScan Collector 폴더를 선택합니다.",
+            "PriceScan 페이지를 새로고침한 뒤 익스텐션 연결 상태를 다시 확인합니다.",
+        ],
+        "warnings": errors,
+    }
+
+
+@app.post("/extension/reveal-local-folder", dependencies=[Depends(require_admin)])
+def reveal_extension_local_folder() -> dict[str, str]:
+    if not PRICESCAN_EXTENSION_LOCAL_PATH.exists():
+        raise HTTPException(status_code=404, detail=f"익스텐션 폴더를 찾지 못했습니다: {PRICESCAN_EXTENSION_LOCAL_PATH}")
+    if sys.platform != "darwin":
+        raise HTTPException(status_code=422, detail="Finder 폴더 열기는 현재 macOS에서만 지원합니다.")
+    try:
+        subprocess.run(
+            ["open", "-R", str(PRICESCAN_EXTENSION_LOCAL_PATH / "manifest.json")],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        raise HTTPException(status_code=502, detail=f"Finder에서 익스텐션 폴더를 열지 못했습니다: {error}") from error
+    return {"status": "revealed", "extension_path": str(PRICESCAN_EXTENSION_LOCAL_PATH)}
+
+
+@app.post("/extension/dev-launch-browser", dependencies=[Depends(require_admin)])
+def launch_extension_dev_browser() -> dict[str, Any]:
+    if not PRICESCAN_EXTENSION_LOCAL_PATH.exists():
+        raise HTTPException(status_code=404, detail=f"익스텐션 폴더를 찾지 못했습니다: {PRICESCAN_EXTENSION_LOCAL_PATH}")
+    executable, extension_compatible = extension_browser_executable()
+    if not executable:
+        raise HTTPException(status_code=404, detail="Chrome for Testing/Chromium 실행 파일을 찾지 못했습니다. backend/.venv312/bin/python -m playwright install chromium 실행이 필요합니다.")
+    if not extension_compatible:
+        raise HTTPException(
+            status_code=409,
+            detail="현재 일반 Chrome은 로컬 익스텐션 자동 로드를 지원하지 않습니다. backend/.venv312/bin/python -m playwright install chromium 실행 후 다시 시도하세요.",
+        )
+
+    PRICESCAN_EXTENSION_DEV_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    profile_dir = PRICESCAN_EXTENSION_DEV_PROFILE_DIR / f"session_{int(time.time())}_{uuid4().hex[:8]}"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    collector_url = PRICESCAN_WEB_LOCAL_URL + ("&" if "?" in PRICESCAN_WEB_LOCAL_URL else "?") + "collector=dev"
+    extension_args = [
+        f"--user-data-dir={profile_dir}",
+        f"--disable-extensions-except={PRICESCAN_EXTENSION_LOCAL_PATH}",
+        f"--load-extension={PRICESCAN_EXTENSION_LOCAL_PATH}",
+        "--enable-unsafe-extension-debugging",
+        "--no-first-run",
+        "--new-window",
+        collector_url,
+    ]
+    try:
+        if sys.platform == "darwin" and "Google Chrome.app" in executable:
+            subprocess.Popen(
+                [
+                    "open",
+                    "-na",
+                    "Google Chrome",
+                    "--args",
+                    *extension_args,
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        else:
+            subprocess.Popen(
+                [executable, *extension_args],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+    except OSError as error:
+        raise HTTPException(status_code=502, detail=f"PriceScan 전용 Chrome 실행 실패: {error}") from error
+
+    return {
+        "status": "launched",
+        "browser": executable,
+        "extension_path": str(PRICESCAN_EXTENSION_LOCAL_PATH),
+        "profile_dir": str(profile_dir),
+        "url": collector_url,
+        "message": "PriceScan 전용 Chrome 창을 열었습니다. 현재 창이 아니라 새로 열린 Chrome 창에서 PriceScan을 사용하세요.",
+    }
+
+
 @app.get("/search-exceptions", dependencies=[Depends(require_admin)])
 def search_exceptions() -> dict[str, Any]:
     with connect() as db:
@@ -3201,16 +4339,20 @@ def test_api_key(platform: str) -> dict[str, Any]:
                     complete_collection_request(db, "enuri", "error")
                 message = str(error)
         elif platform == "coupang":
-            try:
-                reserve_collection_request(db, "coupang")
-                fetch_coupang_products("노트북", "lowest", display=1)
-                complete_collection_request(db, "coupang", "success")
-                connected = True
-                message = "쿠팡 검색 페이지 수집/파싱 성공"
-            except Exception as error:
-                if not isinstance(error, CollectionQuotaExceeded):
-                    complete_collection_request(db, "coupang", "error")
-                message = str(error)
+            connected = True
+            if COUPANG_SERVER_CRAWL_ENABLED:
+                try:
+                    reserve_collection_request(db, "coupang")
+                    fetch_coupang_products("노트북", "lowest", display=1)
+                    complete_collection_request(db, "coupang", "success")
+                    message = "쿠팡 서버 검색 페이지 수집/파싱 성공"
+                except Exception as error:
+                    if not isinstance(error, CollectionQuotaExceeded):
+                        complete_collection_request(db, "coupang", "error")
+                    connected = False
+                    message = str(error)
+            else:
+                message = "쿠팡은 사용자 승인형 브라우저 수집 모드로 사용합니다. 상품검색 화면의 쿠팡 브라우저 수집 버튼을 사용하세요."
         else:
             connected = bool(key["client_id"] and key["client_secret"])
             message = "API 키 형식 확인 완료" if connected else "Client ID/Secret 입력 필요"
@@ -3262,8 +4404,8 @@ def price_search(payload: PriceSearchRequest) -> dict[str, Any]:
             db.execute(
                 """
                 INSERT INTO price_items
-                (id, run_id, source, mall, name, price, shipping, total, url, is_baseline, is_excluded, exclusion_reason, extraction_methods_json, collected_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (id, run_id, source, mall, name, price, registered_price, shipping, total, url, is_baseline, is_excluded, exclusion_reason, extraction_methods_json, collected_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     new_id("price"),
@@ -3272,6 +4414,7 @@ def price_search(payload: PriceSearchRequest) -> dict[str, Any]:
                     item["mall"],
                     item["name"],
                     item["price"],
+                    item.get("registered_price") or item["price"],
                     item["shipping"],
                     item["total"],
                     item["url"],
@@ -3303,6 +4446,367 @@ def latest_price_search() -> dict[str, Any]:
         return get_run_payload(db, latest["id"])
 
 
+@app.post("/price-search/browser-results", dependencies=[Depends(require_admin)])
+def save_browser_price_results(payload: BrowserPriceResultsPayload) -> dict[str, Any]:
+    run_id = new_id("run")
+    platform = payload.platform.strip().lower()
+    selected_sources = [platform]
+    items = browser_payload_products(payload)
+    if not items:
+        raise HTTPException(status_code=422, detail="쿠팡 브라우저 수집 결과에서 상품명/가격을 찾지 못했습니다.")
+
+    with connect() as db:
+        reserve_collection_request(db, platform)
+        complete_collection_request(db, platform, "browser_success")
+        exception_terms = get_search_exception_terms(db)
+
+    exclusion_reasons = automatic_exclusion_reasons(payload.query, items, exception_terms)
+    baseline_candidates = [item for index, item in enumerate(items) if not exclusion_reasons[index]]
+    baseline_item = min(baseline_candidates, key=lambda item: item["total"], default=None)
+    baseline_total = baseline_item["total"] if baseline_item else 0
+    collected_at = now()
+
+    with connect() as db:
+        db.execute(
+            """
+            INSERT INTO search_runs (id, query, sort_mode, status, filters_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                payload.query,
+                payload.sort_mode,
+                "completed",
+                json.dumps(
+                    {
+                        "filters": ["browser_collection"],
+                        "sources": selected_sources,
+                        "collection_mode": "user_browser",
+                        "approval_scope": payload.approval_scope,
+                        "page_url": safe_browser_result_url(payload.page_url, ""),
+                    },
+                    ensure_ascii=False,
+                ),
+                collected_at,
+            ),
+        )
+        for index, item in enumerate(items):
+            total = item["total"]
+            exclusion_reason = exclusion_reasons[index]
+            is_baseline = 1 if not exclusion_reason and total == baseline_total and baseline_item and item["name"] == baseline_item["name"] else 0
+            db.execute(
+                """
+                INSERT INTO price_items
+                (id, run_id, source, mall, name, price, registered_price, shipping, total, url, is_baseline, is_excluded, exclusion_reason, extraction_methods_json, collected_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    new_id("price"),
+                    run_id,
+                    item["source"],
+                    item["mall"],
+                    item["name"],
+                    item["price"],
+                    item.get("registered_price") or item["price"],
+                    item["shipping"],
+                    item["total"],
+                    item["url"],
+                    is_baseline,
+                    1 if exclusion_reason else 0,
+                    exclusion_reason,
+                    json.dumps(item.get("extraction_methods", ["browser"]), ensure_ascii=False),
+                    collected_at,
+                ),
+            )
+        db.execute(
+            "INSERT INTO logs (id, message, level, created_at) VALUES (?, ?, ?, ?)",
+            (
+                new_id("log"),
+                f"쿠팡 브라우저 수집 저장: {payload.query} · {len(items)} items · approval={payload.approval_scope}",
+                "info",
+                now(),
+            ),
+        )
+        payload_out = get_run_payload(db, run_id)
+        payload_out["warnings"] = []
+    return payload_out
+
+
+@app.post("/price-search/desktop-results", dependencies=[Depends(require_admin)])
+def save_desktop_price_results(payload: DesktopPriceResultsPayload) -> dict[str, Any]:
+    """Append one completed site, atomically and idempotently, to an owned desktop run.
+
+    The run contains only saved results; desktop pending/challenge states stay in
+    the local job manager. Replaying a saved source never consumes quota twice.
+    """
+    run_id = f"desktop_{payload.collection_id}"
+    items = extension_payload_products(payload)
+    sources = {item["source"] for item in items}
+    if len(sources) != 1:
+        raise HTTPException(422, "쇼핑몰 하나의 유효한 수집 결과를 보내세요.")
+    source = next(iter(sources))
+    with connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        existing = db.execute("SELECT * FROM search_runs WHERE id = ?", (run_id,)).fetchone()
+        metadata = json.loads(existing["filters_json"]) if existing else {
+            "filters": ["desktop_supervised"], "collection_mode": "desktop_supervised",
+            "approval_scope": "desktop_supervised", "sources": [], "page_urls": {}, "warnings": [],
+        }
+        if existing and (existing["query"] != payload.query or existing["sort_mode"] != payload.sort_mode):
+            raise HTTPException(409, "다른 검색 작업의 결과는 합칠 수 없습니다.")
+        if source in metadata["sources"]:
+            result = get_run_payload(db, run_id)
+            result["warnings"] = metadata.get("warnings", [])
+            return result
+        reserve_collection_request(db, source)
+        complete_collection_request(db, source, "browser_success")
+        collected_at = now()
+        reasons = automatic_exclusion_reasons(payload.query, items, get_search_exception_terms(db))
+        metadata["sources"].append(source)
+        metadata["page_urls"][source] = safe_browser_result_url(payload.page_urls.get(source, ""), "")
+        metadata["warnings"] = list(dict.fromkeys([*metadata.get("warnings", []), *[warning[:1000] for warning in payload.warnings]]))[:40]
+        if not existing:
+            db.execute("INSERT INTO search_runs (id, query, sort_mode, status, filters_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                       (run_id, payload.query, payload.sort_mode, "completed", json.dumps(metadata, ensure_ascii=False), collected_at))
+        else:
+            db.execute("UPDATE search_runs SET filters_json = ? WHERE id = ?", (json.dumps(metadata, ensure_ascii=False), run_id))
+        for index, item in enumerate(items):
+            db.execute("""INSERT INTO price_items
+                (id, run_id, source, mall, name, price, registered_price, shipping, total, url,
+                 is_baseline, is_excluded, exclusion_reason, extraction_methods_json, collected_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (new_id("price"), run_id, source, item["mall"], item["name"], item["price"], item.get("registered_price") or item["price"],
+                 item["shipping"], item["total"], item["url"], 0, int(bool(reasons[index])), reasons[index],
+                 json.dumps(["desktop_visible_page", *item.get("extraction_methods", [])], ensure_ascii=False), collected_at))
+        db.execute("UPDATE price_items SET is_baseline = 0 WHERE run_id = ?", (run_id,))
+        baseline = db.execute("SELECT id FROM price_items WHERE run_id = ? AND is_excluded = 0 ORDER BY total, id LIMIT 1", (run_id,)).fetchone()
+        if baseline:
+            db.execute("UPDATE price_items SET is_baseline = 1 WHERE id = ?", (baseline["id"],))
+        db.execute("INSERT INTO logs (id, message, level, created_at) VALUES (?, ?, ?, ?)",
+                   (new_id("log"), f"전용 앱 수집 저장: {payload.query} · {source} · {len(items)} items", "info", collected_at))
+        result = get_run_payload(db, run_id)
+        result["warnings"] = metadata["warnings"]
+        return result
+
+
+@app.post("/price-search/extension-results", dependencies=[Depends(require_admin)])
+def save_extension_price_results(payload: ExtensionPriceResultsPayload) -> dict[str, Any]:
+    run_id = payload.merge_run_id.strip() or new_id("run")
+    items = extension_payload_products(payload)
+    if not items:
+        raise HTTPException(status_code=422, detail="크롬 익스텐션 수집 결과에서 상품명/가격을 찾지 못했습니다.")
+
+    selected_sources = sorted({item["source"] for item in items})
+    with connect() as db:
+        for source in selected_sources:
+            reserve_collection_request(db, source)
+            complete_collection_request(db, source, "browser_success")
+        exception_terms = get_search_exception_terms(db)
+
+    exclusion_reasons = automatic_exclusion_reasons(payload.query, items, exception_terms)
+    collected_at = now()
+
+    with connect() as db:
+        existing = db.execute("SELECT query, filters_json FROM search_runs WHERE id = ?", (run_id,)).fetchone()
+        if payload.merge_run_id and not existing:
+            raise HTTPException(status_code=404, detail="합칠 기존 검색 결과를 찾지 못했습니다.")
+        if existing and str(existing["query"]).strip() != payload.query.strip():
+            raise HTTPException(status_code=422, detail="검색어가 다른 결과에는 합칠 수 없습니다.")
+
+        metadata: dict[str, Any] = {}
+        if existing:
+            try:
+                metadata = json.loads(existing["filters_json"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                metadata = {}
+        existing_sources = [str(value) for value in metadata.get("sources", [])]
+        metadata.update(
+            {
+                "sources": list(dict.fromkeys([*existing_sources, *selected_sources])),
+                "collection_mode": "server_and_current_page" if existing else "chrome_extension_current_page",
+                "approval_scope": payload.approval_scope,
+                "page_urls": {
+                    **(metadata.get("page_urls", {}) if isinstance(metadata.get("page_urls"), dict) else {}),
+                    **{
+                        key: safe_browser_result_url(value, "")
+                        for key, value in payload.page_urls.items()
+                        if key in COMPARISON_TARGET_PLATFORMS
+                    },
+                },
+            }
+        )
+        if existing:
+            db.execute(
+                "UPDATE search_runs SET filters_json = ?, status = 'completed' WHERE id = ?",
+                (json.dumps(metadata, ensure_ascii=False), run_id),
+            )
+            for source in selected_sources:
+                db.execute("DELETE FROM price_items WHERE run_id = ? AND source = ?", (run_id, source))
+        else:
+            metadata["filters"] = ["chrome_extension_current_page"]
+            db.execute(
+                "INSERT INTO search_runs (id, query, sort_mode, status, filters_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (run_id, payload.query, payload.sort_mode, "completed", json.dumps(metadata, ensure_ascii=False), collected_at),
+            )
+        for index, item in enumerate(items):
+            exclusion_reason = exclusion_reasons[index]
+            db.execute(
+                """
+                INSERT INTO price_items
+                (id, run_id, source, mall, name, price, registered_price, shipping, total, url, is_baseline, is_excluded, exclusion_reason, extraction_methods_json, collected_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    new_id("price"),
+                    run_id,
+                    item["source"],
+                    item["mall"],
+                    item["name"],
+                    item["price"],
+                    item.get("registered_price") or item["price"],
+                    item["shipping"],
+                    item["total"],
+                    item["url"],
+                    0,
+                    1 if exclusion_reason else 0,
+                    exclusion_reason,
+                    json.dumps(item.get("extraction_methods", ["chrome_extension"]), ensure_ascii=False),
+                    collected_at,
+                ),
+            )
+        db.execute("UPDATE price_items SET is_baseline = 0 WHERE run_id = ?", (run_id,))
+        baseline = db.execute(
+            "SELECT id FROM price_items WHERE run_id = ? AND is_excluded = 0 ORDER BY total, id LIMIT 1",
+            (run_id,),
+        ).fetchone()
+        if baseline:
+            db.execute("UPDATE price_items SET is_baseline = 1 WHERE id = ?", (baseline["id"],))
+        db.execute(
+            "INSERT INTO logs (id, message, level, created_at) VALUES (?, ?, ?, ?)",
+            (
+                new_id("log"),
+                f"크롬 익스텐션 수집 저장: {payload.query} · {len(items)} items · sources={','.join(selected_sources)}",
+                "warning" if payload.warnings else "info",
+                now(),
+            ),
+        )
+        payload_out = get_run_payload(db, run_id)
+        payload_out["warnings"] = payload.warnings
+    return payload_out
+
+
+@app.post("/price-search/coupang-auto", dependencies=[Depends(require_admin)])
+def collect_coupang_auto(payload: CoupangAutoCollectPayload) -> dict[str, Any]:
+    run_id = new_id("run")
+    collected_at = now()
+    with connect() as db:
+        reserve_collection_request(db, "coupang")
+
+    try:
+        try:
+            items, warnings, page_url = collect_coupang_real_chrome_products(payload)
+        except Exception as chrome_error:
+            items, warnings, page_url = collect_coupang_visible_browser_products(payload)
+            warnings.insert(0, f"실제 Chrome 세션 수집 실패 후 제어 브라우저로 전환: {chrome_error}")
+    except Exception as error:
+        with connect() as db:
+            if not isinstance(error, CollectionQuotaExceeded):
+                complete_collection_request(db, "coupang", "error")
+        raise HTTPException(status_code=502, detail=str(error)) from error
+
+    items = dedupe_products(items)[:MAX_BROWSER_COLLECTION_ROWS]
+    if not items:
+        with connect() as db:
+            complete_collection_request(db, "coupang", "error")
+        raise HTTPException(status_code=422, detail="쿠팡 브라우저 자동수집 결과가 없습니다.")
+
+    with connect() as db:
+        exception_terms = get_search_exception_terms(db)
+    exclusion_reasons = automatic_exclusion_reasons(payload.query, items, exception_terms)
+    baseline_candidates = [item for index, item in enumerate(items) if not exclusion_reasons[index]]
+    baseline_item = min(baseline_candidates, key=lambda item: item["total"], default=None)
+    baseline_total = baseline_item["total"] if baseline_item else 0
+
+    with connect() as db:
+        complete_collection_request(db, "coupang", "browser_success")
+        db.execute(
+            """
+            INSERT INTO search_runs (id, query, sort_mode, status, filters_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                payload.query,
+                payload.sort_mode,
+                "completed",
+                json.dumps(
+                    {
+                        "filters": ["browser_auto"],
+                        "sources": ["coupang"],
+                        "collection_mode": "user_browser_auto",
+                        "approval_scope": payload.approval_scope,
+                        "page_url": page_url,
+                    },
+                    ensure_ascii=False,
+                ),
+                collected_at,
+            ),
+        )
+        for index, item in enumerate(items):
+            total = item["total"]
+            exclusion_reason = exclusion_reasons[index]
+            is_baseline = 1 if not exclusion_reason and total == baseline_total and baseline_item and item["name"] == baseline_item["name"] else 0
+            db.execute(
+                """
+                INSERT INTO price_items
+                (id, run_id, source, mall, name, price, registered_price, shipping, total, url,
+                 is_baseline, is_excluded, exclusion_reason, extraction_methods_json,
+                 benefit_status, coupon_price, event_price, card_price, benefit_price, benefit_shipping,
+                 benefit_summary, benefit_condition, detail_methods_json, benefit_checked_at, collected_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    new_id("price"),
+                    run_id,
+                    item["source"],
+                    item["mall"],
+                    item["name"],
+                    item["price"],
+                    item.get("registered_price") or item["price"],
+                    item["shipping"],
+                    item["total"],
+                    item["url"],
+                    is_baseline,
+                    1 if exclusion_reason else 0,
+                    exclusion_reason,
+                    json.dumps(item.get("extraction_methods", ["browser"]), ensure_ascii=False),
+                    item.get("benefit_status", "not_checked"),
+                    int(item.get("coupon_price") or 0),
+                    int(item.get("event_price") or 0),
+                    int(item.get("card_price") or 0),
+                    int(item.get("benefit_price") or 0),
+                    int(item.get("benefit_shipping") if item.get("benefit_shipping") is not None else item["shipping"]),
+                    str(item.get("benefit_summary") or ""),
+                    str(item.get("benefit_condition") or ""),
+                    json.dumps(item.get("detail_methods", []), ensure_ascii=False),
+                    item.get("benefit_checked_at"),
+                    collected_at,
+                ),
+            )
+        db.execute(
+            "INSERT INTO logs (id, message, level, created_at) VALUES (?, ?, ?, ?)",
+            (
+                new_id("log"),
+                f"쿠팡 자동수집 완료: {payload.query} · {len(items)} items · detail_limit={payload.detail_limit}",
+                "warning" if warnings else "info",
+                now(),
+            ),
+        )
+        payload_out = get_run_payload(db, run_id)
+        payload_out["warnings"] = warnings
+    return payload_out
+
+
 @app.post("/price-search/benefits", dependencies=[Depends(require_admin)])
 def scan_price_search_benefits(payload: BenefitScanRequest) -> dict[str, Any]:
     item_ids = list(dict.fromkeys(payload.item_ids))
@@ -3316,33 +4820,68 @@ def scan_price_search_benefits(payload: BenefitScanRequest) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="일부 검색 결과를 찾지 못했습니다.")
 
     warnings: list[str] = []
-    for row in rows:
+    coupang_details: dict[str, dict[str, Any]] = {}
+    coupang_targets = coupang_browser_detail_targets(rows)
+    if coupang_targets:
         try:
-            detail = fetch_benefit_detail(row["url"], int(row["total"]), int(row["shipping"]))
+            coupang_details, coupang_warnings = visible_coupang_detail_details(coupang_targets)
+            warnings.extend(coupang_warnings)
         except Exception as error:
-            detail = {
-                "benefit_status": "failed",
-                "coupon_price": 0,
-                "event_price": 0,
-                "card_price": 0,
-                "benefit_price": 0,
-                "benefit_shipping": int(row["shipping"]),
-                "benefit_summary": "",
-                "benefit_condition": str(error)[:500],
-                "detail_methods": [],
-            }
+            for target in coupang_targets:
+                coupang_details[str(target["id"])] = {
+                    "benefit_status": "failed",
+                    "coupon_price": 0,
+                    "event_price": 0,
+                    "card_price": 0,
+                    "benefit_price": 0,
+                    "registered_price": 0,
+                    "display_price": 0,
+                    "benefit_shipping": int(target["shipping"]),
+                    "benefit_summary": "",
+                    "benefit_condition": str(error)[:500],
+                    "detail_methods": ["browser"],
+                }
+    for row in rows:
+        detail = coupang_details.get(str(row["id"]))
+        if not detail:
+            try:
+                detail = fetch_benefit_detail(row["url"], int(row["total"]), int(row["shipping"]))
+            except Exception as error:
+                detail = {
+                    "benefit_status": "failed",
+                    "coupon_price": 0,
+                    "event_price": 0,
+                    "card_price": 0,
+                    "benefit_price": 0,
+                    "registered_price": 0,
+                    "display_price": 0,
+                    "benefit_shipping": int(row["shipping"]),
+                    "benefit_summary": "",
+                    "benefit_condition": str(error)[:500],
+                    "detail_methods": [],
+                }
         if detail["benefit_status"] == "failed":
             warnings.append(f"{row['mall']} · {row['name'][:36]}: {detail['benefit_condition']}")
+        next_price = int(detail.get("display_price") or detail.get("benefit_price") or row["price"])
+        next_shipping = int(detail.get("benefit_shipping") if detail.get("benefit_shipping") is not None else row["shipping"])
+        next_registered_price = int(detail.get("registered_price") or row["registered_price"] or next_price)
+        if next_registered_price < next_price:
+            next_registered_price = next_price
         with connect() as db:
             db.execute(
                 """
                 UPDATE price_items
-                SET benefit_status = ?, coupon_price = ?, event_price = ?, card_price = ?,
+                SET price = ?, registered_price = ?, shipping = ?, total = ?,
+                    benefit_status = ?, coupon_price = ?, event_price = ?, card_price = ?,
                     benefit_price = ?, benefit_shipping = ?, benefit_summary = ?,
                     benefit_condition = ?, detail_methods_json = ?, benefit_checked_at = ?
                 WHERE id = ?
                 """,
                 (
+                    next_price,
+                    next_registered_price,
+                    next_shipping,
+                    next_price + next_shipping,
                     detail["benefit_status"],
                     detail["coupon_price"],
                     detail["event_price"],
@@ -3815,6 +5354,27 @@ def scan_comparison_targets(prepared_id: str, payload: ComparisonScanPayload) ->
         result["scan_warnings"] = warnings
         result["scanned_target_count"] = scanned_count
     log_event(f"comparison scan completed: {product['title']} · {scanned_count} targets", "warning" if warnings else "info")
+    return result
+
+
+@app.get("/prepared-products/{prepared_id}/comparison-history", dependencies=[Depends(require_admin)])
+def prepared_product_comparison_history(
+    prepared_id: str,
+    platforms: str = "",
+    limit: int = 10,
+) -> dict[str, list[dict[str, Any]]]:
+    limit_value = max(1, min(30, int(limit)))
+    selected_platforms = parse_platform_filter(platforms)
+    with connect() as db:
+        product = db.execute("SELECT id FROM prepared_products WHERE id = ?", (prepared_id,)).fetchone()
+        if not product:
+            raise HTTPException(status_code=404, detail="Prepared product not found")
+        grouped = build_comparison_history_rows(db, prepared_id, selected_platforms, limit_value)
+        result: dict[str, list[dict[str, Any]]] = {}
+        for platform in COMPARISON_TARGET_PLATFORMS:
+            rows = [competitor_snapshot_row_to_dict(row) for row in grouped.get(platform, [])]
+            if rows:
+                result[platform] = rows
     return result
 
 
@@ -4492,3 +6052,6 @@ def uploaded_image(filename: str) -> FileResponse:
 def logs() -> list[dict[str, Any]]:
     with connect() as db:
         return [row_to_dict(row) or {} for row in db.execute("SELECT * FROM logs ORDER BY created_at DESC LIMIT 80").fetchall()]
+
+
+app.include_router(create_seller_router(connect, require_admin, get_run_payload))

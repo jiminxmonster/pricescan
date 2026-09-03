@@ -3,40 +3,25 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>PriceScan Collector</title>
+    <title>PriceScan</title>
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
     <main class="popup">
-      <div class="brand">
-        <span class="icon">🧩</span>
+      <header>
+        <img src="icons/icon-48.png" alt="" />
         <div>
-          <strong>PriceScan Collector</strong>
-          <p>브라우저 화면 기준 가격 수집</p>
+          <strong>PriceScan</strong>
+          <p>네이버 현재 화면 가져오기</p>
         </div>
-      </div>
-
-      <section class="status-card">
+      </header>
+      <section id="status" class="status" aria-live="polite">
         <span class="dot"></span>
-        <div>
-          <strong id="statusTitle">설치됨</strong>
-          <p id="statusBody">PriceScan 사이트에서 상품스캔을 실행하면 자동으로 동작합니다.</p>
-        </div>
+        <p id="statusText">현재 탭을 확인하고 있습니다.</p>
       </section>
-
-      <section class="guide">
-        <strong>사용 흐름</strong>
-        <ol>
-          <li>PriceScan 사이트를 엽니다.</li>
-          <li>상품명을 입력하고 스캔을 누릅니다.</li>
-          <li>익스텐션이 쇼핑몰 화면을 열고 가격을 수집합니다.</li>
-        </ol>
-      </section>
-
-      <div class="actions">
-        <button id="openLocal" type="button">로컬 PriceScan</button>
-        <button id="openProd" type="button">운영 PriceScan</button>
-      </div>
+      <button id="capture" class="primary" type="button" disabled>현재 화면 최대 10개 가져오기</button>
+      <p class="privacy">자동 검색·스크롤·재시도 없이, 버튼을 누른 현재 화면만 읽습니다.</p>
+      <button id="openPriceScan" class="link-button" type="button">PriceScan 열기</button>
     </main>
     <script src="popup.js"></script>
   </body>

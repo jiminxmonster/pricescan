@@ -1,6 +1,12 @@
 import unittest
 
-from app.main import automatic_exclusion_reasons, build_search_intent
+from app.main import (
+    MAX_EXTENSION_CANDIDATES_PER_SOURCE,
+    ExtensionPriceResultsPayload,
+    automatic_exclusion_reasons,
+    build_search_intent,
+    extension_payload_products,
+)
 
 
 def product(name: str, price: int, category: str = "") -> dict:
@@ -14,6 +20,29 @@ def product(name: str, price: int, category: str = "") -> dict:
 
 
 class SearchRelevanceTest(unittest.TestCase):
+    def test_extension_collection_keeps_more_than_top_ten_candidates(self) -> None:
+        payload = ExtensionPriceResultsPayload(
+            query="NT940XJG-K51A",
+            items=[
+                {
+                    "source": "naver",
+                    "mall": f"판매처 {index}",
+                    "name": f"삼성 갤럭시북6 프로 NT940XJG-K51A 판매처 {index}",
+                    "price": 2_500_000 + index,
+                    "registered_price": 2_600_000 + index,
+                    "shipping": 0,
+                    "total": 2_500_000 + index,
+                    "url": f"https://example.com/products/{index}",
+                }
+                for index in range(MAX_EXTENSION_CANDIDATES_PER_SOURCE + 5)
+            ],
+        )
+
+        products = extension_payload_products(payload)
+
+        self.assertGreater(len(products), 10)
+        self.assertEqual(len(products), MAX_EXTENSION_CANDIDATES_PER_SOURCE)
+
     def test_exact_model_excludes_accessories_and_other_models(self) -> None:
         items = [
             product(
