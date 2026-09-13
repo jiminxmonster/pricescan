@@ -1106,7 +1106,7 @@ type AiConfig = {
   key_configured: boolean;
 };
 
-function SuperAdminPanel({ token, onLogout }: { token: string; onLogout: () => void }) {
+function SuperAdminPanel({ token, onHome, onLogout }: { token: string; onHome: () => void; onLogout: () => void }) {
   const [config, setConfig] = useState<AiConfig>({ provider: "OpenAI", model: "gpt-5.6-luna", base_url: "https://api.openai.com/v1", api_key: "", key_configured: false });
   const [users, setUsers] = useState<ManagedUser[]>([]);
   const [newUser, setNewUser] = useState({ username: "", password: "", role: "user", daily_search_limit: 10 });
@@ -1159,7 +1159,7 @@ function SuperAdminPanel({ token, onLogout }: { token: string; onLogout: () => v
   };
 
   return <main className="super-admin-page">
-    <header><div><span>PRICESCAN CONTROL</span><h1>슈퍼관리자</h1><p>AI 연결과 사용자 검색 권한을 한곳에서 관리합니다.</p></div><button onClick={onLogout}>로그아웃</button></header>
+    <header><div><span>PRICESCAN CONTROL</span><h1>슈퍼관리자</h1><p>AI 연결과 사용자 검색 권한을 한곳에서 관리합니다.</p></div><div className="super-admin-head-actions"><button className="super-admin-primary" onClick={onHome}>홈에서 검색 테스트</button><button onClick={onLogout}>로그아웃</button></div></header>
     {notice && <p className="super-admin-notice" role="status">{notice}</p>}
     <section className="super-admin-card">
       <div className="super-admin-title"><div><small>AI CONNECTION</small><h2>AI API 설정</h2></div><b className={config.key_configured ? "is-ready" : ""}>{config.key_configured ? "키 설정됨" : "키 필요"}</b></div>
@@ -1246,6 +1246,10 @@ export default function App() {
   });
   const [tab, setTab] = useState<Tab>("search");
   const [authProfile, setAuthProfile] = useState<AuthProfile | null | undefined>(undefined);
+  const [superAdminHome, setSuperAdminHome] = useState(false);
+  const [superPassword, setSuperPassword] = useState("");
+  const [superUnlocking, setSuperUnlocking] = useState(false);
+  const [superUnlockError, setSuperUnlockError] = useState("");
   const [settings, setSettings] = useState<AdminSettings>(readSettings);
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [searchPayload, setSearchPayload] = useState<SearchPayload>({ run: null, items: [], summary: { collected_count: 0, lowest_count: 0, excluded_count: 0 } });
@@ -2594,11 +2598,32 @@ export default function App() {
     localStorage.removeItem(TOKEN_KEY);
     setToken("");
     setAuthProfile(null);
+    setSuperAdminHome(false);
+  };
+
+  const enterSuperAdmin = async () => {
+    if (!superPassword || superUnlocking) return;
+    setSuperUnlocking(true);
+    setSuperUnlockError("");
+    try {
+      const data = await request<{ token: string }>("/auth/login", "", {
+        method: "POST",
+        body: JSON.stringify({ username: "superadmin", password: superPassword }),
+      });
+      localStorage.setItem(TOKEN_KEY, data.token);
+      setSuperPassword("");
+      setSuperAdminHome(false);
+      setToken(data.token);
+    } catch (error) {
+      setSuperUnlockError(error instanceof Error ? error.message : "슈퍼관리자 인증 실패");
+    } finally {
+      setSuperUnlocking(false);
+    }
   };
 
   if (!token) return <LoginScreen onLogin={setToken} />;
   if (authProfile === undefined) return <main className="auth-loading">권한을 확인하고 있습니다…</main>;
-  if (authProfile?.role === "superadmin") return <SuperAdminPanel token={token} onLogout={logout} />;
+  if (authProfile?.role === "superadmin" && !superAdminHome) return <SuperAdminPanel token={token} onHome={() => setSuperAdminHome(true)} onLogout={logout} />;
 
   const enabledOptionalTabs = optionalTabs.filter((item) => settings.features[item.key]);
   const visibleTabs = [...primaryTabs, ...enabledOptionalTabs];
@@ -2651,10 +2676,11 @@ export default function App() {
             progress={notice}
             selectedSources={selectedSources}
             searchQuota={authProfile ? { used: authProfile.used, limit: authProfile.daily_search_limit, remaining: authProfile.remaining, canSearch: authProfile.can_search } : undefined}
+            settingsLabel={authProfile?.role === "superadmin" ? "슈퍼관리자로 돌아가기" : "관리자설정"}
             onSearchReserved={() => void request<AuthProfile>("/auth/me", token).then(setAuthProfile)}
             onToggleSource={toggleSearchSource}
             onBrowser={showBrowserConnection}
-            onSettings={() => setTab((current) => current === "settings" ? "search" : "settings")}
+            onSettings={() => authProfile?.role === "superadmin" ? setSuperAdminHome(false) : setTab((current) => current === "settings" ? "search" : "settings")}
             onLogout={logout}
           />
 
@@ -2682,6 +2708,13 @@ export default function App() {
                     ))}
                   </select>
                 </label>}
+                {authProfile?.role === "admin" && <div className="super-admin-unlock">
+                  <strong>슈퍼관리자</strong>
+                  <p>API 키와 사용자 검색 권한을 관리하려면 비밀번호를 한 번 더 확인합니다.</p>
+                  <input type="password" inputMode="numeric" autoComplete="off" placeholder="슈퍼관리자 비밀번호" value={superPassword} onChange={(event) => setSuperPassword(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void enterSuperAdmin(); }} />
+                  {superUnlockError && <small role="alert">{superUnlockError}</small>}
+                  <button type="button" className="super-admin-primary" disabled={!superPassword || superUnlocking} onClick={() => void enterSuperAdmin()}>{superUnlocking ? "확인 중…" : "슈퍼관리자 열기"}</button>
+                </div>}
               </section>
             </div>
           )}

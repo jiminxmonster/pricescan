@@ -90,6 +90,11 @@ def init_auth_tables(db: sqlite3.Connection) -> None:
             encrypted_api_key TEXT NOT NULL DEFAULT '',
             updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS auth_security_state (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
         """
     )
     created = timestamp()
@@ -156,6 +161,15 @@ class AuthService:
     def initialize(self) -> None:
         with self.connect() as db:
             init_auth_tables(db)
+            password_fingerprint = hashlib.sha256(os.getenv("PRICESCAN_SUPERADMIN_PASSWORD_HASH", "").encode("utf-8")).hexdigest()
+            previous = db.execute("SELECT value FROM auth_security_state WHERE key = 'superadmin_password'").fetchone()
+            if not previous or previous["value"] != password_fingerprint:
+                db.execute("DELETE FROM auth_sessions WHERE role = 'superadmin'")
+                db.execute(
+                    """INSERT INTO auth_security_state (key, value, updated_at) VALUES ('superadmin_password', ?, ?)
+                       ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at""",
+                    (password_fingerprint, timestamp()),
+                )
         self.load_ai_config()
 
     def _fernet(self) -> Fernet:

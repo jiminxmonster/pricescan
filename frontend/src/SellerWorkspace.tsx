@@ -26,9 +26,10 @@ async function api<T>(token: string, path: string, body?: unknown, method = "POS
   return response.json();
 }
 
-export default function SellerWorkspace({ token, busy, progress, selectedSources, searchQuota, onSearchReserved, onToggleSource, onBrowser, onSettings, onLogout }: {
+export default function SellerWorkspace({ token, busy, progress, selectedSources, searchQuota, settingsLabel = "관리자설정", onSearchReserved, onToggleSource, onBrowser, onSettings, onLogout }: {
   token: string; busy: boolean; progress: string; selectedSources: string[];
   searchQuota?: { used: number; limit: number | null; remaining: number | null; canSearch: boolean };
+  settingsLabel?: string;
   onSearchReserved?: () => void;
   onToggleSource: (source: string) => void;
   onBrowser: () => void; onSettings: () => void; onLogout: () => void;
@@ -282,7 +283,7 @@ export default function SellerWorkspace({ token, busy, progress, selectedSources
         <button aria-current={view === "search" ? "page" : undefined} onClick={() => setView("search")}>상품 검색</button>
         <button aria-current={view === "products" ? "page" : undefined} onClick={() => setView("products")}>내 판매상품 <b>{products.length}</b></button>
       </nav>
-      <div className="seller-tools">{searchQuota && <span className={`seller-search-quota ${searchQuota.canSearch && (searchQuota.remaining ?? 1) > 0 ? "" : "is-blocked"}`}>오늘 검색 {searchQuota.used}/{searchQuota.limit ?? "∞"}회</span>}<button onClick={() => desktop ? void desktop.loginNaver().catch(reason => setError(reason.message)) : onBrowser()}>로그인 상태</button><button onClick={() => { if (desktop) void desktop.logout().then(onLogout).catch(reason => setError(reason.message)); else onLogout(); }}>로그아웃</button><button onClick={onSettings}>관리자설정</button></div>
+      <div className="seller-tools">{searchQuota && <span className={`seller-search-quota ${searchQuota.canSearch && (searchQuota.remaining ?? 1) > 0 ? "" : "is-blocked"}`}>오늘 검색 {searchQuota.used}/{searchQuota.limit ?? "∞"}회</span>}<button onClick={() => desktop ? void desktop.loginNaver().catch(reason => setError(reason.message)) : onBrowser()}>로그인 상태</button><button onClick={() => { if (desktop) void desktop.logout().then(onLogout).catch(reason => setError(reason.message)); else onLogout(); }}>로그아웃</button><button onClick={onSettings}>{settingsLabel}</button></div>
     </header>
     <div className="seller-feedback" aria-live="polite">
       {error ? <p role="alert" className="seller-error">{error}</p> : <p>{status}</p>}

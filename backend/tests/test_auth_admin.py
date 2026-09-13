@@ -33,7 +33,7 @@ class AuthAdminTest(unittest.TestCase):
 
         self.connect = connect
         self.service = AuthService(connect, Path(self.directory.name), "legacy-admin")
-        self.password_hash = bcrypt.hashpw(b"12112", bcrypt.gensalt()).decode()
+        self.password_hash = bcrypt.hashpw(b"1212", bcrypt.gensalt()).decode()
         self.environment = patch.dict(os.environ, {"PRICESCAN_SUPERADMIN_PASSWORD_HASH": self.password_hash}, clear=False)
         self.environment.start()
         self.service.initialize()
@@ -46,7 +46,7 @@ class AuthAdminTest(unittest.TestCase):
         self.environment.stop()
         self.directory.cleanup()
 
-    def login(self, username="superadmin", password="12112"):
+    def login(self, username="superadmin", password="1212"):
         response = self.client.post("/auth/login", json={"username": username, "password": password})
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()["token"]
@@ -98,8 +98,15 @@ class AuthAdminTest(unittest.TestCase):
     def test_superadmin_login_is_rate_limited(self):
         for _ in range(5):
             self.client.post("/auth/login", json={"username": "superadmin", "password": "wrong"})
-        blocked = self.client.post("/auth/login", json={"username": "superadmin", "password": "12112"})
+        blocked = self.client.post("/auth/login", json={"username": "superadmin", "password": "1212"})
         self.assertEqual(blocked.status_code, 429)
+
+    def test_password_change_revokes_existing_superadmin_sessions(self):
+        token = self.login()
+        os.environ["PRICESCAN_SUPERADMIN_PASSWORD_HASH"] = bcrypt.hashpw(b"next-password", bcrypt.gensalt()).decode()
+        self.service.initialize()
+        response = self.client.get("/auth/me", headers={"Authorization": f"Bearer {token}"})
+        self.assertEqual(response.status_code, 401)
 
 
 if __name__ == "__main__":
