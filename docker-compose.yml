@@ -28,6 +28,7 @@ services:
       PRICESCAN_AI_MODEL: ${PRICESCAN_AI_MODEL:-}
       PRICESCAN_AI_BASE_URL: ${PRICESCAN_AI_BASE_URL:-https://api.deepseek.com}
       PRICESCAN_AI_PROVIDER: ${PRICESCAN_AI_PROVIDER:-DeepSeek}
+      PRICESCAN_SUPERADMIN_PASSWORD_HASH: ${PRICESCAN_SUPERADMIN_PASSWORD_HASH:-}
     volumes:
       - pricescan_data:/app/data
 

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import SellerWorkspace from "./SellerWorkspace";
 import { checkCollectorConnection, collectorConnectionCopy, launchCollectorBrowser, type BrowserLaunchStatus, type CollectorStatus } from "./collector-connection";
 import {
@@ -1081,6 +1081,120 @@ function sortedPriceItems(items: PriceItem[], sortMode: string): PriceItem[] {
   return sorted.sort((a, b) => a.total - b.total || a.price - b.price);
 }
 
+type AuthProfile = {
+  id: string;
+  username: string;
+  role: "superadmin" | "admin" | "user";
+  can_search: boolean;
+  daily_search_limit: number | null;
+  used: number;
+  remaining: number | null;
+  usage_date: string;
+};
+
+type ManagedUser = Omit<AuthProfile, "usage_date"> & {
+  active: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+type AiConfig = {
+  provider: string;
+  model: string;
+  base_url: string;
+  api_key: string;
+  key_configured: boolean;
+};
+
+function SuperAdminPanel({ token, onLogout }: { token: string; onLogout: () => void }) {
+  const [config, setConfig] = useState<AiConfig>({ provider: "OpenAI", model: "gpt-5.6-luna", base_url: "https://api.openai.com/v1", api_key: "", key_configured: false });
+  const [users, setUsers] = useState<ManagedUser[]>([]);
+  const [newUser, setNewUser] = useState({ username: "", password: "", role: "user", daily_search_limit: 10 });
+  const [notice, setNotice] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const load = async () => {
+    const [nextConfig, nextUsers] = await Promise.all([
+      request<AiConfig>("/super-admin/ai-config", token),
+      request<ManagedUser[]>("/super-admin/users", token),
+    ]);
+    setConfig({ ...nextConfig, api_key: "" });
+    setUsers(nextUsers);
+  };
+
+  useEffect(() => { void load().catch((error) => setNotice(error.message)); }, [token]);
+
+  const saveConfig = async () => {
+    setSaving(true); setNotice("");
+    try {
+      const saved = await request<AiConfig>("/super-admin/ai-config", token, { method: "PUT", body: JSON.stringify(config) });
+      setConfig({ ...saved, api_key: "" });
+      setNotice("AI 연결 설정을 안전하게 저장했습니다. API 키 원문은 다시 표시하지 않습니다.");
+    } catch (error) { setNotice(error instanceof Error ? error.message : "저장 실패"); }
+    finally { setSaving(false); }
+  };
+
+  const saveUser = async (user: ManagedUser) => {
+    setSaving(true); setNotice("");
+    try {
+      const saved = await request<ManagedUser>(`/super-admin/users/${encodeURIComponent(user.id)}`, token, {
+        method: "PATCH",
+        body: JSON.stringify({ role: user.role, can_search: user.can_search, daily_search_limit: user.daily_search_limit, active: user.active }),
+      });
+      setUsers((current) => current.map((entry) => entry.id === saved.id ? saved : entry));
+      setNotice(`${saved.username} 권한을 저장했습니다.`);
+    } catch (error) { setNotice(error instanceof Error ? error.message : "권한 저장 실패"); }
+    finally { setSaving(false); }
+  };
+
+  const createUser = async (event: FormEvent) => {
+    event.preventDefault(); setSaving(true); setNotice("");
+    try {
+      const created = await request<ManagedUser>("/super-admin/users", token, { method: "POST", body: JSON.stringify(newUser) });
+      setUsers((current) => [...current, created]);
+      setNewUser({ username: "", password: "", role: "user", daily_search_limit: 10 });
+      setNotice(`${created.username} 계정을 만들었습니다.`);
+    } catch (error) { setNotice(error instanceof Error ? error.message : "계정 생성 실패"); }
+    finally { setSaving(false); }
+  };
+
+  return <main className="super-admin-page">
+    <header><div><span>PRICESCAN CONTROL</span><h1>슈퍼관리자</h1><p>AI 연결과 사용자 검색 권한을 한곳에서 관리합니다.</p></div><button onClick={onLogout}>로그아웃</button></header>
+    {notice && <p className="super-admin-notice" role="status">{notice}</p>}
+    <section className="super-admin-card">
+      <div className="super-admin-title"><div><small>AI CONNECTION</small><h2>AI API 설정</h2></div><b className={config.key_configured ? "is-ready" : ""}>{config.key_configured ? "키 설정됨" : "키 필요"}</b></div>
+      <div className="super-admin-form-grid">
+        <label><span>제공자</span><input value={config.provider} onChange={(event) => setConfig({ ...config, provider: event.target.value })} /></label>
+        <label><span>모델</span><input value={config.model} onChange={(event) => setConfig({ ...config, model: event.target.value })} /></label>
+        <label className="wide"><span>API 기본 주소</span><input value={config.base_url} onChange={(event) => setConfig({ ...config, base_url: event.target.value })} /></label>
+        <label className="wide"><span>API 키</span><input type="password" autoComplete="new-password" value={config.api_key} placeholder={config.key_configured ? "변경할 때만 새 키를 입력하세요" : "sk-…"} onChange={(event) => setConfig({ ...config, api_key: event.target.value })} /><small>서버에 암호화해 저장하며 저장 후 원문은 표시하지 않습니다.</small></label>
+      </div>
+      <button className="super-admin-primary" disabled={saving || !config.model.trim() || !config.base_url.trim()} onClick={() => void saveConfig()}>{saving ? "저장 중…" : "AI 설정 저장"}</button>
+    </section>
+    <section className="super-admin-card">
+      <div className="super-admin-title"><div><small>ACCESS CONTROL</small><h2>사용자와 검색 횟수</h2></div><span>기본 10회 / 일</span></div>
+      <div className="super-admin-users">
+        {users.map((user) => <article key={user.id}>
+          <div><strong>{user.username}</strong><small>오늘 {user.used}/{user.daily_search_limit}회 사용 · 남음 {user.remaining}회</small></div>
+          <select aria-label={`${user.username} 역할`} value={user.role} onChange={(event) => setUsers((current) => current.map((entry) => entry.id === user.id ? { ...entry, role: event.target.value as "admin" | "user" } : entry))}><option value="admin">관리자</option><option value="user">일반 사용자</option></select>
+          <label><span>일일 한도</span><input type="number" min="0" max="100000" value={user.daily_search_limit ?? 10} onChange={(event) => setUsers((current) => current.map((entry) => entry.id === user.id ? { ...entry, daily_search_limit: Math.max(0, Number(event.target.value)) } : entry))} /></label>
+          <label className="toggle"><input type="checkbox" checked={user.can_search} onChange={(event) => setUsers((current) => current.map((entry) => entry.id === user.id ? { ...entry, can_search: event.target.checked } : entry))} />검색 허용</label>
+          <label className="toggle"><input type="checkbox" checked={user.active} onChange={(event) => setUsers((current) => current.map((entry) => entry.id === user.id ? { ...entry, active: event.target.checked } : entry))} />계정 활성</label>
+          <button disabled={saving} onClick={() => void saveUser(user)}>저장</button>
+        </article>)}
+      </div>
+      <form className="super-admin-create" onSubmit={createUser}>
+        <h3>새 사용자 추가</h3>
+        <input required minLength={3} placeholder="아이디" value={newUser.username} onChange={(event) => setNewUser({ ...newUser, username: event.target.value })} />
+        <input required minLength={8} type="password" autoComplete="new-password" placeholder="비밀번호 8자 이상" value={newUser.password} onChange={(event) => setNewUser({ ...newUser, password: event.target.value })} />
+        <select value={newUser.role} onChange={(event) => setNewUser({ ...newUser, role: event.target.value })}><option value="user">일반 사용자</option><option value="admin">관리자</option></select>
+        <input aria-label="새 사용자 일일 한도" type="number" min="0" max="100000" value={newUser.daily_search_limit} onChange={(event) => setNewUser({ ...newUser, daily_search_limit: Math.max(0, Number(event.target.value)) })} />
+        <button className="super-admin-primary" disabled={saving}>계정 만들기</button>
+      </form>
+    </section>
+  </main>;
+}
+
 function LoginScreen({ onLogin }: { onLogin: (token: string) => void }) {
   const [username, setUsername] = useState("admin");
   const [password, setPassword] = useState("admin");
@@ -1131,6 +1245,7 @@ export default function App() {
     return "";
   });
   const [tab, setTab] = useState<Tab>("search");
+  const [authProfile, setAuthProfile] = useState<AuthProfile | null | undefined>(undefined);
   const [settings, setSettings] = useState<AdminSettings>(readSettings);
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [searchPayload, setSearchPayload] = useState<SearchPayload>({ run: null, items: [], summary: { collected_count: 0, lowest_count: 0, excluded_count: 0 } });
@@ -1389,7 +1504,7 @@ export default function App() {
   }, [draftSourceItem, editingDraft, sellCandidate, coupangCollector.open]);
 
   const loadAll = async () => {
-    if (!token) return;
+    if (!token || authProfile?.role !== "admin") return;
     const importRevisionAtStart = currentPageImportRevision.current;
     const [dashboardData, latestSearch, keyData, quotaData, orderData, channelData, logData, draftData, imageData, preparedData, exceptionData] = await Promise.all([
       request<Dashboard>("/dashboard", token),
@@ -1432,8 +1547,18 @@ export default function App() {
   };
 
   useEffect(() => {
-    loadAll().catch((error) => setNotice(error.message));
+    if (!token) { setAuthProfile(null); return; }
+    setAuthProfile(undefined);
+    request<AuthProfile>("/auth/me", token).then(setAuthProfile).catch(() => {
+      localStorage.removeItem(TOKEN_KEY);
+      setToken("");
+      setAuthProfile(null);
+    });
   }, [token]);
+
+  useEffect(() => {
+    if (authProfile?.role === "admin") loadAll().catch((error) => setNotice(error.message));
+  }, [token, authProfile?.role]);
 
   useEffect(() => {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
@@ -2468,9 +2593,12 @@ export default function App() {
   const logout = () => {
     localStorage.removeItem(TOKEN_KEY);
     setToken("");
+    setAuthProfile(null);
   };
 
   if (!token) return <LoginScreen onLogin={setToken} />;
+  if (authProfile === undefined) return <main className="auth-loading">권한을 확인하고 있습니다…</main>;
+  if (authProfile?.role === "superadmin") return <SuperAdminPanel token={token} onLogout={logout} />;
 
   const enabledOptionalTabs = optionalTabs.filter((item) => settings.features[item.key]);
   const visibleTabs = [...primaryTabs, ...enabledOptionalTabs];
@@ -2522,6 +2650,8 @@ export default function App() {
             busy={collecting}
             progress={notice}
             selectedSources={selectedSources}
+            searchQuota={authProfile ? { used: authProfile.used, limit: authProfile.daily_search_limit, remaining: authProfile.remaining, canSearch: authProfile.can_search } : undefined}
+            onSearchReserved={() => void request<AuthProfile>("/auth/me", token).then(setAuthProfile)}
             onToggleSource={toggleSearchSource}
             onBrowser={showBrowserConnection}
             onSettings={() => setTab((current) => current === "settings" ? "search" : "settings")}

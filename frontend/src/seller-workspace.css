@@ -292,3 +292,5 @@
 .seller-desktop-actions { display: flex; gap: 8px; flex-shrink: 0; }
 .seller-desktop-actions button { border: 1px solid #d8d8d8; border-radius: 20px; background: white; padding: 8px 12px; font: inherit; font-size: 12px; cursor: pointer; }
 @media (max-width: 800px) { .seller-desktop-task { align-items: flex-start; flex-direction: column; } .seller-desktop-jobs { padding: 0 12px; } }
+.seller-search-quota { align-self: center; padding: 7px 10px; border-radius: 999px; background: #edf6ef; color: #287445; font-size: 12px; font-weight: 800; white-space: nowrap; }
+.seller-search-quota.is-blocked { background: #fff0ed; color: #bd3f2f; }

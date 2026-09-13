@@ -112,8 +112,8 @@ def financial_summary(product: dict) -> dict:
     return {"ready": True, "missing": [], "fee": fee, "profit": profit, "margin_rate": profit / sale * 100}
 
 
-def create_seller_router(connect: Callable, require_admin: Callable, get_run_payload: Callable) -> APIRouter:
-    router = APIRouter(prefix="/seller-products", dependencies=[Depends(require_admin)])
+def create_seller_router(connect: Callable, require_authenticated: Callable, get_run_payload: Callable, reserve_search: Callable | None = None) -> APIRouter:
+    router = APIRouter(prefix="/seller-products", dependencies=[Depends(require_authenticated)])
 
     def require_product(db, product_id):
         row = db.execute("SELECT * FROM seller_products WHERE id = ?", (product_id,)).fetchone()
@@ -186,7 +186,7 @@ def create_seller_router(connect: Callable, require_admin: Callable, get_run_pay
         return await interpret_page(payload)
 
     @router.post("/assistant/search-plan")
-    async def assistant_search_plan(payload: SearchPlanRequest):
+    async def assistant_search_plan(payload: SearchPlanRequest, current_user: dict[str, Any] | None = Depends(require_authenticated)):
         """Turn one user phrase into conservative, source-specific search phrases.
 
         This endpoint receives only the phrase typed in PriceScan. Browser page
@@ -194,6 +194,11 @@ def create_seller_router(connect: Callable, require_admin: Callable, get_run_pay
         form values or screenshots. AI failure is fail-closed: fixed parsers are
         not used as a silent fallback.
         """
+        settings = status_payload()
+        if not settings["configured"]:
+            raise HTTPException(503, f"AI 미연결: 서버에서 {settings['provider']} API 키와 모델을 설정해 주세요.")
+        if reserve_search:
+            reserve_search(current_user)
         return await create_search_plan(payload.query)
 
     @router.get("/{product_id}")

@@ -39,6 +39,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from .seller_workspace import create_seller_router, init_seller_workspace
+from .auth_admin import AuthService
 
 
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -139,9 +140,10 @@ def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
-def require_admin(authorization: str | None = Header(default=None)) -> None:
-    if authorization != f"Bearer {ADMIN_TOKEN}":
-        raise HTTPException(status_code=401, detail="Unauthorized")
+auth_service = AuthService(connect, DATA_DIR, ADMIN_TOKEN)
+require_authenticated = auth_service.require_authenticated
+require_admin = auth_service.require_admin
+require_superadmin = auth_service.require_superadmin
 
 
 def log_event(message: str, level: str = "info") -> None:
@@ -616,13 +618,9 @@ def init_db() -> None:
 @app.on_event("startup")
 def startup() -> None:
     init_db()
+    auth_service.initialize()
     with connect() as db:
         init_seller_workspace(db)
-
-
-class LoginRequest(BaseModel):
-    username: str
-    password: str
 
 
 class ApiKeyPayload(BaseModel):
@@ -4289,14 +4287,6 @@ def update_search_exceptions(payload: SearchExceptionsPayload) -> dict[str, Any]
     return {"terms": terms, "text": ", ".join(terms)}
 
 
-@app.post("/auth/login")
-def login(payload: LoginRequest) -> dict[str, str]:
-    if payload.username == "admin" and payload.password == "admin":
-        log_event("admin login success")
-        return {"token": ADMIN_TOKEN, "name": "admin"}
-    raise HTTPException(status_code=401, detail="Invalid credentials")
-
-
 @app.get("/dashboard", dependencies=[Depends(require_admin)])
 def dashboard() -> dict[str, Any]:
     with connect() as db:
@@ -4530,7 +4520,7 @@ def price_search(payload: PriceSearchRequest) -> dict[str, Any]:
     return payload_out
 
 
-@app.get("/price-search/latest", dependencies=[Depends(require_admin)])
+@app.get("/price-search/latest", dependencies=[Depends(require_authenticated)])
 def latest_price_search() -> dict[str, Any]:
     with connect() as db:
         latest = db.execute("SELECT id FROM search_runs ORDER BY created_at DESC LIMIT 1").fetchone()
@@ -4682,7 +4672,7 @@ def save_desktop_price_results(payload: DesktopPriceResultsPayload) -> dict[str,
         return result
 
 
-@app.post("/price-search/extension-results", dependencies=[Depends(require_admin)])
+@app.post("/price-search/extension-results", dependencies=[Depends(require_authenticated)])
 def save_extension_price_results(payload: ExtensionPriceResultsPayload) -> dict[str, Any]:
     if payload.capture_id and payload.merge_run_id:
         raise HTTPException(status_code=422, detail="승인 수집은 기존 실행에 병합할 수 없습니다.")
@@ -6159,4 +6149,5 @@ def logs() -> list[dict[str, Any]]:
         return [row_to_dict(row) or {} for row in db.execute("SELECT * FROM logs ORDER BY created_at DESC LIMIT 80").fetchall()]
 
 
-app.include_router(create_seller_router(connect, require_admin, get_run_payload))
+app.include_router(auth_service.router())
+app.include_router(create_seller_router(connect, require_authenticated, get_run_payload, auth_service.reserve_search))
