@@ -2612,6 +2612,7 @@ export default function App() {
       });
       localStorage.setItem(TOKEN_KEY, data.token);
       setSuperPassword("");
+      setTab("search");
       setSuperAdminHome(false);
       setToken(data.token);
     } catch (error) {
@@ -2623,7 +2624,7 @@ export default function App() {
 
   if (!token) return <LoginScreen onLogin={setToken} />;
   if (authProfile === undefined) return <main className="auth-loading">권한을 확인하고 있습니다…</main>;
-  if (authProfile?.role === "superadmin" && !superAdminHome) return <SuperAdminPanel token={token} onHome={() => setSuperAdminHome(true)} onLogout={logout} />;
+  if (authProfile?.role === "superadmin" && !superAdminHome) return <SuperAdminPanel token={token} onHome={() => { setTab("search"); setSuperAdminHome(true); }} onLogout={logout} />;
 
   const enabledOptionalTabs = optionalTabs.filter((item) => settings.features[item.key]);
   const visibleTabs = [...primaryTabs, ...enabledOptionalTabs];
