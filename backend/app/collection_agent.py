@@ -142,15 +142,22 @@ def _visible_money_values(text: str) -> set[int]:
 
 
 async def call_model_json(messages: list[dict[str, str]], *, max_tokens: int = 1800) -> dict[str, Any]:
-    key, model, base, _provider = provider_settings()
+    key, model, base, provider = provider_settings()
     if not key or not model:
         raise HTTPException(503, "AI 검색 연결이 필요합니다. 관리자설정에서 AI API 키와 모델을 설정해 주세요.")
+    request_body: dict[str, Any] = {"model": model, "messages": messages, "stream": False}
+    is_openai = provider.casefold() == "openai" or (urlsplit(base).hostname or "").casefold() == "api.openai.com"
+    if is_openai:
+        request_body["max_completion_tokens"] = max_tokens
+        request_body["reasoning_effort"] = "low"
+    else:
+        request_body["max_tokens"] = max_tokens
     try:
         async with httpx.AsyncClient(timeout=45) as client:
             response = await client.post(
                 f"{base}/chat/completions",
                 headers={"Authorization": f"Bearer {key}"},
-                json={"model": model, "messages": messages, "max_tokens": max_tokens, "stream": False},
+                json=request_body,
             )
         if response.status_code != 200:
             raise HTTPException(502, f"AI 검색 서버가 응답하지 않았습니다. 상태 코드 {response.status_code}")

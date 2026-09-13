@@ -188,7 +188,10 @@ class SellerWorkspaceTest(unittest.TestCase):
             self.assertEqual(self.client.post(f"{self.root}/{product['id']}/assistant", json={**question, "consent": True}).status_code, 503)
 
     def test_ai_search_plan_sends_only_the_typed_phrase_and_preserves_source_queries(self):
-        with patch.dict(os.environ, {"PRICESCAN_AI_API_KEY": "test-secret", "PRICESCAN_AI_MODEL": "test-model"}), patch("app.collection_agent.httpx.AsyncClient") as client_class:
+        with patch.dict(os.environ, {
+            "PRICESCAN_AI_API_KEY": "test-secret", "PRICESCAN_AI_MODEL": "gpt-5.6-luna",
+            "PRICESCAN_AI_PROVIDER": "OpenAI", "PRICESCAN_AI_BASE_URL": "https://api.openai.com/v1",
+        }), patch("app.collection_agent.httpx.AsyncClient") as client_class:
             remote = AsyncMock()
             client_class.return_value.__aenter__.return_value = remote
             response = unittest.mock.Mock(status_code=200)
@@ -201,6 +204,10 @@ class SellerWorkspaceTest(unittest.TestCase):
             payload = json.dumps(remote.post.call_args.kwargs["json"], ensure_ascii=False)
             self.assertIn("라이젠 5 노트북 512GB", payload)
             self.assertNotIn("test-secret", payload)
+            self.assertEqual(remote.post.call_args.args[0], "https://api.openai.com/v1/chat/completions")
+            self.assertEqual(remote.post.call_args.kwargs["json"]["max_completion_tokens"], 400)
+            self.assertEqual(remote.post.call_args.kwargs["json"]["reasoning_effort"], "low")
+            self.assertNotIn("max_tokens", remote.post.call_args.kwargs["json"])
 
     def test_collection_config_is_server_versioned_and_has_no_parser_fallback(self):
         with patch.dict(os.environ, {"PRICESCAN_AI_API_KEY": "test-secret", "PRICESCAN_AI_MODEL": "test-model"}):
@@ -303,6 +310,8 @@ class SellerWorkspaceTest(unittest.TestCase):
             self.assertNotIn("다른비밀상품", content)
             self.assertNotIn("test-secret", content)
             self.assertEqual(remote.post.call_args.args[0], "https://api.deepseek.com/chat/completions")
+            self.assertEqual(remote.post.call_args.kwargs["json"]["max_tokens"], 1000)
+            self.assertNotIn("max_completion_tokens", remote.post.call_args.kwargs["json"])
 
 
 if __name__ == "__main__":
