@@ -17,7 +17,15 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from .collection_agent import PageObservation, call_model_json, collection_config, create_search_plan, interpret_page, status_payload
+from .collection_agent import (
+    PageObservation,
+    call_model_json,
+    collection_config,
+    create_search_plan,
+    interpret_page,
+    search_public_prices,
+    status_payload,
+)
 
 
 def query_key(value: str) -> str:
@@ -73,6 +81,11 @@ class SellerQuestion(BaseModel):
 
 class SearchPlanRequest(BaseModel):
     query: str = Field(min_length=1, max_length=300)
+
+
+class AiPriceSearchRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=300)
+    sources: list[Literal["naver", "danawa", "enuri", "coupang"]] = Field(min_length=1, max_length=4)
 
 
 def init_seller_workspace(db: sqlite3.Connection) -> None:
@@ -200,6 +213,73 @@ def create_seller_router(connect: Callable, require_authenticated: Callable, get
         if reserve_search:
             reserve_search(current_user)
         return await create_search_plan(payload.query)
+
+    @router.post("/assistant/price-search")
+    async def assistant_price_search(payload: AiPriceSearchRequest, current_user: dict[str, Any] | None = Depends(require_authenticated)):
+        """Run one extension-free public web search and attach it to a seller draft."""
+        title = " ".join(payload.query.split())
+        selected_sources = list(dict.fromkeys(payload.sources))
+        settings = status_payload()
+        if not settings["configured"]:
+            raise HTTPException(503, f"AI 미연결: 서버에서 {settings['provider']} API 키와 모델을 설정해 주세요.")
+        if reserve_search:
+            reserve_search(current_user)
+        with connect() as db:
+            db.execute(
+                "INSERT OR IGNORE INTO seller_products (id, query_key, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (f"seller_{uuid4().hex[:12]}", query_key(title), title, timestamp(), timestamp()),
+            )
+            product = dict(db.execute("SELECT * FROM seller_products WHERE query_key = ?", (query_key(title),)).fetchone())
+
+        searched = await search_public_prices(title, selected_sources)
+        run_id = f"ai_{uuid4().hex[:16]}"
+        collected_at = timestamp()
+        items = searched["items"]
+        warnings = searched["warnings"]
+        lowest = min((item["total"] for item in items), default=0)
+        metadata = {
+            "filters": ["openai_web_search"],
+            "sources": selected_sources,
+            "collection_mode": "openai_web_search",
+            "source_status": searched["sources"],
+            "warnings": warnings,
+        }
+        with connect() as db:
+            db.execute(
+                "INSERT INTO search_runs (id, query, sort_mode, status, filters_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (run_id, title, "price_asc", "completed", json.dumps(metadata, ensure_ascii=False), collected_at),
+            )
+            for item in items:
+                db.execute(
+                    """INSERT INTO price_items
+                    (id, run_id, source, mall, name, price, registered_price, shipping, total, url,
+                     is_baseline, is_excluded, exclusion_reason, extraction_methods_json, collected_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '', ?, ?)""",
+                    (
+                        f"price_{uuid4().hex[:16]}", run_id, item["source"], item["mall"], item["name"],
+                        item["price"], item.get("registered_price") or item["price"], item.get("shipping") or 0,
+                        item["total"], item["url"], int(bool(lowest and item["total"] == lowest)),
+                        json.dumps(item.get("extraction_methods", ["openai_web_search"]), ensure_ascii=False),
+                        item.get("collected_at") or collected_at,
+                    ),
+                )
+            db.execute(
+                "UPDATE seller_products SET last_search_run_id = ?, last_search_warnings_json = ?, updated_at = ? WHERE id = ?",
+                (run_id, json.dumps(warnings, ensure_ascii=False), collected_at, product["id"]),
+            )
+            search = get_run_payload(db, run_id)
+            for item in search["items"]:
+                try:
+                    key = record_offer(db, product["id"], item, run_id)
+                except (HTTPException, ValueError):
+                    continue
+                db.execute(
+                    "UPDATE seller_watch_items SET item_json = ?, last_seen_run_id = ?, updated_at = ? WHERE product_id = ? AND offer_key = ?",
+                    (json.dumps(item, ensure_ascii=False), run_id, collected_at, product["id"], key),
+                )
+            result = serialize(db, require_product(db, product["id"]), True)
+            result["ai_source_status"] = searched["sources"]
+            return result
 
     @router.get("/{product_id}")
     def get_product(product_id: str):

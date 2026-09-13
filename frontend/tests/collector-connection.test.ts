@@ -25,10 +25,11 @@ test("the normal app never offers developer installation or a blocking collector
   assert.equal(appSource.includes("가격수집기가 준비된 PriceScan 전용 Chrome입니다"), false, "a launch URL is not proof of a working collector");
 });
 
-test("a missing Chrome agent is explicit and never falls back to fixed server parsers", () => {
-  assert.match(sellerSource, /requireApprovalCollector\(\)\.then\(\(\) => true\)\.catch\(\(\) => false\)/);
+test("AI price search uses the server web-search route without requiring a Chrome collector", () => {
+  assert.doesNotMatch(sellerSource, /requireApprovalCollector|startApprovalCollection/);
+  assert.match(sellerSource, /"\/assistant\/price-search"/);
+  assert.match(sellerSource, /별도 확장프로그램 없이 공개된 최저가 후보/);
   assert.doesNotMatch(sellerSource, /const automatic = await onSearch\(title\.trim\(\)\)/);
-  assert.match(sellerSource, /기존 파서로 대체하지 않았습니다/);
   assert.match(sellerSource, /legacy_parser_fallback/);
   assert.doesNotMatch(appSource, /if \(includesNaver\) \{[\s\S]{0,300}?return;/);
   assert.match(appSource, /const serverSources = priceSources;/);

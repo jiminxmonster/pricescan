@@ -33,13 +33,41 @@ class SellerWorkspaceTest(unittest.TestCase):
         self.connect = connect
         with connect() as db:
             init_seller_workspace(db)
-            db.executescript("CREATE TABLE search_runs (id TEXT PRIMARY KEY, payload TEXT); CREATE TABLE price_items (id TEXT PRIMARY KEY, run_id TEXT);")
+            db.executescript("""
+                CREATE TABLE search_runs (
+                    id TEXT PRIMARY KEY, query TEXT NOT NULL, sort_mode TEXT NOT NULL, status TEXT NOT NULL,
+                    filters_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, stopped_at TEXT
+                );
+                CREATE TABLE price_items (
+                    id TEXT PRIMARY KEY, run_id TEXT NOT NULL, source TEXT NOT NULL, mall TEXT NOT NULL,
+                    name TEXT NOT NULL, price INTEGER NOT NULL, registered_price INTEGER NOT NULL DEFAULT 0,
+                    shipping INTEGER NOT NULL DEFAULT 0, total INTEGER NOT NULL, url TEXT NOT NULL,
+                    is_baseline INTEGER NOT NULL DEFAULT 0, is_excluded INTEGER NOT NULL DEFAULT 0,
+                    exclusion_reason TEXT NOT NULL DEFAULT '', extraction_methods_json TEXT NOT NULL DEFAULT '[]',
+                    benefit_status TEXT NOT NULL DEFAULT 'not_checked', coupon_price INTEGER NOT NULL DEFAULT 0,
+                    event_price INTEGER NOT NULL DEFAULT 0, card_price INTEGER NOT NULL DEFAULT 0,
+                    benefit_price INTEGER NOT NULL DEFAULT 0, benefit_shipping INTEGER NOT NULL DEFAULT 0,
+                    benefit_summary TEXT NOT NULL DEFAULT '', benefit_condition TEXT NOT NULL DEFAULT '',
+                    detail_methods_json TEXT NOT NULL DEFAULT '[]', benefit_checked_at TEXT, collected_at TEXT NOT NULL
+                );
+            """)
 
         def get_payload(db, run_id):
-            row = db.execute("SELECT payload FROM search_runs WHERE id = ?", (run_id,)).fetchone()
-            if not row:
+            run = db.execute("SELECT * FROM search_runs WHERE id = ?", (run_id,)).fetchone()
+            if not run:
                 raise HTTPException(404, "Search run not found")
-            return json.loads(row[0])
+            items = []
+            for row in db.execute("SELECT * FROM price_items WHERE run_id = ? ORDER BY total", (run_id,)).fetchall():
+                item = dict(row)
+                item["status"] = "excluded" if item["is_excluded"] else "baseline" if item["is_baseline"] else "candidate"
+                item["extraction_methods"] = json.loads(item.pop("extraction_methods_json"))
+                item.pop("detail_methods_json")
+                items.append(item)
+            run_data = dict(run)
+            metadata = json.loads(run_data["filters_json"])
+            run_data["sources"] = metadata.get("sources", [])
+            run_data["collection_mode"] = metadata.get("collection_mode", "")
+            return {"run": run_data, "items": items, "summary": {"collected_count": len(items)}}
 
         def auth(authorization: str = Header(default="")):
             if authorization != "Bearer test-token":
@@ -62,10 +90,18 @@ class SellerWorkspaceTest(unittest.TestCase):
     def seed_run(self, run_id="run-1", query="노트북 MODEL-1", price=880000, url="https://example.com/products/1", status="completed"):
         item = {"id": f"item-{run_id}", "source": "naver", "mall": "경쟁판매자", "name": query,
                 "url": url, "price": price, "shipping": 3000, "total": price + 3000, "collected_at": f"2026-08-31T0{len(run_id)}:00:00+00:00"}
-        payload = {"run": {"id": run_id, "query": query, "status": status, "created_at": item["collected_at"]}, "items": [item]}
         with self.connect() as db:
-            db.execute("INSERT INTO search_runs VALUES (?,?)", (run_id, json.dumps(payload)))
-            db.execute("INSERT INTO price_items VALUES (?,?)", (item["id"], run_id))
+            db.execute(
+                "INSERT INTO search_runs (id, query, sort_mode, status, filters_json, created_at) VALUES (?, ?, 'price_asc', ?, '{}', ?)",
+                (run_id, query, status, item["collected_at"]),
+            )
+            db.execute(
+                """INSERT INTO price_items
+                (id, run_id, source, mall, name, price, registered_price, shipping, total, url, is_baseline, collected_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)""",
+                (item["id"], run_id, item["source"], item["mall"], item["name"], item["price"], item["price"],
+                 item["shipping"], item["total"], item["url"], item["collected_at"]),
+            )
         return item
 
     def link(self, product, run="run-1", **extra):
@@ -209,6 +245,66 @@ class SellerWorkspaceTest(unittest.TestCase):
             self.assertEqual(remote.post.call_args.kwargs["json"]["reasoning_effort"], "low")
             self.assertNotIn("max_tokens", remote.post.call_args.kwargs["json"])
 
+    def test_ai_price_search_uses_responses_web_search_and_persists_cited_results(self):
+        product_url = "https://prod.danawa.com/info/?pcode=12345"
+        model_output = {"items": [{
+            "name": "LG gram Pro 16Z90TS", "mall": "테스트몰", "price": 1994000,
+            "shipping": 0, "url": product_url, "evidence": "1,994,000원 무료배송",
+        }], "note": ""}
+        with patch.dict(os.environ, {
+            "PRICESCAN_AI_API_KEY": "test-secret", "PRICESCAN_AI_MODEL": "gpt-5.6-luna",
+            "PRICESCAN_AI_PROVIDER": "OpenAI", "PRICESCAN_AI_BASE_URL": "https://api.openai.com/v1",
+        }), patch("app.collection_agent.httpx.AsyncClient") as client_class:
+            remote = AsyncMock()
+            client_class.return_value.__aenter__.return_value = remote
+            response = unittest.mock.Mock(status_code=200)
+            response.json.return_value = {"output": [
+                {"type": "web_search_call", "action": {"sources": [{"type": "url", "url": product_url}]}},
+                {"type": "message", "content": [{"type": "output_text", "text": json.dumps(model_output, ensure_ascii=False)}]},
+            ]}
+            remote.post.return_value = response
+            result = self.client.post(f"{self.root}/assistant/price-search", json={
+                "query": "LG gram Pro 16Z90TS", "sources": ["danawa"],
+            })
+        self.assertEqual(result.status_code, 200, result.text)
+        product = result.json()
+        self.assertEqual(product["search"]["run"]["collection_mode"], "openai_web_search")
+        self.assertEqual(product["search"]["items"][0]["price"], 1994000)
+        self.assertEqual(product["search"]["items"][0]["url"], product_url)
+        self.assertEqual(product["ai_source_status"]["danawa"]["status"], "completed")
+        request = remote.post.call_args.kwargs["json"]
+        self.assertEqual(remote.post.call_args.args[0], "https://api.openai.com/v1/responses")
+        self.assertEqual(request["tools"][0]["type"], "web_search")
+        self.assertEqual(request["tools"][0]["filters"]["allowed_domains"], ["search.danawa.com", "prod.danawa.com"])
+        self.assertFalse(request["store"])
+        self.assertNotIn("test-secret", json.dumps(request, ensure_ascii=False))
+
+    def test_ai_price_search_rejects_model_url_that_web_search_did_not_return(self):
+        invented = "https://www.coupang.com/vp/products/999"
+        model_output = {"items": [{
+            "name": "발명된 상품", "mall": "쿠팡", "price": 1000, "shipping": 0,
+            "url": invented, "evidence": "1000원",
+        }], "note": "검색 출처 확인 필요"}
+        with patch.dict(os.environ, {
+            "PRICESCAN_AI_API_KEY": "test-secret", "PRICESCAN_AI_MODEL": "gpt-5.6-luna",
+            "PRICESCAN_AI_PROVIDER": "OpenAI",
+            "PRICESCAN_AI_BASE_URL": "https://api.openai.com/v1",
+        }), patch("app.collection_agent.httpx.AsyncClient") as client_class:
+            remote = AsyncMock()
+            client_class.return_value.__aenter__.return_value = remote
+            response = unittest.mock.Mock(status_code=200)
+            response.json.return_value = {"output": [
+                {"type": "web_search_call", "action": {"sources": [{"url": "https://www.coupang.com/np/search?q=gram"}]}},
+                {"type": "message", "content": [{"type": "output_text", "text": json.dumps(model_output, ensure_ascii=False)}]},
+            ]}
+            remote.post.return_value = response
+            result = self.client.post(f"{self.root}/assistant/price-search", json={
+                "query": "LG gram", "sources": ["coupang"],
+            })
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertEqual(result.json()["search"]["items"], [])
+        self.assertEqual(result.json()["ai_source_status"]["coupang"]["status"], "needs_review")
+
     def test_collection_config_is_server_versioned_and_has_no_parser_fallback(self):
         with patch.dict(os.environ, {"PRICESCAN_AI_API_KEY": "test-secret", "PRICESCAN_AI_MODEL": "test-model"}):
             response = self.client.get(f"{self.root}/assistant/collection-config")
@@ -232,7 +328,10 @@ class SellerWorkspaceTest(unittest.TestCase):
                  "url": "https://search.danawa.com/dsearch.php?query=ssd", "evidence": "185,000원"},
             ],
         }
-        with patch.dict(os.environ, {"PRICESCAN_AI_API_KEY": "test-secret", "PRICESCAN_AI_MODEL": "test-model"}), patch("app.collection_agent.httpx.AsyncClient") as client_class:
+        with patch.dict(os.environ, {
+            "PRICESCAN_AI_API_KEY": "test-secret", "PRICESCAN_AI_MODEL": "test-model",
+            "PRICESCAN_AI_PROVIDER": "DeepSeek", "PRICESCAN_AI_BASE_URL": "https://api.deepseek.com",
+        }), patch("app.collection_agent.httpx.AsyncClient") as client_class:
             remote = AsyncMock()
             client_class.return_value.__aenter__.return_value = remote
             response = unittest.mock.Mock(status_code=200)
@@ -296,7 +395,10 @@ class SellerWorkspaceTest(unittest.TestCase):
         item = self.seed_run()
         self.link(product)
         self.toggle(product, item)
-        with patch.dict(os.environ, {"PRICESCAN_AI_API_KEY": "test-secret", "PRICESCAN_AI_MODEL": "test-model"}), patch("app.collection_agent.httpx.AsyncClient") as client_class:
+        with patch.dict(os.environ, {
+            "PRICESCAN_AI_API_KEY": "test-secret", "PRICESCAN_AI_MODEL": "test-model",
+            "PRICESCAN_AI_PROVIDER": "DeepSeek", "PRICESCAN_AI_BASE_URL": "https://api.deepseek.com",
+        }), patch("app.collection_agent.httpx.AsyncClient") as client_class:
             remote = AsyncMock()
             client_class.return_value.__aenter__.return_value = remote
             response = unittest.mock.Mock(status_code=200)
