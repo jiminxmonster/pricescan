@@ -672,6 +672,7 @@ class ExtensionPriceResultsPayload(BaseModel):
     sort_mode: str = "lowest"
     approval_scope: str = "extension"
     merge_run_id: str = ""
+    capture_id: str = Field(default="", pattern=r"^(?:[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})?$")
     page_urls: dict[str, str] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list, max_length=40)
     items: list[ExtensionPriceItemInput] = Field(default_factory=list, max_length=MAX_EXTENSION_COLLECTION_ROWS)
@@ -1834,6 +1835,37 @@ def mark_extraction_method(products: list[dict[str, Any]], method: str) -> list[
     return [{**product, "extraction_methods": [method]} for product in products]
 
 
+def promote_coupang_price_comparison_offers(
+    products: list[dict[str, Any]],
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    """Expose verified Coupang seller rows already found by comparison sites.
+
+    This is intentionally a transparent fallback: it does not claim that the
+    Coupang search page was fetched directly.  The original comparison-site
+    bridge URL is retained so the user can review the exact offer.
+    """
+    promoted: list[dict[str, Any]] = []
+    source_labels = {"naver": "네이버", "danawa": "다나와", "enuri": "에누리"}
+    for product in products:
+        source = str(product.get("source") or "").lower()
+        mall = clean_text(str(product.get("mall") or ""))
+        if source not in source_labels or "쿠팡" not in mall:
+            continue
+        methods = [str(method) for method in product.get("extraction_methods", []) if method]
+        promoted.append(
+            {
+                **product,
+                "source": "coupang",
+                "mall": f"쿠팡 · {source_labels[source]} 확인",
+                "extraction_methods": list(dict.fromkeys([*methods, "price_comparison"])),
+            }
+        )
+        if len(promoted) >= limit:
+            break
+    return sorted(promoted, key=lambda item: (parse_price(item.get("total")), str(item.get("name") or "")))
+
+
 def parse_danawa_mall_price_products(document: str, product_name: str, fallback_url: str, limit: int = 10) -> list[dict[str, Any]]:
     section_match = re.search(
         r"<ul\b[^>]*class=[\"'][^\"']*list__mall-price[^\"']*[\"'][^>]*>(.*?)</ul>",
@@ -1988,9 +2020,12 @@ def parse_enuri_products(document: str, limit: int = 30) -> list[dict[str, Any]]
 
         candidates = data if isinstance(data, list) else [data]
         for candidate in candidates:
-            if not isinstance(candidate, dict) or candidate.get("@type") != "ItemList":
+            if not isinstance(candidate, dict):
                 continue
-            for entry in candidate.get("itemListElement", []):
+            entries = candidate.get("itemListElement")
+            if candidate.get("@type") != "ItemList" and not isinstance(entries, list):
+                continue
+            for entry in entries or []:
                 item = entry.get("item") if isinstance(entry, dict) else None
                 if not isinstance(item, dict):
                     continue
@@ -2061,7 +2096,30 @@ def fetch_enuri_products(query: str, display: int = 30) -> list[dict[str, Any]]:
     products = parse_enuri_products(body, limit=display)
     if not products:
         raise RuntimeError("에누리 검색 결과 파싱 실패 또는 결과 없음")
-    return products
+    return mark_extraction_method(products, "crawl")
+
+
+def fetch_enuri_scrapling_products(query: str, display: int = 30) -> list[dict[str, Any]]:
+    if not SCRAPLING_SEARCH_ENABLED:
+        return []
+    if ScraplingFetcher is None:
+        raise RuntimeError("Scrapling 검색 모듈이 설치되지 않음")
+    params = urllib.parse.urlencode({"keyword": query})
+    response = ScraplingFetcher.get(
+        f"https://www.enuri.com/search.jsp?{params}",
+        timeout=max(HTTP_TIMEOUT_SECONDS, 20),
+        impersonate="chrome",
+        headers={"Accept-Language": "ko-KR,ko;q=0.9,en;q=0.8", "Referer": "https://www.enuri.com/"},
+    )
+    if int(response.status) != 200:
+        raise RuntimeError(f"에누리 Scrapling 수집 오류: HTTP {response.status}")
+    document = response.body.decode("utf-8", errors="replace")
+    if "페이지를 표시할 수 없습니다" in document:
+        raise RuntimeError("에누리가 현재 서버 요청에 오류 페이지를 반환함")
+    products = parse_enuri_products(document, limit=display)
+    if not products:
+        raise RuntimeError("에누리 Scrapling 결과 파싱 실패 또는 결과 없음")
+    return mark_extraction_method(products, "scrapling")
 
 
 def coupang_search_url(query: str, sort_mode: str = "lowest", display: int = 40) -> str:
@@ -2293,8 +2351,8 @@ def fetch_coupang_products(query: str, sort_mode: str, display: int = 30) -> lis
     )
     if status != 200:
         raise RuntimeError(f"쿠팡 검색 페이지 수집 오류: HTTP {status}")
-    if any(marker in body.lower() for marker in ("access denied", "captcha", "forbidden")):
-        raise RuntimeError("쿠팡이 현재 자동 요청을 차단함")
+    if access_denied_text(body):
+        raise RuntimeError("쿠팡 보안 확인 화면이 응답되어 자동 수집을 멈춤")
     products = parse_coupang_products(body, search_url, limit=display)
     if not products:
         raise RuntimeError("쿠팡 검색 결과 파싱 실패 또는 결과 없음")
@@ -2308,10 +2366,13 @@ def fetch_coupang_playwright_products(query: str, sort_mode: str, display: int =
         raise RuntimeError("Playwright 검색 모듈이 설치되지 않음")
     search_url = coupang_search_url(query, sort_mode, display)
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage"],
-        )
+        try:
+            browser = playwright.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage"],
+            )
+        except Exception as error:
+            raise RuntimeError("쿠팡 브라우저 렌더링 엔진이 준비되지 않음") from error
         try:
             page = browser.new_page(locale="ko-KR", user_agent=CRAWLER_USER_AGENT)
             page.goto(search_url, wait_until="domcontentloaded", timeout=PLAYWRIGHT_TIMEOUT_MS)
@@ -2339,6 +2400,8 @@ def fetch_coupang_scrapling_products(query: str, sort_mode: str, display: int = 
     if int(response.status) != 200:
         raise RuntimeError(f"쿠팡 Scrapling 수집 오류: HTTP {response.status}")
     document = response.body.decode("utf-8", errors="replace")
+    if access_denied_text(document):
+        raise RuntimeError("쿠팡 보안 확인 화면이 응답되어 자동 수집을 멈춤")
     products = parse_coupang_products(document, search_url, limit=display)
     if not products:
         raise RuntimeError("쿠팡 Scrapling 결과 파싱 실패 또는 결과 없음")
@@ -2824,7 +2887,11 @@ def coupang_browser_detail_targets(rows: list[sqlite3.Row]) -> list[dict[str, An
 
 
 def access_denied_text(text: str) -> bool:
-    return bool(re.search(r"access denied|forbidden|권한|접근이\s*거부|captcha", text, flags=re.IGNORECASE))
+    return bool(re.search(
+        r"access denied|forbidden|권한|접근이\s*거부|captcha|sec-if-cpt-container|behavioral-content",
+        text,
+        flags=re.IGNORECASE,
+    ))
 
 
 def require_coupang_browser_automation() -> None:
@@ -3664,8 +3731,24 @@ def collect_price_products(db: sqlite3.Connection, query: str, sort_mode: str, s
     if "enuri" in selected_sources:
         try:
             reserve_collection_request(db, "enuri")
-            products.extend(mark_extraction_method(fetch_enuri_products(query, display=SEARCH_LINE_SOURCE_LIMIT), "crawl"))
-            complete_collection_request(db, "enuri", "success")
+            method_successes = 0
+            collectors = (
+                ("크롤링", fetch_enuri_products),
+                ("보완 수집", fetch_enuri_scrapling_products),
+            )
+            for label, collector in collectors:
+                try:
+                    collected = collector(query, display=SEARCH_LINE_SOURCE_LIMIT)
+                    products.extend(collected)
+                    if collected:
+                        method_successes += 1
+                    if label == "크롤링" and len(collected) >= 10:
+                        break
+                except Exception as error:
+                    warnings.append(f"에누리 {label}: {error}")
+            complete_collection_request(db, "enuri", "success" if method_successes else "error")
+            if method_successes == 0:
+                warnings.append("에누리의 모든 추출 방식이 실패함")
         except Exception as error:
             if not isinstance(error, CollectionQuotaExceeded):
                 complete_collection_request(db, "enuri", "error")
@@ -3677,22 +3760,28 @@ def collect_price_products(db: sqlite3.Connection, query: str, sort_mode: str, s
                 warnings.append("쿠팡: 서버 직접 수집은 기본 비활성화됨 · 쿠팡 브라우저 수집 버튼을 사용하세요.")
             else:
                 reserve_collection_request(db, "coupang")
-                method_successes = 0
-                collectors = (
-                    ("크롤링", fetch_coupang_products),
-                    ("Playwright", fetch_coupang_playwright_products),
-                    ("Scrapling", fetch_coupang_scrapling_products),
+                comparison_products = promote_coupang_price_comparison_offers(
+                    products,
+                    limit=min(SEARCH_LINE_SOURCE_LIMIT, 10),
                 )
-                for label, collector in collectors:
-                    try:
-                        collected = collector(query, sort_mode, display=SEARCH_LINE_SOURCE_LIMIT)
-                        products.extend(collected)
-                        if collected:
-                            method_successes += 1
-                        if label == "크롤링" and len(collected) >= 10:
-                            break
-                    except Exception as error:
-                        warnings.append(f"쿠팡 {label}: {error}")
+                method_successes = int(bool(comparison_products))
+                products.extend(comparison_products)
+                if not comparison_products:
+                    collectors = (
+                        ("크롤링", fetch_coupang_products),
+                        ("Playwright", fetch_coupang_playwright_products),
+                        ("Scrapling", fetch_coupang_scrapling_products),
+                    )
+                    for label, collector in collectors:
+                        try:
+                            collected = collector(query, sort_mode, display=SEARCH_LINE_SOURCE_LIMIT)
+                            products.extend(collected)
+                            if collected:
+                                method_successes += 1
+                            if label == "크롤링" and len(collected) >= 10:
+                                break
+                        except Exception as error:
+                            warnings.append(f"쿠팡 {label}: {error}")
                 complete_collection_request(db, "coupang", "success" if method_successes else "error")
                 if method_successes == 0:
                     warnings.append("쿠팡의 모든 추출 방식이 실패함")
@@ -4034,6 +4123,7 @@ def get_run_payload(db: sqlite3.Connection, run_id: str) -> dict[str, Any]:
     run_data = row_to_dict(run) or {}
     metadata = parse_json_text(str(run_data.get("filters_json") or "{}"), {})
     run_data["sources"] = metadata.get("sources", []) if isinstance(metadata, dict) else []
+    run_data["collection_mode"] = metadata.get("collection_mode", "") if isinstance(metadata, dict) else ""
     return {
         "run": run_data,
         "items": items,
@@ -4594,22 +4684,20 @@ def save_desktop_price_results(payload: DesktopPriceResultsPayload) -> dict[str,
 
 @app.post("/price-search/extension-results", dependencies=[Depends(require_admin)])
 def save_extension_price_results(payload: ExtensionPriceResultsPayload) -> dict[str, Any]:
-    run_id = payload.merge_run_id.strip() or new_id("run")
+    if payload.capture_id and payload.merge_run_id:
+        raise HTTPException(status_code=422, detail="승인 수집은 기존 실행에 병합할 수 없습니다.")
+    run_id = f"approval_{payload.capture_id}" if payload.capture_id else payload.merge_run_id.strip() or new_id("run")
+    fingerprint = hashlib.sha256(payload.model_dump_json().encode()).hexdigest() if payload.capture_id else ""
     items = extension_payload_products(payload)
     if not items:
         raise HTTPException(status_code=422, detail="크롬 익스텐션 수집 결과에서 상품명/가격을 찾지 못했습니다.")
 
     selected_sources = sorted({item["source"] for item in items})
-    with connect() as db:
-        for source in selected_sources:
-            reserve_collection_request(db, source)
-            complete_collection_request(db, source, "browser_success")
-        exception_terms = get_search_exception_terms(db)
-
-    exclusion_reasons = automatic_exclusion_reasons(payload.query, items, exception_terms)
     collected_at = now()
 
     with connect() as db:
+        # Serialize duplicate final approvals, including two open PriceScan tabs.
+        db.execute("BEGIN IMMEDIATE")
         existing = db.execute("SELECT query, filters_json FROM search_runs WHERE id = ?", (run_id,)).fetchone()
         if payload.merge_run_id and not existing:
             raise HTTPException(status_code=404, detail="합칠 기존 검색 결과를 찾지 못했습니다.")
@@ -4622,11 +4710,25 @@ def save_extension_price_results(payload: ExtensionPriceResultsPayload) -> dict[
                 metadata = json.loads(existing["filters_json"] or "{}")
             except (TypeError, json.JSONDecodeError):
                 metadata = {}
+        if payload.capture_id and existing:
+            if metadata.get("capture_fingerprint") != fingerprint:
+                raise HTTPException(status_code=409, detail="같은 승인 ID로 다른 결과를 덮어쓸 수 없습니다.")
+            result = get_run_payload(db, run_id)
+            result["warnings"] = metadata.get("warnings", [])
+            return result
+        for source in selected_sources:
+            reserve_collection_request(db, source)
+            complete_collection_request(db, source, "browser_success")
+        exclusion_reasons = automatic_exclusion_reasons(payload.query, items, get_search_exception_terms(db))
         existing_sources = [str(value) for value in metadata.get("sources", [])]
         metadata.update(
             {
                 "sources": list(dict.fromkeys([*existing_sources, *selected_sources])),
-                "collection_mode": "server_and_current_page" if existing else "chrome_extension_current_page",
+                "collection_mode": "server_managed_browser_agent" if payload.approval_scope == "server_managed_ai"
+                else "chrome_extension_approval" if payload.capture_id
+                else "server_and_current_page" if existing else "chrome_extension_current_page",
+                "capture_fingerprint": fingerprint,
+                "warnings": payload.warnings,
                 "approval_scope": payload.approval_scope,
                 "page_urls": {
                     **(metadata.get("page_urls", {}) if isinstance(metadata.get("page_urls"), dict) else {}),

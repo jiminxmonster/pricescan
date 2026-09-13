@@ -5,6 +5,7 @@ import vm from "node:vm";
 import { checkCollectorConnection, collectorConnectionCopy, launchCollectorBrowser } from "../src/collector-connection.ts";
 
 const appSource = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
+const sellerSource = readFileSync(new URL("../src/SellerWorkspace.tsx", import.meta.url), "utf8");
 const bridgeSource = readFileSync(new URL("../../extensions/pricescan-collector/pricescan-page.js", import.meta.url), "utf8");
 
 test("desktop readiness is confirmed by native IPC without requesting an extension", async () => {
@@ -24,6 +25,16 @@ test("the normal app never offers developer installation or a blocking collector
   assert.equal(appSource.includes("가격수집기가 준비된 PriceScan 전용 Chrome입니다"), false, "a launch URL is not proof of a working collector");
 });
 
+test("a missing Chrome agent is explicit and never falls back to fixed server parsers", () => {
+  assert.match(sellerSource, /requireApprovalCollector\(\)\.then\(\(\) => true\)\.catch\(\(\) => false\)/);
+  assert.doesNotMatch(sellerSource, /const automatic = await onSearch\(title\.trim\(\)\)/);
+  assert.match(sellerSource, /기존 파서로 대체하지 않았습니다/);
+  assert.match(sellerSource, /legacy_parser_fallback/);
+  assert.doesNotMatch(appSource, /if \(includesNaver\) \{[\s\S]{0,300}?return;/);
+  assert.match(appSource, /const serverSources = priceSources;/);
+  assert.doesNotMatch(appSource, /priceSources\.filter\(\(source\) => source !== ["']naver["']\)/);
+});
+
 function contentBridge(runtimeId: string | undefined) {
   let receive: (event: unknown) => void = () => {};
   const posted: Array<{type: string; nonce: string}> = [];
@@ -33,7 +44,8 @@ function contentBridge(runtimeId: string | undefined) {
     postMessage: (message: typeof posted[number]) => posted.push(message),
   };
   const chrome = { runtime: { id: runtimeId, onMessage: { addListener() {} } } };
-  vm.runInNewContext(bridgeSource, { window, chrome });
+  const document = { hidden: false, addEventListener() {} };
+  vm.runInNewContext(bridgeSource, { window, chrome, document });
   return { window, chrome, posted, ping() { receive({source: window, origin: window.location.origin, data: {type: "PRICESCAN_COLLECTOR_PING", nonce: "test-nonce"}}); } };
 }
 

@@ -115,12 +115,6 @@ const naverScanIntervalOptions = [
 const productInfoNoticeTypes = ["기타 재화", "전자제품", "가전제품", "의류", "신발", "가방", "식품", "화장품"];
 const deliveryMethods = ["택배/소포/등기", "직접배송", "방문수령", "퀵서비스"];
 
-function naverShoppingSearchUrl(query: string, sortMode: string) {
-  const params = new URLSearchParams({ query });
-  if (sortMode === "lowest") params.set("sort", "price_asc");
-  return `https://search.shopping.naver.com/ns/search?${params.toString()}`;
-}
-
 type NaverApiGuide = {
   title: string;
   summary: string;
@@ -1300,58 +1294,54 @@ export default function App() {
           query?: string;
           sortMode?: string;
           pageUrl?: string;
+          mode?: string;
+          returnUrl?: string;
+          pageUrls?: Record<string, string>;
+          productId?: string;
           warnings?: string[];
           items?: Array<Record<string, unknown>>;
         };
       } | null;
       if (message?.type !== PRICESCAN_CURRENT_PAGE_CAPTURED || !message.capture?.id) return;
       const capture = message.capture;
-      if (importingCaptureIds.current.has(capture.id)) return;
-      importingCaptureIds.current.add(capture.id);
+      if (capture.mode !== "supervised_ai") return;
+      const captureId = String(capture.id);
+      if (capture.returnUrl) {
+        try { if (new URL(capture.returnUrl).origin !== window.location.origin) return; } catch { return; }
+      }
+      if (importingCaptureIds.current.has(captureId)) return;
+      importingCaptureIds.current.add(captureId);
       const captureQuery = String(capture.query || keyword || "네이버 쇼핑").trim();
       setCollecting(true);
       const importCurrentPage = async () => {
-        let comparisonBase = searchPayload;
-        let companionSearchError = "";
-        const inFlight = companionSearchInFlight.current;
-        if (inFlight && inFlight.query.trim() === captureQuery.trim()) {
-          setNotice(`네이버 ${capture.items?.length || 0}건을 보관했습니다. 다나와 · 에누리 · 쿠팡 자동 수집과 합치는 중...`);
-          try {
-            comparisonBase = await inFlight.promise;
-          } catch (error) {
-            companionSearchError = error instanceof Error ? error.message : "다른 쇼핑몰 자동 수집 실패";
-          }
-        }
-        if (!canReuseCompanionSearch(comparisonBase, captureQuery) && !companionSearchError) {
-          const latest = await request<SearchPayload>("/price-search/latest", token).catch(() => null);
-          if (latest && canReuseCompanionSearch(latest, captureQuery)) comparisonBase = latest;
-        }
-        if (!canReuseCompanionSearch(comparisonBase, captureQuery) && !companionSearchError) {
-          setNotice(`네이버 ${capture.items?.length || 0}건을 보관했습니다. 다나와 · 에누리 · 쿠팡을 이어서 조사 중...`);
-          comparisonBase = await request<SearchPayload>("/price-search", token, {
-            method: "POST",
-            body: JSON.stringify({
-              query: captureQuery,
-              sort_mode: capture.sortMode || "lowest",
-              filters: [],
-              sources: ["danawa", "enuri", "coupang"],
-            }),
-          });
-          setSearchPayload(comparisonBase);
-        }
-        setNotice(`다른 쇼핑몰 조사 결과에 네이버 현재 화면 ${capture.items?.length || 0}건을 합치는 중...`);
+        setNotice(`AI가 확인한 상품 ${capture.items?.length || 0}건을 반영하는 중...`);
         const data = await request<SearchPayload>("/price-search/extension-results", token, {
           method: "POST",
           body: JSON.stringify({
             query: captureQuery,
             sort_mode: capture.sortMode || "lowest",
-            approval_scope: "user_current_page",
-            merge_run_id: comparisonBase.run?.id || "",
-            page_urls: { naver: capture.pageUrl || "" },
-            warnings: [...(comparisonBase.warnings || []), ...(capture.warnings || []), ...(companionSearchError ? [`자동 수집: ${companionSearchError}`] : [])],
+            approval_scope: "server_managed_ai",
+            capture_id: capture.id,
+            merge_run_id: "",
+            page_urls: capture.pageUrls || {},
+            warnings: capture.warnings || [],
             items: capture.items || [],
           }),
         });
+        let captureProductId = String(capture.productId || '');
+        if (!captureProductId) {
+          // Source-first collection has no app draft yet. The existing endpoint is
+          // idempotent by query and preserves any previously entered financials.
+          const draft = await request<{ id: string }>('/seller-products', token, {
+            method: 'POST', body: JSON.stringify({ title: captureQuery }),
+          });
+          captureProductId = draft.id;
+        }
+        if (captureProductId && data.run?.id) {
+          await request(`/seller-products/${encodeURIComponent(captureProductId)}/search-results`, token, {
+            method: 'POST', body: JSON.stringify({ run_id: data.run.id, warnings: data.warnings || [] }),
+          });
+        }
         currentPageImportRevision.current += 1;
         setKeyword(captureQuery);
         setSearchPayload(data);
@@ -1363,17 +1353,18 @@ export default function App() {
           .map((source) => `${sourceLabel(source)} ${data.items.filter((item) => item.source === source).length}건`)
           .join(" · ");
         setNotice(`통합 가격조사 완료 · ${sourceCounts}`);
-        window.dispatchEvent(new CustomEvent("pricescan:current-page-imported", { detail: { runId: data.run?.id || "" } }));
+        window.dispatchEvent(new CustomEvent("pricescan:current-page-imported", { detail: { runId: data.run?.id || "", productId: captureProductId, sourceFirst: !capture.productId } }));
         window.postMessage({ type: PRICESCAN_CURRENT_PAGE_CAPTURE_ACK, captureId: capture.id }, window.location.origin);
         await request<Dashboard>("/dashboard", token).then(setDashboard).catch(() => undefined);
         await refreshLogs().catch(() => undefined);
       };
       void importCurrentPage().catch((error) => {
         importingCaptureIds.current.delete(capture.id!);
-        setNotice(error instanceof Error ? error.message : "네이버 현재 화면 반영 실패");
+        setNotice(error instanceof Error ? error.message : "AI 검색 결과 반영 실패");
       }).finally(() => setCollecting(false));
     };
     window.addEventListener("message", receiveCurrentPageCapture);
+    window.postMessage({ type: 'PRICESCAN_COLLECTOR_PING', nonce: 'capture-import-ready' }, window.location.origin);
     return () => window.removeEventListener("message", receiveCurrentPageCapture);
   }, [token, keyword, searchPayload]);
 
@@ -1621,8 +1612,7 @@ export default function App() {
     const templateFilters = templateDetailFilters(keywordValue);
     const detailSelection = mode === "detail" ? sanitizeSelectedFilters(selectedDetailFilters, templateFilters) : {};
     const query = mode === "detail" ? buildDetailSearchQuery(keywordValue, detailSelection) : keywordValue;
-    const serverSources = priceSources.filter((source) => source !== "naver");
-    const includesNaver = priceSources.includes("naver");
+    const serverSources = priceSources;
 
     setKeyword(keywordValue);
     setCollecting(true);
@@ -1645,10 +1635,7 @@ export default function App() {
       };
       companionSearchInFlight.current = pendingCompanionSearch;
     }
-    if (includesNaver) window.open(naverShoppingSearchUrl(query, sortMode), "_blank", "noopener,noreferrer");
-    setNotice(serverSources.length
-      ? `${serverSources.map(sourceLabel).join(" · ")} 수집 중...${includesNaver ? " 네이버는 열린 화면에서 확장 프로그램을 눌러 주세요." : ""}`
-      : "네이버 검색 화면을 열었습니다. 결과를 확인한 뒤 PriceScan 확장 프로그램을 눌러 주세요.");
+    setNotice(`${serverSources.map(sourceLabel).join(" · ")} AI 조사 중... 로그인이나 보안 확인이 필요할 때만 알려드립니다.`);
 
     try {
       let data: SearchPayload = { run: null, items: [], summary: { collected_count: 0, lowest_count: 0, excluded_count: 0 } };
@@ -1664,9 +1651,7 @@ export default function App() {
       await request<Dashboard>("/dashboard", token).then(setDashboard).catch(() => undefined);
       await refreshLogs().catch(() => undefined);
       await refreshCollectionQuotas().catch(() => undefined);
-      const serverMessage = serverSources.length ? `${data.items.length}건 수집 완료` : "";
-      const naverMessage = includesNaver ? "네이버는 결과 화면에서 확장 프로그램의 ‘현재 화면 가져오기’를 누르면 이 결과에 합쳐집니다." : "";
-      setNotice([serverMessage, naverMessage].filter(Boolean).join(" · "));
+      setNotice(`${data.items.length}건 수집 완료 · 결과가 없는 쇼핑몰은 아래 상태 안내를 확인해 주세요.`);
       setTab("search");
       return data;
     } catch (error) {
@@ -2538,8 +2523,6 @@ export default function App() {
             progress={notice}
             selectedSources={selectedSources}
             onToggleSource={toggleSearchSource}
-            onSearch={(query) => startProductScan("simple", query)}
-            onDetailScan={scanBenefits}
             onBrowser={showBrowserConnection}
             onSettings={() => setTab((current) => current === "settings" ? "search" : "settings")}
             onLogout={logout}
@@ -4650,6 +4633,7 @@ const EXTRACTION_METHOD_META: Record<string, { icon: string; label: string }> = 
   playwright: { icon: "(p)", label: "Playwright" },
   scrapling: { icon: "(s)", label: "Scrapling" },
   browser: { icon: "(b)", label: "사용자 브라우저" },
+  price_comparison: { icon: "(v)", label: "가격비교 판매처 확인" },
 };
 
 function extractionMethods(item: PriceItem): string[] {

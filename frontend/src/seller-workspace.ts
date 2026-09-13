@@ -10,7 +10,7 @@ export type SellerOffer = {
   benefit_summary?: string; benefit_condition?: string; detail_methods?: string[];
 };
 export type SellerSearchResult = {
-  run: { id: string; query: string; status: string; created_at: string } | null;
+  run: { id: string; query: string; status: string; created_at: string; collection_mode?: string } | null;
   items: SellerOffer[]; warnings?: string[];
 };
 export type WatchedOffer = SellerOffer & {

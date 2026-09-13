@@ -12,16 +12,17 @@
         <img src="icons/icon-48.png" alt="" />
         <div>
           <strong>PriceScan</strong>
-          <p>네이버 현재 화면 가져오기</p>
+          <p>서버 관리형 AI 가격 조사</p>
         </div>
       </header>
       <section id="status" class="status" aria-live="polite">
         <span class="dot"></span>
-        <p id="statusText">현재 탭을 확인하고 있습니다.</p>
+        <p id="statusText">PriceScan에서 상품명만 입력하면 조사가 시작됩니다.</p>
       </section>
-      <button id="capture" class="primary" type="button" disabled>현재 화면 최대 10개 가져오기</button>
-      <p class="privacy">자동 검색·스크롤·재시도 없이, 버튼을 누른 현재 화면만 읽습니다.</p>
-      <button id="openPriceScan" class="link-button" type="button">PriceScan 열기</button>
+      <button id="capture" class="primary" type="button">PriceScan에서 AI 검색 시작</button>
+      <button id="guidedOpen" class="link-button" type="button" hidden>진행 중인 조사 열기</button>
+      <p class="privacy">로그인된 화면의 보이는 상품 정보만 읽습니다. 로그인·캡차·보안 확인은 사용자에게 넘깁니다.</p>
+      <button id="openPriceScan" class="link-button" type="button" hidden>PriceScan 열기</button>
     </main>
     <script src="popup.js"></script>
   </body>

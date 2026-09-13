@@ -44,7 +44,11 @@ http://127.0.0.1:8400/health
 admin / admin
 ```
 
-## PriceScan 전용 브라우저
+## 기본 사용 방식: 웹 + Chrome 확장 프로그램
+
+PriceScan의 기본 제품은 `https://pricescan.d2blue.com/pricescan/` 웹 화면입니다. 사용자는 평소 쓰는 로그인된 Chrome에서 PriceScan 확장 프로그램을 한 번 연결합니다. 그 뒤에는 웹 검색창에 상품명을 한 번 입력하면 서버가 쇼핑몰별 검색 경로와 판독 규칙을 내려주고, 확장 프로그램이 현재 Chrome 탭을 순서대로 이동하며 AI가 화면의 주요 콘텐츠를 읽습니다. 로그인 만료·캡차·보안 확인·불확실한 가격에서만 멈춰 사용자 확인을 요청합니다.
+
+독립형 Desktop 앱과 예전 전용 브라우저 실행기는 현재 기본 흐름이 아닌 보관·호환용입니다. 새 사용자는 설치하지 않아도 됩니다.
 
 ### 판매상품 중심 작업 흐름
 
@@ -64,32 +68,6 @@ admin / admin
 서버 `.env`에 `PRICESCAN_AI_API_KEY`, `PRICESCAN_AI_MODEL`을 직접 설정하고 백엔드를 재시작하면 DeepSeek Chat Completions에 연결합니다. 키는 프론트엔드에 전달하지 않습니다. 모델은 계정에서 이용 가능한 모델 ID를 선택하세요.
 
 전송 동의와 질문 제출 시에만 선택 상품의 저장된 원가·판매가·수수료·배송비 및 모니터링 정보, 해당 상품의 최근 대화를 전송합니다. 다른 상품, 브라우저 쿠키, 로그인 인증정보는 전송하지 않습니다. AI에게 브라우저 제어나 가격 변경 도구를 제공하지 않습니다. 대화 내용은 현재 화면의 메모리에만 유지되며 새로고침하면 사라집니다.
-
-### 전용 브라우저 실행
-
-**새 독립형 앱:** `desktop/`의 Electron 기반 **PriceScan Desktop**을 사용합니다.
-네이버와 다른 쇼핑몰 작업이 독립적으로 진행되며, 로그인·보안확인 시 사용자에게
-알림을 보내고 정상 화면 복귀 후 수집합니다. 먼저 저장된 쇼핑몰 결과부터 판매상품에
-연결합니다. 중지·이어가기·재시작 복원과 전용 로그인 세션을 지원합니다.
-빌드·보안 경계·검증 절차는 [desktop/README.md](desktop/README.md)를 참고하세요.
-현재 UI/API는 기존 로컬 Docker 서비스에 의존하며, 공개 배포용 서명·공증은 별도입니다.
-기존 실행기/웹 화면의 열기 버튼은 검증 완료된 새 앱 빌드가 있으면 이를 우선 실행합니다.
-
-아래는 새 앱 빌드가 없을 때 사용하는 기존 Chrome 실행기입니다.
-
-전용 브라우저 앱을 만들려면 다음 명령을 한 번 실행합니다.
-
-```bash
-./scripts/build-pricescan-browser-app.sh
-```
-
-생성된 `artifacts/pricescan-browser/PriceScan Browser.app`을 열면 로컬 PriceScan 서비스와 보조기를 확인한 뒤 가격수집기 익스텐션이 연결된 브라우저를 실행합니다.
-
-- 쇼핑몰 로그인과 쿠키는 `~/Library/Application Support/PriceScan Browser/profile-v2`에 유지됩니다.
-- 실행 충돌 복구를 위해 새 영구 프로필로 전환했습니다. 기존 `profile` 폴더는 삭제·수정하지 않고 그대로 보관하며, 새 프로필에서는 쇼핑몰에 다시 로그인해야 합니다. 기존 쿠키나 인증정보를 자동으로 복사하지 않습니다.
-- macOS 앱 실행 경로로 전용 프로필과 수집기를 함께 엽니다. Codex 내부 미리보기나 일반 Chrome 새 탭은 수집기가 연결된 전용 창이 아닙니다.
-- PriceScan 익스텐션은 프로젝트의 최신 로컬 버전을 자동으로 불러옵니다.
-- CAPTCHA 해결, 브라우저 지문 위장, 프록시 회전 기능은 포함하지 않습니다.
 
 ## Vultr 배포
 
@@ -145,10 +123,19 @@ https://pricescan.d2blue.com/pricescan/
 
 ## 다음 단계
 
-현재는 React/Vite 프론트엔드, FastAPI 백엔드, SQLite 저장소, Docker Compose 실행까지 복구했습니다. 가격검색은 네이버쇼핑/다나와/에누리/쿠팡 검색 페이지 수집을 기준으로 두고, 다음 단계에서 가격 이력 DB 고도화, 회원별 워크스페이스, 송장 출력 연동을 붙이면 됩니다.
+현재 기본 가격검색은 서버 관리형 AI 브라우저 조사입니다. 서버가 쇼핑몰별 검색 주소와 판독 규칙을 갱신하고, Chrome 확장 프로그램은 로그인된 사용자의 현재 화면에서 주요 콘텐츠 텍스트와 공개 링크만 제한된 크기로 전달합니다. 고정 파서는 이 흐름의 대체 수단으로 실행하지 않습니다.
 
 ## 배포 상품 분리
 
-- 웹 + Chrome Extension: 일반 사용자는 Chrome Web Store에서 확장 프로그램을 설치합니다. 확장 프로그램은 사용자가 직접 확인한 네이버 쇼핑 현재 화면을 한 번만 가져오며, 다나와·에누리·쿠팡은 웹 서버 수집으로 처리합니다.
-- Desktop: 기존 전용 브라우저 포함 macOS 앱은 별도 다운로드로 제공합니다. `artifacts/downloads/PriceScan-Desktop-macOS-arm64-2026-09-02.zip`이 현재 설치 패키지이며, 외부 공개 전 Apple Developer ID 서명과 공증이 필요합니다.
-- Chrome Web Store: `artifacts/chrome-webstore/pricescan-collector-0.2.0-webstore.zip`과 `extensions/pricescan-collector/chrome-web-store-checklist.md`를 사용합니다.
+- 웹 + Chrome Extension: 소스의 0.5.0 버전은 PriceScan 검색 한 번으로 네이버 → 다나와 → 에누리 → 쿠팡을 한 탭에서 차례로 확인하는 서버 관리형 AI 조사입니다. 확장 프로그램은 로그인된 화면의 보이는 텍스트와 공개 상품 링크만 읽고, 서버 AI가 상품·가격을 판독합니다. 쿠키·비밀번호·입력값·스크린샷은 전송하지 않으며 로그인·캡차·보안 확인·판독 불확실 상태에서만 사용자에게 넘깁니다. AI가 연결되지 않으면 기존 고정 파서로 조용히 대체하지 않습니다.
+- Desktop: 기존 전용 브라우저 포함 macOS 앱은 호환용 별도 다운로드입니다. 기본 검색 흐름에는 필요하지 않으며, 외부 공개 전 Apple Developer ID 서명과 공증이 필요합니다.
+- Chrome Web Store: `scripts/build-pricescan-collector-webstore.sh`로 0.5.0 업로드 ZIP을 만들고 `extensions/pricescan-collector/chrome-web-store-checklist.md`를 확인합니다. ZIP 생성은 스토어 등록/게시 완료를 의미하지 않습니다.
+
+### AI 감독형 수집 개발 검증
+
+- 정상 인식 시 검색 한 번으로 네 쇼핑몰을 차례로 조사합니다. 최초 설치 때만 접근 권한 버튼을 누르며, 읽지 못한 가격·배송비는 사용자 확인을 요청합니다. 미확인 배송비를 무료로 저장하지 않습니다.
+- 인증/차단에서는 다음으로 자동 이동하거나 재시도하지 않습니다. 사용자 처리 후 승인하거나 해당 상품/쇼핑몰을 제외합니다.
+- 중간 상태는 확장 프로그램 로컬 저장소에 보관합니다. 최종 결과는 검색을 시작한 웹 origin과 판매상품 ID로만 전달하며, 서버의 저장 성공 응답 전에는 완료 처리하지 않습니다. 같은 최종 승인 ID의 재전송은 중복 실행을 만들지 않습니다.
+- `node --test extensions/pricescan-collector/*test.cjs`, 프론트엔드 타입 검사/테스트/빌드, `backend/tests/test_extension_collection.py`로 회귀 검증합니다.
+- `approval-panel.html?preview=1`은 확장 런타임이 없는 로컬 HTTP 서버에서만 동작하는 **예시 데이터 미리보기**입니다. 실제 쇼핑몰 접속/전송/저장 성공을 시뮬레이션하지 않습니다.
+- 브라우저 개발 테스트는 사용자가 지정한 CleanFile 외장 프로필만 사용합니다. 연결을 확인할 수 없으면 일반 Chrome이나 Codex 브라우저로 대체하지 않습니다. IndexedDB는 삭제하지 않습니다.

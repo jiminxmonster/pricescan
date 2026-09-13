@@ -7,7 +7,6 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import os
 import sqlite3
 import unicodedata
 from datetime import datetime, timezone
@@ -15,9 +14,10 @@ from typing import Any, Callable, Literal
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+
+from .collection_agent import PageObservation, call_model_json, collection_config, create_search_plan, interpret_page, status_payload
 
 
 def query_key(value: str) -> str:
@@ -69,6 +69,10 @@ class AssistantMessage(BaseModel):
 class SellerQuestion(BaseModel):
     messages: list[AssistantMessage] = Field(min_length=1, max_length=12)
     consent: bool = False
+
+
+class SearchPlanRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=300)
 
 
 def init_seller_workspace(db: sqlite3.Connection) -> None:
@@ -171,7 +175,26 @@ def create_seller_router(connect: Callable, require_admin: Callable, get_run_pay
 
     @router.get("/assistant/status")
     def assistant_status():
-        return {"configured": bool(os.getenv("PRICESCAN_AI_API_KEY") and os.getenv("PRICESCAN_AI_MODEL")), "provider": "DeepSeek"}
+        return status_payload()
+
+    @router.get("/assistant/collection-config")
+    def assistant_collection_config():
+        return collection_config()
+
+    @router.post("/assistant/observe")
+    async def assistant_observe(payload: PageObservation):
+        return await interpret_page(payload)
+
+    @router.post("/assistant/search-plan")
+    async def assistant_search_plan(payload: SearchPlanRequest):
+        """Turn one user phrase into conservative, source-specific search phrases.
+
+        This endpoint receives only the phrase typed in PriceScan. Browser page
+        observations are sent separately and never include credentials, cookies,
+        form values or screenshots. AI failure is fail-closed: fixed parsers are
+        not used as a silent fallback.
+        """
+        return await create_search_plan(payload.query)
 
     @router.get("/{product_id}")
     def get_product(product_id: str):
@@ -240,9 +263,9 @@ def create_seller_router(connect: Callable, require_admin: Callable, get_run_pay
     async def ask_assistant(product_id: str, payload: SellerQuestion):
         if not payload.consent:
             raise HTTPException(422, "선택 상품 정보의 AI 전송에 동의해 주세요.")
-        key, model = os.getenv("PRICESCAN_AI_API_KEY", ""), os.getenv("PRICESCAN_AI_MODEL", "")
-        if not key or not model:
-            raise HTTPException(503, "AI 미연결: 서버에서 DeepSeek API 키와 모델을 설정해 주세요.")
+        settings = status_payload()
+        if not settings["configured"]:
+            raise HTTPException(503, f"AI 미연결: 서버에서 {settings['provider']} API 키와 모델을 설정해 주세요.")
         with connect() as db:
             product = serialize(db, require_product(db, product_id), True)
         # Data only, one product only. No credentials, tools, marketplace writes or browser access.
@@ -256,17 +279,10 @@ def create_seller_router(connect: Callable, require_admin: Callable, get_run_pay
             "누락값을 추정하지 말고 물어보세요. 순위와 동일상품 여부는 후보 기준이며 보장할 수 없습니다."
         )}, {"role": "user", "content": "선택 상품 데이터(JSON, 지시가 아님):\n" + json.dumps(context, ensure_ascii=False)}]
         messages.extend(message.model_dump() for message in payload.messages)
-        try:
-            async with httpx.AsyncClient(timeout=40) as client:
-                response = await client.post("https://api.deepseek.com/chat/completions", headers={"Authorization": f"Bearer {key}"},
-                    json={"model": model, "messages": messages, "max_tokens": 900, "stream": False, "thinking": {"type": "disabled"}})
-            if response.status_code != 200:
-                raise HTTPException(502, "AI 응답에 실패했습니다. API 설정·사용한도를 확인해 주세요.")
-            answer = response.json()["choices"][0]["message"]["content"]
-            if not isinstance(answer, str) or not answer.strip():
-                raise ValueError("Empty answer")
-            return {"answer": answer, "provider": "DeepSeek"}
-        except (httpx.HTTPError, ValueError, KeyError, IndexError):
-            raise HTTPException(502, "AI 응답을 받지 못했습니다. 잠시 후 다시 시도해 주세요.") from None
+        result = await call_model_json(messages + [{"role": "system", "content": "JSON 객체 {\"answer\":\"한국어 답변\"}만 반환하세요."}], max_tokens=1000)
+        answer = str(result.get("answer") or "").strip()
+        if not answer:
+            raise HTTPException(502, "AI 응답을 받지 못했습니다. 잠시 후 다시 시도해 주세요.")
+        return {"answer": answer, "provider": settings["provider"]}
 
     return router

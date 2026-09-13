@@ -61,6 +61,24 @@ class ExtensionCollectionTest(unittest.TestCase):
             main.save_extension_price_results(self.payload("naver", 900000, first["run"]["id"], "다른 상품"))
         self.assertEqual(caught.exception.status_code, 422)
 
+    def test_final_approval_is_idempotent_and_keeps_all_four_sources(self):
+        payload = self.payload("naver", 900000)
+        payload.capture_id = "df561a3a-f736-415d-9e5f-4890d1da7302"
+        payload.approval_scope = "user_per_step"
+        payload.warnings = ["화면에서 확인한 후보입니다."]
+        for source in ("danawa", "enuri", "coupang"):
+            payload.items.extend(self.payload(source, 910000).items)
+        first = main.save_extension_price_results(payload)
+        second = main.save_extension_price_results(payload)
+        self.assertEqual(first["run"]["id"], second["run"]["id"])
+        self.assertEqual(len(second["items"]), 4)
+        self.assertEqual(second["warnings"], payload.warnings)
+        self.assertEqual(main.reserve_collection_request.call_count, 4)
+        payload.items[0].price = 800000
+        with self.assertRaises(HTTPException) as caught:
+            main.save_extension_price_results(payload)
+        self.assertEqual(caught.exception.status_code, 409)
+
 
 if __name__ == "__main__":
     unittest.main()

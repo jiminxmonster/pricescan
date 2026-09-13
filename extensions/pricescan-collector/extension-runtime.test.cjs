@@ -27,20 +27,8 @@ function loadRuntime() {
   return { context, listener };
 }
 
-test("only exact HTTPS Naver Shopping hosts are accepted", () => {
-  const { context } = loadRuntime();
-  assert.equal(context.module.exports.isSupportedNaverShoppingUrl("https://search.shopping.naver.com/ns/search?query=그램"), true);
-  assert.equal(context.module.exports.isSupportedNaverShoppingUrl("https://shopping.naver.com/home"), true);
-  assert.equal(context.module.exports.isSupportedNaverShoppingUrl("https://search.shopping.naver.com.evil.example/"), false);
-  assert.equal(context.module.exports.isSupportedNaverShoppingUrl("http://search.shopping.naver.com/"), false);
-});
-
-test("query is read from the visible page URL", () => {
-  const { context } = loadRuntime();
-  assert.equal(context.module.exports.deriveQuery("https://search.shopping.naver.com/ns/search?query=맥북%20프로"), "맥북 프로");
-});
-
-test("legacy automatic collection requests are ignored", () => {
+test("legacy automatic and manual Naver-first requests are ignored", () => {
   const { listener } = loadRuntime();
   assert.equal(listener({ type: "PRICESCAN_COLLECT_SEARCH" }, {}, () => {}), false);
+  assert.equal(listener({ type: "PRICESCAN_CAPTURE_CURRENT_NAVER_PAGE", tabId: 1 }, {}, () => {}), false);
 });

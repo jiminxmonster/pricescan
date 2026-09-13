@@ -1,8 +1,10 @@
 {
   "manifest_version": 3,
   "name": "PriceScan Collector",
-  "description": "사용자가 직접 연 네이버 쇼핑 화면에서 현재 보이는 상품 가격을 한 번만 PriceScan으로 가져옵니다.",
-  "version": "0.2.0",
+  "description": "검색 한 번으로 사전 로그인된 네 쇼핑몰의 보이는 최저가 후보를 AI 감독형 흐름으로 조사합니다.",
+  "version": "0.5.0",
+  "minimum_chrome_version": "116",
+  "side_panel": { "default_path": "approval-panel.html" },
   "icons": {
     "16": "icons/icon-16.png",
     "32": "icons/icon-32.png",
@@ -25,7 +27,13 @@
   "permissions": [
     "activeTab",
     "scripting",
-    "storage"
+    "storage",
+    "sidePanel"
+  ],
+  "optional_host_permissions": [
+    "https://shopping.naver.com/*", "https://search.shopping.naver.com/*", "https://smartstore.naver.com/*", "https://brand.naver.com/*",
+    "https://search.danawa.com/*", "https://prod.danawa.com/*",
+    "https://www.enuri.com/*", "https://enuri.com/*", "https://www.coupang.com/*"
   ],
   "host_permissions": [
     "https://pricescan.d2blue.com/*"

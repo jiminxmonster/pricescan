@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="ko">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>PriceScan AI 검색</title><link rel="stylesheet" href="approval-panel.css"></head>
+<body>
+  <main>
+    <header><img src="icons/icon-48.png" alt=""><div><strong>PriceScan</strong><span>AI 감독형 최저가 조사</span></div><span id="saved">준비</span></header>
+    <p id="preview" class="notice" hidden>디자인·동작 미리보기 · 예시 데이터입니다. 쇼핑몰 접속이나 실제 저장은 하지 않습니다.</p>
+    <nav id="sources" aria-label="쇼핑몰 진행"></nav>
+    <p id="eyebrow" class="eyebrow"></p><h1 id="heading">AI 검색을 준비해 주세요</h1>
+    <p id="description" class="description">PriceScan에서 상품을 입력하면 이곳의 큰 버튼으로 검색을 이어갈 수 있습니다.</p>
+    <section id="content"></section>
+    <p id="message" role="status" aria-live="polite"></p>
+    <div id="secondary"><button id="skipDetail" hidden>이 상품 제외</button><button id="skipSource" hidden>이 쇼핑몰 건너뛰기</button><button id="cancel" hidden>중단</button></div>
+  </main>
+  <footer><p id="next"></p><button id="approve" class="approve" disabled>검색창에서 시작해 주세요</button><small id="safety">로그인·보안 확인·불확실한 값에서는 자동으로 멈춥니다.</small></footer>
+  <script src="approval-flow.js"></script><script src="approval-panel.js"></script>
+</body></html>

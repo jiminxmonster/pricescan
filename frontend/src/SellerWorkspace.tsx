@@ -2,9 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import {
   calculateSellerMargin, financeLabels, financeToDraft, groupSellerOffers, isReviewRequired,
   importedSearchRequest, offerIdentity, parseFinance, safeOfferUrl, sellerSourceLabels, sellerSources,
-  type FinanceDraft, type SellerOffer, type SellerProduct, type SellerSearchResult, type WatchedOffer,
+  type FinanceDraft, type SellerOffer, type SellerProduct, type WatchedOffer,
 } from "./seller-workspace";
 import "./seller-workspace.css";
+import { requireApprovalCollector, startApprovalCollection } from "./approval-collector";
 import { canShowDesktopScreen, desktopAttentionStates, desktopStateLabels, desktopTerminalStates, type DesktopJob } from "./desktop-collector";
 
 const money = (value: number) => `${value.toLocaleString("ko-KR")}원`;
@@ -25,11 +26,9 @@ async function api<T>(token: string, path: string, body?: unknown, method = "POS
   return response.json();
 }
 
-export default function SellerWorkspace({ token, busy, progress, selectedSources, onToggleSource, onSearch, onDetailScan, onBrowser, onSettings, onLogout }: {
+export default function SellerWorkspace({ token, busy, progress, selectedSources, onToggleSource, onBrowser, onSettings, onLogout }: {
   token: string; busy: boolean; progress: string; selectedSources: string[];
   onToggleSource: (source: string) => void;
-  onSearch: (query: string) => Promise<SellerSearchResult | null | undefined>;
-  onDetailScan: (itemIds: string[]) => Promise<SellerSearchResult | null | undefined>;
   onBrowser: () => void; onSettings: () => void; onLogout: () => void;
 }) {
   const [view, setView] = useState<"search" | "products">("search");
@@ -47,26 +46,37 @@ export default function SellerWorkspace({ token, busy, progress, selectedSources
   const [error, setError] = useState("");
   const [status, setStatus] = useState("");
   const [pendingImportedRunId, setPendingImportedRunId] = useState<string | null>(null);
-  const [detailScanningSource, setDetailScanningSource] = useState("");
   const desktop = window.PriceScanDesktop;
   const [desktopJobs, setDesktopJobs] = useState<DesktopJob[]>([]);
   const desktopJob = desktopJobs.find(job => job.productId === product?.id);
+  const isDesktopSupervised = (job?: DesktopJob) => ['manual_scroll', 'manual_grid'].includes(job?.captureMode || '');
+  const desktopScrollActive = isDesktopSupervised(desktopJob) && desktopJob?.active;
+  const desktopReadyCount = desktopJob?.tasks.filter(task => task.state === 'ready_to_capture').length || 0;
+  const desktopAllReady = Boolean(desktopJob?.tasks.length && desktopReadyCount === desktopJob.tasks.length);
   const [clock, setClock] = useState(Date.now());
   const [chatOpen, setChatOpen] = useState(false);
   const [aiConfigured, setAiConfigured] = useState(false);
+  const [aiProvider, setAiProvider] = useState("AI");
   const [aiStatusLoaded, setAiStatusLoaded] = useState(false);
   const [draftQuestion, setDraftQuestion] = useState("");
   const [chats, setChats] = useState<Record<string, Message[]>>({});
   const [chatPending, setChatPending] = useState(false);
   const [chatError, setChatError] = useState("");
   const [consent, setConsent] = useState(false);
+  const [aiSearchAllowed, setAiSearchAllowed] = useState(() => {
+    try { return window.sessionStorage.getItem("pricescan:ai-search-allowed") === "1"; }
+    catch { return false; }
+  });
+  const [permissionQuery, setPermissionQuery] = useState("");
   const chatTab = useRef<HTMLButtonElement>(null);
   const chatInput = useRef<HTMLTextAreaElement>(null);
   const chatHeading = useRef<HTMLHeadingElement>(null);
   const searching = busy || working;
-  const locked = searching || loading || saving || toggling || Boolean(detailScanningSource);
+  const locked = searching || loading || saving || toggling;
   const financials = calculateSellerMargin(parseFinance(fields));
   const dirty = product ? JSON.stringify(fields) !== JSON.stringify(financeToDraft(product)) : false;
+  const dirtyRef = useRef(dirty);
+  dirtyRef.current = dirty;
   const watched = product?.monitored || [];
   const result = product?.search;
   const resultSources = sellerSources.filter((source) => result?.items.some((item) => item.source === source) || selectedSources.includes(source));
@@ -107,7 +117,10 @@ export default function SellerWorkspace({ token, busy, progress, selectedSources
     chatHeading.current?.focus();
     setAiStatusLoaded(false);
     setAiConfigured(false);
-    api<{configured: boolean}>(token, "/assistant/status").then((value) => setAiConfigured(value.configured))
+    api<{configured: boolean; provider?: string}>(token, "/assistant/status").then((value) => {
+      setAiConfigured(value.configured);
+      setAiProvider(value.provider || "AI");
+    })
       .catch(() => setAiConfigured(false)).finally(() => setAiStatusLoaded(true));
     const close = (event: KeyboardEvent) => { if (event.key === "Escape") { setChatOpen(false); chatTab.current?.focus(); } };
     window.addEventListener("keydown", close);
@@ -139,7 +152,19 @@ export default function SellerWorkspace({ token, busy, progress, selectedSources
   }, [desktopJob?.id, desktopSavedVersion, token]);
   useEffect(() => {
     const refreshImportedCurrentPage = (event: Event) => {
-      const runId = String((event as CustomEvent<{ runId?: string }>).detail?.runId || "");
+      const detail = (event as CustomEvent<{ runId?: string; productId?: string; sourceFirst?: boolean }>).detail;
+      if (detail?.productId) {
+        // The capture belongs to the product that started it, not whichever product
+        // the user happens to be viewing when the extension returns.
+        void api<SellerProduct>(token, `/${detail.productId}`).then(next => {
+          setProducts(current => [next, ...current.filter(entry => entry.id !== next.id)]);
+          if (detail.sourceFirst && !dirtyRef.current) { acceptProduct(next, true); setView('search'); setQuery(next.title); }
+          else if (activeId.current === next.id) setProduct(next);
+          setStatus('승인한 상품의 가격·배송 정보를 내 판매상품에 반영했습니다.');
+        }).catch(reason => setError(reason.message));
+        return;
+      }
+      const runId = String(detail?.runId || "");
       setPendingImportedRunId(runId);
     };
     window.addEventListener("pricescan:current-page-imported", refreshImportedCurrentPage);
@@ -180,49 +205,49 @@ export default function SellerWorkspace({ token, busy, progress, selectedSources
     } catch (reason) { setError((reason as Error).message); return false; }
     finally { setSaving(false); }
   };
-  const search = async (title = query) => {
+  const search = async (title = query, permissionGranted = aiSearchAllowed) => {
     if (!title.trim() || locked || saving || searchPending.current) return;
     if (!selectedSources.length) { setError("가격을 조사할 쇼핑몰을 하나 이상 선택하세요."); return; }
+    if (!permissionGranted) {
+      setError("");
+      setPermissionQuery(title.trim());
+      return;
+    }
     searchPending.current = true;
     if (dirty && !(await saveFinance())) { searchPending.current = false; return; }
     setWorking(true); setError(""); setStatus("");
     try {
+      const ai = await api<{configured: boolean; provider: string; model: string; legacy_parser_fallback: boolean}>(token, "/assistant/status");
+      if (!ai.configured || ai.legacy_parser_fallback !== false) {
+        throw new Error("AI 검색 연결이 필요합니다. 관리자설정에서 AI API 키와 모델을 설정해 주세요.");
+      }
+      const plan = await api<{used_ai: true; queries: Record<string, string>}>(token, "/assistant/search-plan", { query: title.trim() });
       const draft = await api<SellerProduct>(token, "", { title: title.trim() });
       acceptProduct(draft, true);
       setView("search");
-      setStatus("내 판매상품에 등록했습니다. 필수값은 내 판매상품에서 입력하세요.");
-      if (desktop) {
-        await desktop.start({ query: title.trim(), productId: draft.id, token, sources: selectedSources, sortMode: 'lowest' });
-        setDesktopJobs(await desktop.list());
-        setStatus("독립 수집을 시작했습니다. 네이버 확인 대기 중에도 다른 쇼핑몰 결과가 먼저 표시됩니다.");
-        await reloadList();
-        return;
-      }
-      const payload = await onSearch(title.trim());
-      if (payload?.run) {
-        const linked = await api<SellerProduct>(token, `/${draft.id}/search-results`, { run_id: payload.run.id, warnings: payload.warnings || [] });
-        if (activeId.current === draft.id) acceptProduct(linked, true);
-        setStatus("검색결과를 연결했습니다. 원본을 검토하고 모니터링할 상품을 체크하세요.");
+      setStatus("AI 검색을 시작했습니다. 로그인된 쇼핑몰을 차례로 확인합니다.");
+      const collectorConnected = await requireApprovalCollector().then(() => true).catch(() => false);
+      if (collectorConnected) {
+        const approval = await startApprovalCollection(title.trim(), draft.id, selectedSources, plan.queries, token);
+        setStatus(approval.autoStarted
+          ? `${plan.used_ai ? 'AI가 쇼핑몰별 검색어를 정리해' : '입력한 검색어로'} 자동 조사를 시작했습니다. 필요한 경우에만 알려드립니다.`
+          : approval.panelOpened
+            ? '처음 한 번만 옆 패널에서 쇼핑몰 접근을 허용하면 AI 자동 조사가 시작됩니다.'
+            : 'AI 검색이 준비됐습니다. 브라우저의 PriceScan 패널을 열어 최초 접근 권한을 허용해 주세요.');
+      } else {
+        throw new Error('PriceScan 브라우저 AI 실행부가 연결되지 않았습니다. 확장 프로그램을 연결한 뒤 다시 검색해 주세요. 기존 파서로 대체하지 않았습니다.');
       }
       await reloadList();
     } catch (reason) { setError((reason as Error).message); }
     finally { searchPending.current = false; setWorking(false); }
   };
-  const addSearchDetails = async (source: string, rows: SellerOffer[]) => {
-    if (!product || detailScanningSource) return;
-    const itemIds = rows.filter((item) => item.price > 0 && safeOfferUrl(item.url)).slice(0, 10).map((item) => item.id);
-    if (!itemIds.length) { setError("세부 정보를 확인할 수 있는 상품 링크가 없습니다."); return; }
-    setDetailScanningSource(source); setError("");
-    setStatus(`${sellerSourceLabels[source]} 상위 ${itemIds.length}개의 세부 가격·혜택을 확인하고 있습니다.`);
-    try {
-      const updated = await onDetailScan(itemIds);
-      if (!updated?.run?.id) return;
-      const linked = await api<SellerProduct>(token, `/${product.id}/search-results`, { run_id: updated.run.id, warnings: updated.warnings || [] });
-      if (activeId.current === product.id) acceptProduct(linked);
-      const confirmed = updated.items.filter((item) => itemIds.includes(item.id) && item.benefit_status !== "failed").length;
-      setStatus(`${sellerSourceLabels[source]} 검색 세부 완료 · 기존 결과 유지 · ${confirmed}/${itemIds.length}건 정보 추가`);
-    } catch (reason) { setError((reason as Error).message); }
-    finally { setDetailScanningSource(""); }
+  const allowAiSearch = () => {
+    const title = permissionQuery;
+    if (!title) return;
+    try { window.sessionStorage.setItem("pricescan:ai-search-allowed", "1"); } catch { /* session-only fallback */ }
+    setAiSearchAllowed(true);
+    setPermissionQuery("");
+    void search(title, true);
   };
   const toggle = async (offer: SellerOffer, enabled: boolean) => {
     if (!product || locked || togglePending.current) return;
@@ -248,19 +273,19 @@ export default function SellerWorkspace({ token, busy, progress, selectedSources
     finally { setChatPending(false); }
   };
 
-  return <div className={`seller-workspace ${view === "search" ? "is-search-view" : "is-products-view"} ${result?.run ? "has-results" : ""} ${chatOpen ? "chat-open" : ""}`}>
+  return <div className={`seller-workspace ${view === "search" ? "is-search-view" : "is-products-view"} ${result?.run ? "has-results" : ""} ${chatOpen ? "chat-open" : ""} ${desktopScrollActive ? "desktop-scroll-active" : ""}`}>
     <header className="seller-topbar">
       <nav aria-label="판매 작업 메뉴">
         <button aria-current={view === "search" ? "page" : undefined} onClick={() => setView("search")}>상품 검색</button>
         <button aria-current={view === "products" ? "page" : undefined} onClick={() => setView("products")}>내 판매상품 <b>{products.length}</b></button>
       </nav>
-      <div className="seller-tools"><button onClick={() => desktop ? void desktop.loginNaver().catch(reason => setError(reason.message)) : onBrowser()}>{desktop ? '네이버 로그인' : '전용브라우저'}</button><button onClick={() => { if (desktop) void desktop.logout().then(onLogout).catch(reason => setError(reason.message)); else onLogout(); }}>로그아웃</button><button onClick={onSettings}>관리자설정</button></div>
+      <div className="seller-tools"><button onClick={() => desktop ? void desktop.loginNaver().catch(reason => setError(reason.message)) : onBrowser()}>로그인 상태</button><button onClick={() => { if (desktop) void desktop.logout().then(onLogout).catch(reason => setError(reason.message)); else onLogout(); }}>로그아웃</button><button onClick={onSettings}>관리자설정</button></div>
     </header>
     <div className="seller-feedback" aria-live="polite">
       {error ? <p role="alert" className="seller-error">{error}</p> : <p>{status}</p>}
     </div>
-    {desktop && desktopJobs.some(job => job.active || job.id === desktopJob?.id) && <section className="seller-desktop-jobs" aria-label="독립 수집 작업">
-      {desktopJobs.filter(job => job.active || job.id === desktopJob?.id).map(job => <div key={job.id} className="seller-desktop-job">
+    {desktop && desktopJobs.some(job => !isDesktopSupervised(job) && (job.active || job.id === desktopJob?.id)) && <section className="seller-desktop-jobs" aria-label="독립 수집 작업">
+      {desktopJobs.filter(job => !isDesktopSupervised(job) && (job.active || job.id === desktopJob?.id)).map(job => <div key={job.id} className="seller-desktop-job">
         <div className="seller-section-head"><strong>{job.query}</strong><small>전용 앱 수집 · 쇼핑몰별 독립 진행</small></div>
         {job.tasks.map(task => <div key={task.source} className={`seller-desktop-task ${desktopAttentionStates.has(task.state) ? 'needs-attention' : ''}`}>
           <div><strong>{sellerSourceLabels[task.source]} · {desktopStateLabels[task.state] || task.state}</strong><p role="status">{task.message}{task.nextAt ? ` · ${Math.max(0, Math.ceil((task.nextAt - clock) / 1000))}초 남음` : ''}</p></div>
@@ -273,24 +298,32 @@ export default function SellerWorkspace({ token, busy, progress, selectedSources
       </div>)}
     </section>}
     {view === "search" ? <section className="seller-search-view seller-page" aria-label="상품 검색과 가격 검토">
-      <h1 className="seller-sr-only">상품 가격 검색</h1>
+      <div className="seller-search-intro"><span>AI PRICE SEARCH</span><h1>찾을 상품만 입력하세요</h1><p>사전 로그인된 쇼핑몰에서 최저가 후보를 한 번에 정리합니다.</p></div>
       <form className="seller-search-form" onSubmit={(event) => { event.preventDefault(); void search(); }}>
-        <input value={query} onChange={(event) => setQuery(event.target.value)} aria-label="상품명 또는 모델명" placeholder="상품명 또는 모델명" maxLength={300} disabled={locked} />
-        <button disabled={locked || !query.trim()}>{searching && <i className="seller-search-button-spinner" aria-hidden="true" />}{searching ? "검색 중" : "검색"}</button>
+        <input value={query} onChange={(event) => setQuery(event.target.value)} aria-label="상품명 또는 모델명" placeholder="예: 라이젠 5 노트북 512GB" maxLength={300} disabled={locked} />
+        <button disabled={locked || !query.trim()}>{searching && <i className="seller-search-button-spinner" aria-hidden="true" />}{searching ? "AI 조사 중" : "AI 최저가 찾기"}</button>
       </form>
       <div className="seller-source-options" role="group" aria-label="가격 조사 쇼핑몰">
         {sellerSources.map((source) => <button key={source} aria-pressed={selectedSources.includes(source)} disabled={locked} onClick={() => onToggleSource(source)}><span aria-hidden="true" />{sellerSourceLabels[source]}</button>)}
       </div>
-      {selectedSources.includes("naver") && !searching && <div className="seller-supervised-note"><strong>네이버 · {desktop ? '저빈도 보조 수집' : 'Chrome 현재 화면 가져오기'}</strong><span>{desktop ? '같은 검색은 6시간 재사용하고, 새 검색은 전체 기준 최소 1시간 간격으로 한 번만 실행합니다.' : '열린 네이버 결과를 직접 확인한 뒤 Chrome의 PriceScan 확장 프로그램을 누르면 현재 화면 최대 10개가 결과에 합쳐집니다.'}</span></div>}
+      {permissionQuery && <section className="seller-search-permission" role="dialog" aria-modal="false" aria-labelledby="seller-search-permission-title">
+        <div><span>처음 한 번만 확인</span><strong id="seller-search-permission-title">로그인된 쇼핑몰 화면에서 AI 검색을 진행할까요?</strong><p>입력한 상품명과 현재 쇼핑몰 화면의 주요 콘텐츠 텍스트·공개 링크는 판독을 위해 설정된 AI에 전송됩니다. 비밀번호·쿠키·입력값·결제 정보·스크린샷은 보내지 않으며, 로그인 만료나 보안 확인이 나오면 멈추고 알려드립니다.</p></div>
+        <div><button type="button" onClick={() => setPermissionQuery("")}>취소</button><button type="button" className="seller-primary" onClick={allowAiSearch}>이 세션에서 허용하고 시작</button></div>
+      </section>}
+      {desktop && desktopScrollActive && desktopJob && <div className="seller-scroll-toolbar" role="status" aria-label="스크롤 수집 제어">
+        <div className="seller-grid-states">{desktopJob.tasks.map(task => <span key={task.source} data-state={task.state}><i />{sellerSourceLabels[task.source]} <b>{desktopStateLabels[task.state] || task.state}</b></span>)}</div>
+        <div><button type="button" onClick={() => void desktop.showScroll(desktopJob.id).catch(reason => setError(reason.message))}>스크롤 수집 화면 열기</button><button type="button" className="seller-primary" disabled={!desktopAllReady} onClick={() => void desktop.captureAll(desktopJob.id).then(value => setStatus(`${value.count}개 쇼핑몰의 현재 화면을 한 번에 수집하고 있습니다.`)).catch(reason => setError(reason.message))}>한 번에 수집 ({desktopReadyCount}/{desktopJob.tasks.length})</button></div>
+      </div>}
+      {!searching && !permissionQuery && <div className="seller-supervised-note"><strong>검색 한 번으로 AI 자동 조사</strong><span>사전 로그인된 브라우저에서 선택한 쇼핑몰을 차례로 확인하고 결과를 한 표로 합칩니다. 로그인·캡차·보안 확인 또는 불확실한 값이 있을 때만 멈추고 알려드립니다.</span></div>}
       {product && <div className="seller-draft-banner"><span>{!product.financials.ready && <NewBadge />}<strong>{product.title}</strong> · 내 판매상품 {product.financials.ready ? "등록됨" : "필수정보 입력 대기"}</span><button onClick={() => setView("products")}>내 판매상품 보기 →</button></div>}
-      {searching && <div className="seller-search-progress" role="status"><i className="seller-spinner" /><div><strong>가격 검색을 진행하고 있습니다</strong><p>{progress || "내 판매상품을 준비하고 있습니다…"}</p></div></div>}
+      {searching && <div className="seller-search-progress" role="status"><i className="seller-spinner" /><div><strong>AI가 쇼핑몰 검색을 준비하고 있습니다</strong><p>{progress || "검색어와 선택 쇼핑몰을 확인하고 있습니다…"}</p></div></div>}
       {!busy && progress && <p className="seller-caption" role="status">{progress}</p>}
       {result?.run && <div className={searching ? "seller-results is-updating" : "seller-results"} aria-busy={searching}>
-        <div className="seller-section-head"><h2>쇼핑몰별 최저가</h2><time>{time(result.run.created_at)} 기준{searching ? " · 이전 결과" : ""}</time></div>
+        <div className="seller-section-head"><h2>쇼핑몰별 최저가</h2><div className="seller-result-actions"><time>{time(result.run.created_at)} 기준{searching ? " · 이전 결과" : ""}</time></div></div>
         <div className="seller-market-summary">{groups.map((group) => <a href={`#offers-${group.source}`} key={group.source}><span>{sellerSourceLabels[group.source]}</span><strong>{group.lowest ? money(group.lowest.total) : "확인 필요"}</strong><small>{group.lowest ? `${group.lowest.mall} · 배송비 포함` : "유효한 가격이 없습니다"}</small><PriceRange items={group.rows.filter((row) => !isReviewRequired(row))} /></a>)}</div>
-        <p className="seller-caption">파서가 감지한 최저가 후보입니다. 동일 모델·옵션과 배송 조건은 원본에서 검토해 주세요.</p>
+        <p className="seller-caption">{result.run.collection_mode === "server_managed_browser_agent" ? "AI가 현재 화면에서 판독하고 상세 확인한 최저가 후보입니다." : "이전에 저장된 가격 후보입니다."} 동일 모델·옵션과 배송 조건은 원본 링크에서 검토해 주세요.</p>
         {result.warnings?.map((warning, index) => <p className="seller-review-note" key={index}>{warning}</p>)}
-        {groups.map((group) => <OfferSection key={`${result.run?.id}-${group.source}`} source={group.source} rows={group.rows} watched={watched} disabled={locked || toggling} detailScanning={detailScanningSource === group.source} onDetailScan={addSearchDetails} onToggle={toggle} />)}
+        <div className={desktop ? "seller-offer-grid" : ""}>{groups.map((group) => <OfferSection key={`${result.run?.id}-${group.source}`} source={group.source} rows={group.rows} watched={watched} disabled={locked || toggling} onToggle={toggle} compact={Boolean(desktop)} />)}</div>
       </div>}
       {!result?.run && !searching && product && <div className="seller-empty">수집이 완료되면 쇼핑몰별 최저가와 상품 링크가 여기에 표시됩니다.</div>}
     </section> : <section className="seller-products-view seller-page" aria-label="내 판매상품">
@@ -323,13 +356,13 @@ export default function SellerWorkspace({ token, busy, progress, selectedSources
     <button ref={chatTab} className="seller-ai-tab" aria-expanded={chatOpen} aria-controls="seller-ai-panel" onClick={() => setChatOpen((open) => !open)}><span>✦</span> AI 상담</button>
     {chatOpen && <aside id="seller-ai-panel" className="seller-ai-panel" aria-label="AI 가격 상담">
       <header><div><span>PRICE ASSISTANT</span><h2 ref={chatHeading} tabIndex={-1}>가격을 함께 검토해요</h2></div><button aria-label="AI 채팅 닫기" onClick={() => { setChatOpen(false); chatTab.current?.focus(); }}>×</button></header>
-      <div className="seller-ai-context"><span>현재 상품</span><strong>{product?.title || "먼저 상품을 검색해 주세요"}</strong><small>{aiStatusLoaded ? aiConfigured ? "DeepSeek 설정됨 · 저장한 상품 기준" : "AI 미연결 · API 설정 필요" : "AI 연결 확인 중…"}</small></div>
+      <div className="seller-ai-context"><span>현재 상품</span><strong>{product?.title || "먼저 상품을 검색해 주세요"}</strong><small>{aiStatusLoaded ? aiConfigured ? `${aiProvider} 설정됨 · 저장한 상품 기준` : "AI 미연결 · API 설정 필요" : "AI 연결 확인 중…"}</small></div>
       <div className="seller-ai-messages" role="log" aria-live="polite">{product && (chats[product.id] || []).map((message, index) => <div key={index} className={`seller-chat-message ${message.role}`}><small>{message.role === "user" ? "나" : "AI"}</small><p>{message.content}</p></div>)}
         {(!product || !chats[product.id]?.length) && <div className="seller-ai-welcome"><p>가격을 낮췄을 때 남는 이익과 경쟁상품의 차이를 질문할 수 있습니다.</p><button disabled={!aiConfigured || !product} onClick={() => { setDraftQuestion("모니터링 상품 가격에 맞추면 내 이익이 얼마나 남을까요?"); chatInput.current?.focus(); }}>경쟁가격으로 바꾸면 얼마가 남나요? ↗</button>{aiStatusLoaded && !aiConfigured && <p>아직 AI API 키·모델이 설정되지 않았습니다. 연결 전에는 질문을 전송하지 않으며, 마진 계산은 AI 없이 바로 사용할 수 있습니다.</p>}</div>}
         {chatPending && <p role="status">답변을 기다리고 있습니다…</p>}{chatError && <p role="alert" className="seller-error">{chatError}</p>}
       </div>
       <form className="seller-ai-compose" onSubmit={(event) => { event.preventDefault(); void sendQuestion(); }}>
-        <label className="seller-ai-consent"><input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} disabled={!aiConfigured} />질문 시 선택 상품의 원가·판매가·수수료·배송비와 모니터링 정보를 DeepSeek에 전송하는 데 동의합니다.</label>
+        <label className="seller-ai-consent"><input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} disabled={!aiConfigured} />질문 시 선택 상품의 원가·판매가·수수료·배송비와 모니터링 정보를 {aiProvider}에 전송하는 데 동의합니다.</label>
         {dirty && <small>입력값을 저장한 뒤 질문해 주세요.</small>}
         <textarea ref={chatInput} aria-label="AI에게 질문" placeholder={aiConfigured ? "가격과 마진에 대해 질문하세요" : "AI 연결 후 사용할 수 있습니다"} value={draftQuestion} maxLength={2000} disabled={!aiConfigured || !product || chatPending} onChange={(event) => setDraftQuestion(event.target.value)} />
         <button className="seller-primary" disabled={!aiConfigured || !product || !consent || chatPending || !draftQuestion.trim() || dirty}>질문 보내기</button><small>AI는 가격을 변경하지 않습니다. 최종 결정은 판매자가 합니다.</small>
@@ -353,14 +386,15 @@ function HistoryChart({ offer }: { offer: WatchedOffer }) {
   const elapsed = dates[dates.length - 1] - dates[0];
   return <div className="seller-history" role="img" aria-label={`${offer.mall} 가격 변화 ${money(prices[0])}에서 ${money(prices[prices.length - 1])}`}><svg viewBox="0 0 150 48"><polyline points={prices.map((price, index) => `${4 + (elapsed > 0 ? (dates[index] - dates[0]) / elapsed : index / (prices.length - 1)) * 142},${max === min ? 24 : 42 - (price - min) / (max - min) * 36}`).join(" ")} /></svg><small>{time(offer.history[0].collected_at)} → {time(offer.history[offer.history.length - 1]?.collected_at)}</small></div>;
 }
-function OfferSection({ source, rows, watched, disabled, detailScanning, onDetailScan, onToggle }: { source: string; rows: SellerOffer[]; watched: WatchedOffer[]; disabled: boolean; detailScanning: boolean; onDetailScan: (source: string, rows: SellerOffer[]) => void; onToggle: (offer: SellerOffer, enabled: boolean) => void }) {
+function OfferSection({ source, rows, watched, disabled, onToggle, compact = false }: { source: string; rows: SellerOffer[]; watched: WatchedOffer[]; disabled: boolean; onToggle: (offer: SellerOffer, enabled: boolean) => void; compact?: boolean }) {
   const [expanded, setExpanded] = useState(false);
   const monitored = new Set(watched.map(offerIdentity));
   const visible = expanded ? rows : rows.slice(0, 10);
   return <section id={`offers-${source}`} className="seller-offer-section" aria-label={`${sellerSourceLabels[source]} 가격 검토`}>
-    <div className="seller-section-head"><h2>{sellerSourceLabels[source]} <b>{rows.length}</b></h2><span>배송비 포함 가격순 · 원본 검토 필요</span><button type="button" disabled={disabled || rows.length === 0} onClick={() => onDetailScan(source, rows)}>{detailScanning ? "검색 세부 확인 중…" : "상위 10개 검색 세부"}</button></div>
-    {rows.length < 5 && <p className="seller-review-note">{rows.length ? `${rows.length}개만 감지되었습니다. 5개 미만의 결과만 있어 추가 확인이 필요합니다.` : "감지된 결과가 없습니다. 차단·로그인·검색어 또는 파서 상태를 확인해 주세요."}</p>}
-    {visible.length > 0 && <div className="seller-offer-table"><table><thead><tr><th>후보</th><th>상품 / 옵션 검토</th><th>판매자</th><th>상품가</th><th>배송비</th><th>배송비 포함</th><th>모니터링</th></tr></thead><tbody>{visible.map((offer, index) => <tr key={offer.id} className={`${monitored.has(offerIdentity(offer)) ? "is-monitored" : ""} ${isReviewRequired(offer) ? "needs-review" : ""}`}>
+    <div className="seller-section-head"><h2>{sellerSourceLabels[source]} <b>{rows.length}</b></h2><span>배송비 포함 가격순 · 원본 검토 필요</span></div>
+    {rows.length < 5 && <p className="seller-review-note">{rows.length ? `${rows.length}개만 감지되었습니다. 5개 미만의 결과만 있어 추가 확인이 필요합니다.` : "확인된 결과가 없습니다. 로그인·보안 확인·검색어 상태를 확인해 주세요."}</p>}
+    {compact && visible.length > 0 && <div className="seller-pane-candidates">{visible.map((offer, index) => <article key={offer.id} className={`${monitored.has(offerIdentity(offer)) ? "is-monitored" : ""} ${isReviewRequired(offer) ? "needs-review" : ""}`}><span>{String(index + 1).padStart(2, "0")}</span><div><a href={safeOfferUrl(offer.url)} target="_blank" rel="noreferrer">{offer.name} ↗</a><small>{offer.mall} · 배송 {money(offer.shipping)}</small>{offer.benefit_summary && <small>상세 · {offer.benefit_summary}</small>}</div><strong>{money(offer.total)}</strong><label className="seller-monitor-check"><input type="checkbox" checked={monitored.has(offerIdentity(offer))} disabled={disabled || !safeOfferUrl(offer.url) || offer.price <= 0} aria-label={`${sellerSourceLabels[source]} ${offer.name} 모니터링`} onChange={event => onToggle(offer, event.target.checked)} /><span>{monitored.has(offerIdentity(offer)) ? "ON" : "모니터"}</span></label></article>)}</div>}
+    {!compact && visible.length > 0 && <div className="seller-offer-table"><table><thead><tr><th>후보</th><th>상품 / 옵션 검토</th><th>판매자</th><th>상품가</th><th>배송비</th><th>배송비 포함</th><th>모니터링</th></tr></thead><tbody>{visible.map((offer, index) => <tr key={offer.id} className={`${monitored.has(offerIdentity(offer)) ? "is-monitored" : ""} ${isReviewRequired(offer) ? "needs-review" : ""}`}>
       <td>{String(index + 1).padStart(2, "0")}</td><td><a href={safeOfferUrl(offer.url)} target="_blank" rel="noreferrer">{offer.name} ↗</a>{isReviewRequired(offer) && <small className="seller-review-flag">검토 필요 · {offer.exclusion_reason || "비정상 가격 또는 링크 확인"}</small>}<small>{offer.extraction_methods?.join(" · ") || "화면에서 감지한 가격"}{offer.collected_at ? ` · ${time(offer.collected_at)}` : ""}</small>{offer.benefit_summary && <small>검색 세부 · {offer.benefit_summary}</small>}{offer.benefit_condition && <small className={offer.benefit_status === "failed" ? "seller-review-flag" : ""}>{offer.benefit_condition}</small>}</td><td>{offer.mall}</td><td>{money(offer.registered_price || offer.price)}</td><td>{money(offer.shipping)}</td><td><strong>{money(offer.total)}</strong></td><td><label className="seller-monitor-check"><input type="checkbox" checked={monitored.has(offerIdentity(offer))} disabled={disabled || !safeOfferUrl(offer.url) || offer.price <= 0} aria-label={`${sellerSourceLabels[source]} ${offer.mall} ${offer.name} 모니터링`} onChange={(event) => onToggle(offer, event.target.checked)} /><span>{monitored.has(offerIdentity(offer)) ? "ON" : "선택"}</span></label></td>
     </tr>)}</tbody></table></div>}
     {rows.length > 10 && <button className="seller-more" onClick={() => setExpanded((open) => !open)}>{expanded ? "10개로 접기" : `감지된 ${rows.length}개 모두 검토하기`}</button>}

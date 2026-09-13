@@ -25,7 +25,8 @@ function loadContentScript(capture = null) {
       onMessage: { addListener() {} },
     },
   };
-  const context = vm.createContext({ chrome, console, window });
+  const document = { hidden: false, addEventListener(type, listener) { listeners.set(type, listener); } };
+  const context = vm.createContext({ chrome, console, window, document });
   vm.runInContext(fs.readFileSync(path.join(__dirname, "pricescan-page.js"), "utf8"), context);
   return { listeners, posted, sent, window };
 }
@@ -46,4 +47,17 @@ test("PriceScan acknowledgement clears the matching pending capture", () => {
   });
   assert.equal(sent.at(-1).type, "PRICESCAN_ACK_PENDING_CAPTURE");
   assert.equal(sent.at(-1).captureId, "capture-2");
+});
+
+test("AI-planned per-market queries reach the extension runtime", async () => {
+  const { listeners, sent, window } = loadContentScript();
+  const sourceQueries = { naver: "아이패드 프로 12.9", danawa: "아이패드 12.9" };
+  listeners.get("message")({
+    source: window,
+    origin: window.location.origin,
+    data: { type: "PRICESCAN_APPROVAL_START", nonce: "n1", query: "아이패드12.9", productId: "p1", sources: ["naver", "danawa"], sourceQueries, token: "pricescan-admin-token" },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(sent.at(-1).sourceQueries, sourceQueries);
+  assert.equal(sent.at(-1).token, "pricescan-admin-token");
 });
