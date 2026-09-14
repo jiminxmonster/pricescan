@@ -56,13 +56,13 @@
       shippingEvidence: observed.shippingEvidence || (sourceId === 'naver' && (observedShipping || candidateShipping) ? 'search' : observedShipping ? 'detail' : candidateShipping ? 'search' : 'missing'),
     };
   }
-  function create({ id, query, returnUrl, productId = '', selectedSources, sourceQueries, appTabId, windowId, recipes = [], apiBase = '', apiToken = '', protocolVersion = '' }) {
+  function create({ id, query, returnUrl, productId = '', selectedSources, sourceQueries, appTabId, windowId, recipes = [], apiBase = '', apiToken = '', protocolVersion = '', mergeRunId = '' }) {
     if (!String(query || '').trim() || !appUrl(returnUrl)) throw new Error('PriceScan 검색창에서 승인 수집을 시작해 주세요.');
     const enabled = sources.filter(s => !selectedSources || selectedSources.includes(s.id)).map(s => s.id);
     if (!enabled.length) throw new Error('쇼핑몰을 선택하세요.');
     const plannedQueries = Object.fromEntries(enabled.map(id => [id, String(sourceQueries?.[id] || query).trim().slice(0, 200)]));
     return { id, query: query.trim().slice(0, 200), sourceQueries: plannedQueries, productId, returnUrl: appUrl(returnUrl), appTabId, windowId,
-      recipes, apiBase, apiToken, protocolVersion,
+      recipes, apiBase, apiToken, protocolVersion, mergeRunId,
       sources: enabled, sourceIndex: 0, stage: 'open_search', revision: 0, items: [], candidates: [],
       queue: [], detailIndex: 0, pageUrls: {}, warnings: [], history: [], message: '', tabId: null,
       busy: false, autoRunning: false, attention: false };
@@ -122,6 +122,7 @@
         if (!job.items.length) throw new Error('반영할 상품이 없습니다. 새 수집을 시작해 주세요.');
         effect.publish = {
           id: job.id, mode: 'supervised_ai', query: job.query, productId: job.productId,
+          mergeRunId: job.mergeRunId,
           returnUrl: job.returnUrl, sortMode: 'lowest', pageUrls: job.pageUrls,
           capturedAt: new Date().toISOString(), items: job.items,
           warnings: [...job.warnings.slice(-38), '사용자가 확인한 화면의 선택 상품입니다. 전체 쇼핑몰의 절대 최저가를 보장하지 않습니다.'],

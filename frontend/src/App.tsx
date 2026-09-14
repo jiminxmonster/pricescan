@@ -1415,6 +1415,7 @@ export default function App() {
           pageUrl?: string;
           mode?: string;
           returnUrl?: string;
+          mergeRunId?: string;
           pageUrls?: Record<string, string>;
           productId?: string;
           warnings?: string[];
@@ -1441,7 +1442,7 @@ export default function App() {
             sort_mode: capture.sortMode || "lowest",
             approval_scope: "server_managed_ai",
             capture_id: capture.id,
-            merge_run_id: "",
+            merge_run_id: capture.mergeRunId || "",
             page_urls: capture.pageUrls || {},
             warnings: capture.warnings || [],
             items: capture.items || [],

@@ -57,7 +57,8 @@
       return save(Flow.create({ id: crypto.randomUUID(), query: message.query, returnUrl: sender.url,
         productId: String(message.productId || ''), selectedSources: message.sources, sourceQueries: message.sourceQueries,
         appTabId: sender.tab.id, windowId: sender.tab.windowId, recipes: config.sources,
-        apiBase: base, apiToken: String(message.token || ''), protocolVersion: config.protocol_version }));
+        apiBase: base, apiToken: String(message.token || ''), protocolVersion: config.protocol_version,
+        mergeRunId: String(message.mergeRunId || '') }));
     });
   }
   function sameProduct(actual, expected) {

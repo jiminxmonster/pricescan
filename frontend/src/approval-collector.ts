@@ -18,8 +18,8 @@ export async function requireApprovalCollector() {
   const result = await exchange('PRICESCAN_COLLECTOR_PING', 'PRICESCAN_COLLECTOR_PONG', {});
   if (!result.approvalFlow) throw new Error('로그인된 Chrome과 PriceScan 검색 연결이 필요합니다.');
 }
-export async function startApprovalCollection(query: string, productId: string, sources: string[], sourceQueries: Record<string, string> | undefined, token: string): Promise<ApprovalReply> {
-  const response = await exchange('PRICESCAN_APPROVAL_START', 'PRICESCAN_APPROVAL_STARTED', { query, productId, sources, sourceQueries, token }) as ApprovalReply;
+export async function startApprovalCollection(query: string, productId: string, sources: string[], sourceQueries: Record<string, string> | undefined, token: string, mergeRunId = ""): Promise<ApprovalReply> {
+  const response = await exchange('PRICESCAN_APPROVAL_START', 'PRICESCAN_APPROVAL_STARTED', { query, productId, sources, sourceQueries, token, mergeRunId }) as ApprovalReply;
   if (!response.ok) throw new Error(response.error || 'AI 검색을 준비하지 못했습니다. 브라우저 연결을 확인해 주세요.');
   return response;
 }

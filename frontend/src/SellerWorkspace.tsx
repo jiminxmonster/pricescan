@@ -6,6 +6,7 @@ import {
 } from "./seller-workspace";
 import "./seller-workspace.css";
 import { canShowDesktopScreen, desktopAttentionStates, desktopStateLabels, desktopTerminalStates, type DesktopJob } from "./desktop-collector";
+import { requireApprovalCollector, startApprovalCollection } from "./approval-collector";
 
 const money = (value: number) => `${value.toLocaleString("ko-KR")}원`;
 const shippingKnown = (offer: SellerOffer) => !offer.extraction_methods?.includes("shipping_unknown");
@@ -71,6 +72,8 @@ export default function SellerWorkspace({ token, busy, progress, selectedSources
     catch { return false; }
   });
   const [permissionQuery, setPermissionQuery] = useState("");
+  const [naverSupervisionQuery, setNaverSupervisionQuery] = useState("");
+  const [naverLoginConfirmed, setNaverLoginConfirmed] = useState(false);
   const chatTab = useRef<HTMLButtonElement>(null);
   const chatInput = useRef<HTMLTextAreaElement>(null);
   const chatHeading = useRef<HTMLHeadingElement>(null);
@@ -208,12 +211,19 @@ export default function SellerWorkspace({ token, busy, progress, selectedSources
     } catch (reason) { setError((reason as Error).message); return false; }
     finally { setSaving(false); }
   };
-  const search = async (title = query, permissionGranted = aiSearchAllowed) => {
+  const search = async (title = query, permissionGranted = aiSearchAllowed, naverSupervisionGranted = false) => {
     if (!title.trim() || locked || saving || searchPending.current) return;
     if (!selectedSources.length) { setError("가격을 조사할 쇼핑몰을 하나 이상 선택하세요."); return; }
     if (!permissionGranted) {
       setError("");
       setPermissionQuery(title.trim());
+      return;
+    }
+    const supervisedNaver = selectedSources.includes("naver");
+    if (supervisedNaver && !naverSupervisionGranted) {
+      setError("");
+      setNaverLoginConfirmed(false);
+      setNaverSupervisionQuery(title.trim());
       return;
     }
     searchPending.current = true;
@@ -224,17 +234,30 @@ export default function SellerWorkspace({ token, busy, progress, selectedSources
       if (!ai.configured || ai.legacy_parser_fallback !== false) {
         throw new Error("AI 검색 연결이 필요합니다. 관리자설정에서 AI API 키와 모델을 설정해 주세요.");
       }
-      setStatus("AI가 선택한 쇼핑몰의 공개 가격 정보를 동시에 조사하고 있습니다.");
+      if (supervisedNaver) await requireApprovalCollector();
+      setStatus(supervisedNaver
+        ? "다른 쇼핑몰은 서버 AI가 조사하고, 네이버는 로그인된 Chrome에서 사용자 감시형 AI 조사를 준비합니다."
+        : "AI가 선택한 쇼핑몰의 공개 가격 정보를 동시에 조사하고 있습니다.");
       const searched = await api<SellerProduct>(token, "/assistant/price-search", {
         query: title.trim(), sources: selectedSources,
+        supervised_sources: supervisedNaver ? ["naver"] : [],
       });
       onSearchReserved?.();
       acceptProduct(searched, true);
       setView("search");
       const count = searched.search?.items.length || 0;
-      setStatus(count
-        ? `AI 가격조사를 완료했습니다. ${count}개 후보를 원문 링크와 함께 확인해 주세요.`
-        : "AI 가격조사를 완료했지만 확인 가능한 공개 가격이 없습니다. 아래 쇼핑몰별 안내를 확인해 주세요.");
+      if (supervisedNaver) {
+        const runId = searched.search?.run?.id || "";
+        if (!runId) throw new Error("네이버 결과를 합칠 검색 기록을 만들지 못했습니다.");
+        const approval = await startApprovalCollection(title.trim(), searched.id, ["naver"], { naver: title.trim() }, token, runId);
+        setStatus(approval.autoStarted
+          ? `다른 쇼핑몰 ${count}개 후보를 정리했습니다. 네이버는 로그인된 화면에서 AI가 조사 중이며, 확인이 필요할 때 멈춥니다.`
+          : `다른 쇼핑몰 ${count}개 후보를 정리했습니다. 열린 네이버 감시창에서 큰 버튼을 눌러 AI 조사를 시작해 주세요.`);
+      } else {
+        setStatus(count
+          ? `AI 가격조사를 완료했습니다. ${count}개 후보를 원문 링크와 함께 확인해 주세요.`
+          : "AI 가격조사를 완료했지만 확인 가능한 공개 가격이 없습니다. 아래 쇼핑몰별 안내를 확인해 주세요.");
+      }
       await reloadList();
     } catch (reason) { setError((reason as Error).message); }
     finally { searchPending.current = false; setWorking(false); }
@@ -245,7 +268,13 @@ export default function SellerWorkspace({ token, busy, progress, selectedSources
     try { window.sessionStorage.setItem("pricescan:ai-search-allowed", "1"); } catch { /* session-only fallback */ }
     setAiSearchAllowed(true);
     setPermissionQuery("");
-    void search(title, true);
+    void search(title, true, false);
+  };
+  const confirmNaverSupervision = () => {
+    const title = naverSupervisionQuery;
+    if (!title || !naverLoginConfirmed) return;
+    setNaverSupervisionQuery("");
+    void search(title, true, true);
   };
   const toggle = async (offer: SellerOffer, enabled: boolean) => {
     if (!product || locked || togglePending.current) return;
@@ -298,28 +327,32 @@ export default function SellerWorkspace({ token, busy, progress, selectedSources
     {view === "search" ? <section className="seller-search-view seller-page" aria-label="상품 검색과 가격 검토">
       <div className="seller-search-intro"><span>AI PRICE SEARCH</span><h1>찾을 상품만 입력하세요</h1><p>별도 확장프로그램 없이 공개된 최저가 후보를 한 번에 정리합니다.</p></div>
       <form className="seller-search-form" onSubmit={(event) => { event.preventDefault(); void search(); }}>
-        <input value={query} onChange={(event) => setQuery(event.target.value)} aria-label="상품명 또는 모델명" placeholder="예: 라이젠 5 노트북 512GB" maxLength={300} disabled={locked} />
-        <button disabled={locked || !query.trim()}>{searching && <i className="seller-search-button-spinner" aria-hidden="true" />}{searching ? "AI 조사 중" : "AI 최저가 찾기"}</button>
+        <input value={query} onChange={(event) => setQuery(event.target.value)} aria-label="상품명 또는 모델명" placeholder="예: 라이젠 5 노트북 512GB" maxLength={300} disabled={locked || Boolean(permissionQuery || naverSupervisionQuery)} />
+        <button disabled={locked || Boolean(permissionQuery || naverSupervisionQuery) || !query.trim()}>{searching && <i className="seller-search-button-spinner" aria-hidden="true" />}{searching ? "AI 조사 중" : "AI 최저가 찾기"}</button>
       </form>
       <div className="seller-source-options" role="group" aria-label="가격 조사 쇼핑몰">
-        {sellerSources.map((source) => <button key={source} aria-pressed={selectedSources.includes(source)} disabled={locked} onClick={() => onToggleSource(source)}><span aria-hidden="true" />{sellerSourceLabels[source]}</button>)}
+        {sellerSources.map((source) => <button key={source} aria-pressed={selectedSources.includes(source)} disabled={locked || Boolean(permissionQuery || naverSupervisionQuery)} onClick={() => onToggleSource(source)}><span aria-hidden="true" />{sellerSourceLabels[source]}</button>)}
       </div>
       {permissionQuery && <section className="seller-search-permission" role="dialog" aria-modal="false" aria-labelledby="seller-search-permission-title">
         <div><span>처음 한 번만 확인</span><strong id="seller-search-permission-title">공개 웹에서 AI 가격조사를 진행할까요?</strong><p>입력한 상품명은 설정된 AI에 전송되며, AI가 공개 웹 검색으로 찾은 상품명·가격·판매처·원문 링크만 저장합니다. 브라우저 로그인·쿠키·비밀번호·결제 정보·스크린샷에는 접근하지 않습니다.</p></div>
         <div><button type="button" onClick={() => setPermissionQuery("")}>취소</button><button type="button" className="seller-primary" onClick={allowAiSearch}>이 세션에서 허용하고 시작</button></div>
       </section>}
+      {naverSupervisionQuery && <section className="seller-search-permission seller-naver-supervision" role="dialog" aria-modal="true" aria-labelledby="seller-naver-supervision-title">
+        <div><span>네이버 사용자 감시 필요</span><strong id="seller-naver-supervision-title">네이버에 로그인되어 있나요?</strong><p>같은 Chrome의 로그인 상태로 네이버 검색 화면을 엽니다. AI는 화면에 보이는 상품명·가격·링크만 읽으며, 로그인·캡차·보안 확인이 나타나면 자동 진행을 멈추고 사용자에게 알립니다.</p><label><input type="checkbox" checked={naverLoginConfirmed} onChange={(event) => setNaverLoginConfirmed(event.target.checked)} /> 네이버 로그인 상태를 확인했고 감시형 AI 조사에 동의합니다.</label></div>
+        <div><button type="button" onClick={() => { setNaverSupervisionQuery(""); setNaverLoginConfirmed(false); }}>취소</button><button type="button" onClick={() => window.open("https://nid.naver.com/nidlogin.login", "_blank", "noopener,noreferrer")}>네이버 로그인 열기</button><button type="button" className="seller-primary" disabled={!naverLoginConfirmed} onClick={confirmNaverSupervision}>확인하고 AI 검색 시작</button></div>
+      </section>}
       {desktop && desktopScrollActive && desktopJob && <div className="seller-scroll-toolbar" role="status" aria-label="스크롤 수집 제어">
         <div className="seller-grid-states">{desktopJob.tasks.map(task => <span key={task.source} data-state={task.state}><i />{sellerSourceLabels[task.source]} <b>{desktopStateLabels[task.state] || task.state}</b></span>)}</div>
         <div><button type="button" onClick={() => void desktop.showScroll(desktopJob.id).catch(reason => setError(reason.message))}>스크롤 수집 화면 열기</button><button type="button" className="seller-primary" disabled={!desktopAllReady} onClick={() => void desktop.captureAll(desktopJob.id).then(value => setStatus(`${value.count}개 쇼핑몰의 현재 화면을 한 번에 수집하고 있습니다.`)).catch(reason => setError(reason.message))}>한 번에 수집 ({desktopReadyCount}/{desktopJob.tasks.length})</button></div>
       </div>}
-      {!searching && !permissionQuery && <div className="seller-supervised-note"><strong>검색 한 번으로 AI 자동 조사</strong><span>선택한 쇼핑몰의 공개 웹 정보를 동시에 확인하고 결과를 한 표로 합칩니다. 확인할 수 없는 쇼핑몰은 추정값 대신 이유를 표시합니다.</span></div>}
+      {!searching && !permissionQuery && !naverSupervisionQuery && <div className="seller-supervised-note"><strong>검색 한 번으로 AI 자동 조사</strong><span>다나와·에누리·쿠팡은 서버 AI가 조사합니다. 네이버를 선택하면 로그인 여부를 확인한 뒤 사용자가 지켜보는 화면에서 AI가 판독하며, 보안 확인이 나타날 때만 멈춥니다.</span></div>}
       {product && <div className="seller-draft-banner"><span>{!product.financials.ready && <NewBadge />}<strong>{product.title}</strong> · 내 판매상품 {product.financials.ready ? "등록됨" : "필수정보 입력 대기"}</span><button onClick={() => setView("products")}>내 판매상품 보기 →</button></div>}
       {searching && <div className="seller-search-progress" role="status"><i className="seller-spinner" /><div><strong>AI가 쇼핑몰 검색을 준비하고 있습니다</strong><p>{progress || "검색어와 선택 쇼핑몰을 확인하고 있습니다…"}</p></div></div>}
       {!busy && progress && <p className="seller-caption" role="status">{progress}</p>}
       {result?.run && <div className={searching ? "seller-results is-updating" : "seller-results"} aria-busy={searching}>
         <div className="seller-section-head"><h2>쇼핑몰별 최저가</h2><div className="seller-result-actions"><time>{time(result.run.created_at)} 기준{searching ? " · 이전 결과" : ""}</time></div></div>
         <div className="seller-market-summary">{groups.map((group) => <a href={`#offers-${group.source}`} key={group.source}><span>{sellerSourceLabels[group.source]}</span><strong>{group.lowest ? money(group.lowest.total) : "확인 필요"}</strong><small>{group.lowest ? `${group.lowest.mall} · ${shippingKnown(group.lowest) ? "배송비 포함" : "배송비 확인 필요"}` : "유효한 가격이 없습니다"}</small><PriceRange items={group.rows.filter((row) => !isReviewRequired(row))} /></a>)}</div>
-        <p className="seller-caption">{result.run.collection_mode === "openai_web_search" ? "AI가 공개 웹 검색의 출처 링크에서 확인한 최저가 후보입니다." : result.run.collection_mode === "server_managed_browser_agent" ? "AI가 현재 화면에서 판독하고 상세 확인한 최저가 후보입니다." : "이전에 저장된 가격 후보입니다."} 동일 모델·옵션과 배송 조건은 원본 링크에서 검토해 주세요.</p>
+        <p className="seller-caption">{result.run.collection_mode === "openai_web_search" ? "AI가 공개 웹 검색의 출처 링크에서 확인한 최저가 후보입니다." : result.run.collection_mode === "hybrid_ai_supervised" ? "네이버는 사용자가 지켜보는 로그인 화면에서 AI가 판독하고, 나머지는 공개 웹 출처에서 확인한 후보입니다." : result.run.collection_mode === "server_managed_browser_agent" ? "AI가 현재 화면에서 판독하고 상세 확인한 최저가 후보입니다." : "이전에 저장된 가격 후보입니다."} 동일 모델·옵션과 배송 조건은 원본 링크에서 검토해 주세요.</p>
         {result.warnings?.map((warning, index) => <p className="seller-review-note" key={index}>{warning}</p>)}
         <div className={desktop ? "seller-offer-grid" : ""}>{groups.map((group) => <OfferSection key={`${result.run?.id}-${group.source}`} source={group.source} rows={group.rows} watched={watched} disabled={locked || toggling} onToggle={toggle} compact={Boolean(desktop)} />)}</div>
       </div>}

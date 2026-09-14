@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = "0.5.0";
+  const VERSION = "0.5.1";
   const PING = "PRICESCAN_COLLECTOR_PING";
   const PONG = "PRICESCAN_COLLECTOR_PONG";
   const CAPTURED = "PRICESCAN_CURRENT_PAGE_CAPTURED";
@@ -24,7 +24,7 @@
       return;
     }
     if (message.type === 'PRICESCAN_APPROVAL_START' && hasRuntimeContext()) {
-      chrome.runtime.sendMessage({ type: message.type, query: message.query, productId: message.productId, sources: message.sources, sourceQueries: message.sourceQueries, token: message.token })
+      chrome.runtime.sendMessage({ type: message.type, query: message.query, productId: message.productId, sources: message.sources, sourceQueries: message.sourceQueries, token: message.token, mergeRunId: message.mergeRunId })
         .then(response => window.postMessage({ type: 'PRICESCAN_APPROVAL_STARTED', nonce: message.nonce, ...response }, window.location.origin))
         .catch(error => window.postMessage({ type: 'PRICESCAN_APPROVAL_STARTED', nonce: message.nonce, ok: false, error: String(error) }, window.location.origin));
       return;

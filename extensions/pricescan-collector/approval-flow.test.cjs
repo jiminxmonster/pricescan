@@ -58,7 +58,7 @@ test('one action per approval, all four sources, only selected details, final pu
   step(); assert.equal(publishes, 1, 'retrying import must not create another capture');
 });
 test('supervised AI mode selects the lowest loaded offer without claiming user-confirmed sorting', () => {
-  let job = make({ selectedSources: ['naver'] });
+  let job = make({ selectedSources: ['naver'], mergeRunId: 'ai-existing-run' });
   job = Flow.transition(job, input(job)).job;
   const expensive = { ...offer('naver', 1), price: 300000, shipping: 0, mall: '비싼몰' };
   const lowest = { ...offer('naver', 2), price: 180000, shipping: 2500, mall: '최저몰' };
@@ -70,11 +70,13 @@ test('supervised AI mode selects the lowest loaded offer without claiming user-c
   assert.match(job.warnings[0], /현재 화면에 로드된 후보/);
   job = Flow.transition(job, input(job, { selected: [0] })).job;
   assert.equal(job.stage, 'detail_review');
-  const finished = Flow.transition(job, input(job, { confirmDetail: true, review: lowest }), {
+  let finished = Flow.transition(job, input(job, { confirmDetail: true, review: lowest }), {
     pageUrl: job.pageUrls.naver, items: [lowest],
   });
   assert.equal(finished.job.stage, 'final');
   assert.equal(finished.job.items[0].total, 182500);
+  finished = Flow.transition(finished.job, input(finished.job));
+  assert.equal(finished.effect.publish.mergeRunId, 'ai-existing-run');
 });
 test('detail review keeps the approved search price when the detail page cannot expose it', () => {
   let job = make({ selectedSources: ['danawa'] });
@@ -174,12 +176,14 @@ test('legacy Naver-first entry point is disabled so PriceScan remains the single
   assert.equal(result, null);
   assert.deepEqual(calls, []);
 });
-test('web AI search is the single entry point, including Naver', () => {
+test('PriceScan search is the single entry point and Naver uses supervised AI', () => {
   const ui = fs.readFileSync(`${__dirname}/../../frontend/src/SellerWorkspace.tsx`, 'utf8');
   const app = fs.readFileSync(`${__dirname}/../../frontend/src/App.tsx`, 'utf8');
   assert.match(ui, /AI 최저가 찾기/);
   assert.match(ui, /pricescan:ai-search-allowed/);
-  assert.match(ui, /assistant\/search-plan/);
+  assert.match(ui, /supervised_sources: supervisedNaver/);
+  assert.match(ui, /requireApprovalCollector/);
+  assert.match(ui, /네이버 로그인 상태를 확인했고 감시형 AI 조사에 동의/);
   assert.doesNotMatch(ui, /네이버는 여기서 검색하지 않습니다/);
   assert.doesNotMatch(ui, /naverFirst/);
   assert.doesNotMatch(app, /window\.open\(naverShoppingSearchUrl/);

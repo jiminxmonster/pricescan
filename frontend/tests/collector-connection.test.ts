@@ -25,10 +25,12 @@ test("the normal app never offers developer installation or a blocking collector
   assert.equal(appSource.includes("가격수집기가 준비된 PriceScan 전용 Chrome입니다"), false, "a launch URL is not proof of a working collector");
 });
 
-test("AI price search uses the server web-search route without requiring a Chrome collector", () => {
-  assert.doesNotMatch(sellerSource, /requireApprovalCollector|startApprovalCollection/);
+test("AI price search uses supervised Chrome only for Naver and server search for the other stores", () => {
+  assert.match(sellerSource, /requireApprovalCollector/);
+  assert.match(sellerSource, /startApprovalCollection/);
   assert.match(sellerSource, /"\/assistant\/price-search"/);
-  assert.match(sellerSource, /별도 확장프로그램 없이 공개된 최저가 후보/);
+  assert.match(sellerSource, /supervised_sources: supervisedNaver \? \["naver"\] : \[\]/);
+  assert.match(sellerSource, /네이버 로그인 상태를 확인했고 감시형 AI 조사에 동의/);
   assert.doesNotMatch(sellerSource, /const automatic = await onSearch\(title\.trim\(\)\)/);
   assert.match(sellerSource, /legacy_parser_fallback/);
   assert.doesNotMatch(appSource, /if \(includesNaver\) \{[\s\S]{0,300}?return;/);

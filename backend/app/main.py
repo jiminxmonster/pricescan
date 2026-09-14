@@ -4674,9 +4674,7 @@ def save_desktop_price_results(payload: DesktopPriceResultsPayload) -> dict[str,
 
 @app.post("/price-search/extension-results", dependencies=[Depends(require_authenticated)])
 def save_extension_price_results(payload: ExtensionPriceResultsPayload) -> dict[str, Any]:
-    if payload.capture_id and payload.merge_run_id:
-        raise HTTPException(status_code=422, detail="승인 수집은 기존 실행에 병합할 수 없습니다.")
-    run_id = f"approval_{payload.capture_id}" if payload.capture_id else payload.merge_run_id.strip() or new_id("run")
+    run_id = payload.merge_run_id.strip() or (f"approval_{payload.capture_id}" if payload.capture_id else new_id("run"))
     fingerprint = hashlib.sha256(payload.model_dump_json().encode()).hexdigest() if payload.capture_id else ""
     items = extension_payload_products(payload)
     if not items:
@@ -4700,8 +4698,9 @@ def save_extension_price_results(payload: ExtensionPriceResultsPayload) -> dict[
                 metadata = json.loads(existing["filters_json"] or "{}")
             except (TypeError, json.JSONDecodeError):
                 metadata = {}
-        if payload.capture_id and existing:
-            if metadata.get("capture_fingerprint") != fingerprint:
+        capture_imports = metadata.get("capture_imports") if isinstance(metadata.get("capture_imports"), dict) else {}
+        if payload.capture_id and payload.capture_id in capture_imports:
+            if capture_imports[payload.capture_id] != fingerprint:
                 raise HTTPException(status_code=409, detail="같은 승인 ID로 다른 결과를 덮어쓸 수 없습니다.")
             result = get_run_payload(db, run_id)
             result["warnings"] = metadata.get("warnings", [])
@@ -4714,11 +4713,16 @@ def save_extension_price_results(payload: ExtensionPriceResultsPayload) -> dict[
         metadata.update(
             {
                 "sources": list(dict.fromkeys([*existing_sources, *selected_sources])),
-                "collection_mode": "server_managed_browser_agent" if payload.approval_scope == "server_managed_ai"
+                "collection_mode": "hybrid_ai_supervised" if payload.merge_run_id and payload.approval_scope == "server_managed_ai"
+                else "server_managed_browser_agent" if payload.approval_scope == "server_managed_ai"
                 else "chrome_extension_approval" if payload.capture_id
                 else "server_and_current_page" if existing else "chrome_extension_current_page",
                 "capture_fingerprint": fingerprint,
-                "warnings": payload.warnings,
+                "capture_imports": {**capture_imports, **({payload.capture_id: fingerprint} if payload.capture_id else {})},
+                "warnings": list(dict.fromkeys([
+                    *[warning for warning in metadata.get("warnings", []) if "감시형 AI 조사를 기다리고" not in warning],
+                    *payload.warnings,
+                ]))[:40],
                 "approval_scope": payload.approval_scope,
                 "page_urls": {
                     **(metadata.get("page_urls", {}) if isinstance(metadata.get("page_urls"), dict) else {}),
@@ -4786,7 +4790,7 @@ def save_extension_price_results(payload: ExtensionPriceResultsPayload) -> dict[
             ),
         )
         payload_out = get_run_payload(db, run_id)
-        payload_out["warnings"] = payload.warnings
+        payload_out["warnings"] = metadata["warnings"]
     return payload_out
 
 

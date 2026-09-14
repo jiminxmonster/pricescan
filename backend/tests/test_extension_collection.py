@@ -79,6 +79,21 @@ class ExtensionCollectionTest(unittest.TestCase):
             main.save_extension_price_results(payload)
         self.assertEqual(caught.exception.status_code, 409)
 
+    def test_supervised_capture_merges_once_into_existing_ai_run(self):
+        first = main.save_extension_price_results(self.payload("danawa", 910000))
+        payload = self.payload("naver", 900000, first["run"]["id"])
+        payload.capture_id = "df561a3a-f736-415d-9e5f-4890d1da7302"
+        payload.approval_scope = "server_managed_ai"
+        payload.warnings = ["사용자가 로그인된 화면을 확인했습니다."]
+
+        merged = main.save_extension_price_results(payload)
+        repeated = main.save_extension_price_results(payload)
+
+        self.assertEqual(merged["run"]["id"], first["run"]["id"])
+        self.assertEqual(merged["run"]["collection_mode"], "hybrid_ai_supervised")
+        self.assertEqual({item["source"] for item in repeated["items"]}, {"danawa", "naver"})
+        self.assertEqual(len(repeated["items"]), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
