@@ -127,9 +127,9 @@ https://pricescan.d2blue.com/pricescan/
 
 ## 배포 상품 분리
 
-- 웹 + Chrome Extension: 소스의 0.5.0 버전은 PriceScan 검색 한 번으로 네이버 → 다나와 → 에누리 → 쿠팡을 한 탭에서 차례로 확인하는 서버 관리형 AI 조사입니다. 확장 프로그램은 로그인된 화면의 보이는 텍스트와 공개 상품 링크만 읽고, 서버 AI가 상품·가격을 판독합니다. 쿠키·비밀번호·입력값·스크린샷은 전송하지 않으며 로그인·캡차·보안 확인·판독 불확실 상태에서만 사용자에게 넘깁니다. AI가 연결되지 않으면 기존 고정 파서로 조용히 대체하지 않습니다.
+- 웹 + Chrome Extension: 소스의 0.5.1 버전은 PriceScan 검색 한 번으로 다나와·에누리·쿠팡의 공개 웹 AI 조사와 네이버의 사용자 감시형 AI 조사를 하나의 결과에 합칩니다. 확장 프로그램은 로그인된 네이버 화면의 보이는 텍스트와 공개 상품 링크만 읽고, 서버 AI가 상품·가격을 판독합니다. 쿠키·비밀번호·입력값·스크린샷은 전송하지 않으며 로그인·캡차·보안 확인·판독 불확실 상태에서만 사용자에게 넘깁니다. AI가 연결되지 않으면 기존 고정 파서로 조용히 대체하지 않습니다.
 - Desktop: 기존 전용 브라우저 포함 macOS 앱은 호환용 별도 다운로드입니다. 기본 검색 흐름에는 필요하지 않으며, 외부 공개 전 Apple Developer ID 서명과 공증이 필요합니다.
-- Chrome Web Store: `scripts/build-pricescan-collector-webstore.sh`로 0.5.0 업로드 ZIP을 만들고 `extensions/pricescan-collector/chrome-web-store-checklist.md`를 확인합니다. ZIP 생성은 스토어 등록/게시 완료를 의미하지 않습니다.
+- Chrome Web Store: `scripts/build-pricescan-collector-webstore.sh`로 0.5.1 업로드 ZIP을 만들고 `extensions/pricescan-collector/chrome-web-store-checklist.md`를 확인합니다. ZIP 생성은 스토어 등록/게시 완료를 의미하지 않습니다.
 
 ### AI 감독형 수집 개발 검증
 
