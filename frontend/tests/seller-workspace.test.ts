@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  calculateSellerMargin, financeToDraft, groupSellerOffers, offerIdentity,
+  aiPriceSearchRequest, calculateSellerMargin, financeToDraft, groupSellerOffers, offerIdentity,
   importedSearchRequest, naverShoppingSearchUrl, parseFinance, safeOfferUrl, sourceNeedsAttention, type Finance, type SellerOffer,
 } from "../src/seller-workspace.ts";
 
@@ -79,4 +79,11 @@ test("a selected Naver failure becomes an actionable result state", () => {
   assert.equal(sourceNeedsAttention(result, "naver"), true);
   assert.equal(sourceNeedsAttention(result, "coupang"), false);
   assert.equal(naverShoppingSearchUrl("메타 퀘스트 3"), "https://search.shopping.naver.com/ns/search?query=%EB%A9%94%ED%83%80%20%ED%80%98%EC%8A%A4%ED%8A%B8%203");
+});
+test("desktop personal mode delegates only Naver to the supervised browser", () => {
+  assert.deepEqual(aiPriceSearchRequest("  라이젠 5 노트북  ", ["naver", "danawa", "coupang"], true), {
+    query: "라이젠 5 노트북", sources: ["naver", "danawa", "coupang"], supervised_sources: ["naver"],
+  });
+  assert.deepEqual(aiPriceSearchRequest("노트북", ["danawa"], true), { query: "노트북", sources: ["danawa"] });
+  assert.deepEqual(aiPriceSearchRequest("노트북", ["naver"], false), { query: "노트북", sources: ["naver"] });
 });

@@ -129,7 +129,7 @@ https://pricescan.d2blue.com/pricescan/
 
 - 웹: 기본 제품입니다. 네이버·다나와·에누리·쿠팡을 서버 AI의 공개 웹 검색으로 조사하므로 Chrome 확장 프로그램이나 쇼핑몰 로그인 세션이 필요하지 않습니다. 확인된 출처 URL만 결과로 채택하며 공개 정보가 부족하면 해당 쇼핑몰을 `확인 필요`로 남깁니다.
 - Chrome Extension: 이전 사용자 감시형 수집과 호환하기 위한 별도 패키지이며 기본 웹 검색 흐름에서는 사용하지 않습니다.
-- Desktop: 기존 전용 브라우저 포함 macOS 앱은 호환용 별도 다운로드입니다. 기본 검색 흐름에는 필요하지 않으며, 외부 공개 전 Apple Developer ID 서명과 공증이 필요합니다.
+- Desktop: 개인 테스트 모드에서는 운영 PriceScan 화면을 앱 안에 열고, 검색 한 번으로 네이버만 로그인된 전용 화면에서 AI 감독형으로 조사합니다. 로그인·캡차·보안 확인에서는 멈춰 사용자 처리를 기다리고, 다나와·에누리·쿠팡은 서버 AI가 병행 조사합니다. 운영 배포판 연결은 `PRICESCAN_APP_URL=https://pricescan.d2blue.com/pricescan/ npm start --prefix desktop`으로 실행합니다. 외부 공개 전 Apple Developer ID 서명과 공증이 필요합니다.
 - Chrome Web Store: `scripts/build-pricescan-collector-webstore.sh`로 0.5.3 업로드 ZIP을 만들고 `extensions/pricescan-collector/chrome-web-store-checklist.md`를 확인합니다. ZIP 생성은 스토어 등록/게시 완료를 의미하지 않습니다.
 
 ### AI 감독형 수집 개발 검증

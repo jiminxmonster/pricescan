@@ -1,0 +1,14 @@
+<!doctype html><html lang="ko"><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'"><title>PriceScan 수집 화면</title><link rel="stylesheet" href="controls.css"></head>
+<body><header id="scroll-surface">
+  <div class="market-state">
+    <div class="market-heading"><strong id="title">PriceScan 전용 브라우저</strong><span id="position">1 / 4</span></div>
+    <p id="message" role="status">준비 중</p><small id="address"></small>
+    <div class="scroll-guide"><span aria-hidden="true">↕</span><b>이 작업바에서 위·아래로 스크롤</b><div id="source-track" aria-label="쇼핑몰 진행 상태"></div></div>
+  </div>
+  <nav>
+    <button data-action="capture-all" class="capture">4곳 한 번에 수집</button>
+    <button data-action="back">검색결과로</button>
+    <button data-action="home">닫기</button><button data-action="minimize">내리기</button>
+    <button data-action="resume">이어서 진행</button><button data-action="cancel">중지</button>
+  </nav>
+</header><script src="controls.js"></script></body></html>
