@@ -185,6 +185,8 @@ test('PriceScan web search is extensionless while the collector remains compatib
   assert.doesNotMatch(ui, /requireApprovalCollector/);
   assert.doesNotMatch(ui, /네이버 로그인 상태를 확인했고 감시형 AI 조사에 동의/);
   assert.match(ui, /확장 프로그램 없이 네이버·다나와·에누리·쿠팡/);
+  assert.doesNotMatch(app, /checkCollectorConnection/);
+  assert.doesNotMatch(app, /showCollectorConnection/);
   assert.doesNotMatch(ui, /네이버는 여기서 검색하지 않습니다/);
   assert.doesNotMatch(ui, /naverFirst/);
   assert.doesNotMatch(app, /window\.open\(naverShoppingSearchUrl/);

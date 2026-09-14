@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import SellerWorkspace from "./SellerWorkspace";
-import { checkCollectorConnection, collectorConnectionCopy, launchCollectorBrowser, type BrowserLaunchStatus, type CollectorStatus } from "./collector-connection";
 import {
   canReuseCompanionSearch,
   isMonitoringRefreshDue,
@@ -1316,9 +1315,6 @@ export default function App() {
   const [showSourcePanel, setShowSourcePanel] = useState(false);
   const [searchResultView, setSearchResultView] = useState<"line" | "active" | "excluded">("line");
   const [showSearchExceptions, setShowSearchExceptions] = useState(false);
-  const [extensionStatus, setExtensionStatus] = useState<CollectorStatus>("unknown");
-  const [showCollectorConnection, setShowCollectorConnection] = useState(false);
-  const [browserLaunchStatus, setBrowserLaunchStatus] = useState<BrowserLaunchStatus>("idle");
   const [searchExceptionTerms, setSearchExceptionTerms] = useState<string[]>([]);
   const [searchExceptionDraft, setSearchExceptionDraft] = useState("");
   const [draftSourceItem, setDraftSourceItem] = useState<DraftSourceItem | null>(null);
@@ -1351,56 +1347,6 @@ export default function App() {
     asTelephone: "판매자 고객센터",
     asGuideContent: "구매처 고객센터로 문의해 주세요.",
   });
-
-  const checkPriceScanExtension = async (): Promise<boolean> => {
-    setExtensionStatus("checking");
-    try {
-      const result = await checkCollectorConnection(window, isLocalCollectorChrome ? 8000 : 3000);
-      setExtensionStatus(result.installed ? "installed" : "missing");
-      return result.installed;
-    } catch {
-      setExtensionStatus("missing");
-      return false;
-    }
-  };
-
-  const showBrowserConnection = () => {
-    setBrowserLaunchStatus("idle");
-    setShowCollectorConnection(true);
-    void checkPriceScanExtension();
-  };
-
-  const openDedicatedBrowser = async () => {
-    if (browserLaunchStatus === "opening") return;
-    setBrowserLaunchStatus("opening");
-    try {
-      await launchCollectorBrowser(localHelperBase, window.location.hostname);
-      setBrowserLaunchStatus("opened");
-    } catch {
-      setBrowserLaunchStatus("failed");
-    }
-  };
-
-  useEffect(() => {
-    let disposed = false;
-    const startupNotice = "내장 수집기에 자동 연결 중입니다…";
-    if (isLocalCollectorChrome) setNotice(startupNotice);
-    const check = () => {
-      void checkPriceScanExtension().then((installed) => {
-        if (disposed || !isLocalCollectorChrome) return;
-        setNotice((current) => current === startupNotice ? "" : current);
-        setShowCollectorConnection(!installed);
-      });
-    };
-    check();
-    // Returning from a shopping tab can also follow a collector update/reconnect.
-    const onFocus = () => { if (isLocalCollectorChrome) check(); };
-    window.addEventListener("focus", onFocus);
-    return () => {
-      disposed = true;
-      window.removeEventListener("focus", onFocus);
-    };
-  }, []);
 
   useEffect(() => {
     if (!token) return undefined;
@@ -2646,8 +2592,6 @@ export default function App() {
   };
   const minimalPriceItems = visibleResultsBySource(searchPayload.items, minimalPriceSources, 10);
   const minimalMonitoredProducts = preparedProducts.filter((item) => Boolean(item.monitoring_enabled));
-  const collectorCopy = collectorConnectionCopy(extensionStatus, isLocalCollectorChrome, browserLaunchStatus);
-
   return (
     <div className="app minimal-mode">
       {settings.showSidebar && (
@@ -2734,15 +2678,6 @@ export default function App() {
             ))}
           </nav>
           <div className="top-actions">
-            <button
-              className={`btn small chrome-extension-button ${extensionStatus === "installed" ? "connected" : ""} ${extensionStatus === "missing" ? "missing" : ""}`}
-              onClick={showBrowserConnection}
-              aria-label="수집기 연결 상태"
-              title="PriceScan 내장 수집기"
-            >
-              <span className="chrome-extension-icon" aria-hidden="true">🧩</span>
-              <span className="chrome-extension-label">{extensionStatus === "installed" ? "수집기 연결됨" : "가격수집기"}</span>
-            </button>
             {tab === "search" && (
               <div className="source-popover-wrap">
                 <button className={`btn small icon-btn ${showSourcePanel ? "active" : ""}`} onClick={() => setShowSourcePanel((current) => !current)}>
@@ -3113,23 +3048,6 @@ export default function App() {
               {logs.length === 0 && <div className="log-item"><span>작업 로그가 없습니다.</span><span>-</span></div>}
             </div>
           </section>
-        )}
-
-        {showCollectorConnection && (
-          <aside className={`collector-connection ${extensionStatus}`} aria-label="수집기 연결 상태"
-            onKeyDown={(event) => { if (event.key === "Escape") setShowCollectorConnection(false); }}>
-            <span className="collector-connection-dot" aria-hidden="true" />
-            <div className="collector-connection-copy" role="status">
-              <strong>{collectorCopy.title}</strong>
-              <p>{collectorCopy.detail}</p>
-            </div>
-            <button className="collector-connection-close" type="button" aria-label="연결 안내 닫기" onClick={() => setShowCollectorConnection(false)}>×</button>
-            <button className="collector-connection-action" type="button" disabled={collectorCopy.kind === "waiting"} onClick={() => {
-              if (collectorCopy.kind === "open") void openDedicatedBrowser();
-              else if (collectorCopy.kind === "reload") window.location.reload();
-              else if (collectorCopy.kind === "close") setShowCollectorConnection(false);
-            }}>{collectorCopy.action}</button>
-          </aside>
         )}
 
         {coupangCollector.open && (

@@ -34,6 +34,9 @@ test("AI price search uses the extensionless server flow for every selected stor
   assert.doesNotMatch(sellerSource, /네이버에 로그인되어 있나요/);
   assert.doesNotMatch(sellerSource, /로그인 상태<\/button>/);
   assert.match(sellerSource, /확장 프로그램 없이 네이버·다나와·에누리·쿠팡/);
+  assert.doesNotMatch(appSource, /checkCollectorConnection/);
+  assert.doesNotMatch(appSource, /collectorConnectionCopy/);
+  assert.doesNotMatch(appSource, /showCollectorConnection/);
   assert.doesNotMatch(sellerSource, /const automatic = await onSearch\(title\.trim\(\)\)/);
   assert.match(sellerSource, /legacy_parser_fallback/);
   assert.doesNotMatch(appSource, /if \(includesNaver\) \{[\s\S]{0,300}?return;/);
