@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   calculateSellerMargin, financeToDraft, groupSellerOffers, offerIdentity,
-  importedSearchRequest, parseFinance, safeOfferUrl, type Finance, type SellerOffer,
+  importedSearchRequest, naverShoppingSearchUrl, parseFinance, safeOfferUrl, sourceNeedsAttention, type Finance, type SellerOffer,
 } from "../src/seller-workspace.ts";
 
 const finance: Finance = { sale_price: 900000, cost_price: 750000, fee_rate: 8, shipping_cost: 3000 };
@@ -70,4 +70,13 @@ test("keeps an imported run pending until the active seller product is ready", (
     path: "/product-1/search-results",
     body: { run_id: "run-naver" },
   });
+});
+test("a selected Naver failure becomes an actionable result state", () => {
+  const result = {
+    run: { id: "run-1", query: "메타 퀘스트 3", status: "completed", created_at: "2026-09-15", sources: ["naver", "danawa"] },
+    items: [], source_status: { naver: { status: "needs_review", count: 0, message: "확인 불가" } },
+  };
+  assert.equal(sourceNeedsAttention(result, "naver"), true);
+  assert.equal(sourceNeedsAttention(result, "coupang"), false);
+  assert.equal(naverShoppingSearchUrl("메타 퀘스트 3"), "https://search.shopping.naver.com/ns/search?query=%EB%A9%94%ED%83%80%20%ED%80%98%EC%8A%A4%ED%8A%B8%203");
 });

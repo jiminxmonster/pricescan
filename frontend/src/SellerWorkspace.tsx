@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   calculateSellerMargin, financeLabels, financeToDraft, groupSellerOffers, isReviewRequired,
-  importedSearchRequest, offerIdentity, parseFinance, safeOfferUrl, sellerSourceLabels, sellerSources,
+  importedSearchRequest, naverShoppingSearchUrl, offerIdentity, parseFinance, safeOfferUrl, sellerSourceLabels, sellerSources, sourceNeedsAttention,
   type FinanceDraft, type SellerOffer, type SellerProduct, type WatchedOffer,
 } from "./seller-workspace";
 import "./seller-workspace.css";
@@ -72,6 +72,7 @@ export default function SellerWorkspace({ token, busy, progress, selectedSources
   });
   const [permissionQuery, setPermissionQuery] = useState("");
   const chatTab = useRef<HTMLButtonElement>(null);
+  const searchInput = useRef<HTMLInputElement>(null);
   const chatInput = useRef<HTMLTextAreaElement>(null);
   const chatHeading = useRef<HTMLHeadingElement>(null);
   const searching = busy || working;
@@ -82,6 +83,8 @@ export default function SellerWorkspace({ token, busy, progress, selectedSources
   dirtyRef.current = dirty;
   const watched = product?.monitored || [];
   const result = product?.search;
+  const naverNeedsAttention = sourceNeedsAttention(result, "naver");
+  const naverAttentionMessage = result?.source_status?.naver?.message || "네이버 공개 검색에서 확인 가능한 가격을 찾지 못했습니다.";
   const resultSources = sellerSources.filter((source) => result?.items.some((item) => item.source === source) || selectedSources.includes(source));
   const groups = groupSellerOffers(result?.items || [], resultSources);
 
@@ -298,7 +301,7 @@ export default function SellerWorkspace({ token, busy, progress, selectedSources
     {view === "search" ? <section className="seller-search-view seller-page" aria-label="상품 검색과 가격 검토">
       <div className="seller-search-intro"><span>AI PRICE SEARCH</span><h1>찾을 상품만 입력하세요</h1><p>확장 프로그램 없이 네이버·다나와·에누리·쿠팡의 공개 가격 정보를 AI가 한 번에 조사합니다.</p></div>
       <form className="seller-search-form" onSubmit={(event) => { event.preventDefault(); void search(); }}>
-        <input value={query} onChange={(event) => setQuery(event.target.value)} aria-label="상품명 또는 모델명" placeholder="예: 라이젠 5 노트북 512GB" maxLength={300} disabled={locked || Boolean(permissionQuery)} />
+        <input ref={searchInput} value={query} onChange={(event) => setQuery(event.target.value)} aria-label="상품명 또는 모델명" placeholder="예: 라이젠 5 노트북 512GB" maxLength={300} disabled={locked || Boolean(permissionQuery)} />
         <button disabled={locked || Boolean(permissionQuery) || !query.trim()}>{searching && <i className="seller-search-button-spinner" aria-hidden="true" />}{searching ? "AI 조사 중" : "AI 최저가 찾기"}</button>
       </form>
       <div className="seller-source-options" role="group" aria-label="가격 조사 쇼핑몰">
@@ -318,6 +321,10 @@ export default function SellerWorkspace({ token, busy, progress, selectedSources
       {!busy && progress && <p className="seller-caption" role="status">{progress}</p>}
       {result?.run && <div className={searching ? "seller-results is-updating" : "seller-results"} aria-busy={searching}>
         <div className="seller-section-head"><h2>쇼핑몰별 최저가</h2><div className="seller-result-actions"><time>{time(result.run.created_at)} 기준{searching ? " · 이전 결과" : ""}</time></div></div>
+        {naverNeedsAttention && <section className="seller-search-permission seller-source-attention" role="alert" aria-labelledby="seller-naver-attention-title">
+          <div><span>네이버 결과 확인 필요</span><strong id="seller-naver-attention-title">네이버 결과를 직접 확인할까요?</strong><p>{naverAttentionMessage}</p><p>확장 프로그램 없는 웹 모드에서는 로그인된 네이버 화면을 읽지 않습니다. 다른 쇼핑몰 결과는 그대로 유지됩니다.</p></div>
+          <div><button type="button" onClick={() => { searchInput.current?.focus(); searchInput.current?.select(); }}>검색어 구체화</button><button type="button" className="seller-primary" onClick={() => window.open(naverShoppingSearchUrl(result.run!.query), "_blank", "noopener,noreferrer")}>네이버에서 직접 확인</button></div>
+        </section>}
         <div className="seller-market-summary">{groups.map((group) => <a href={`#offers-${group.source}`} key={group.source}><span>{sellerSourceLabels[group.source]}</span><strong>{group.lowest ? money(group.lowest.total) : "확인 필요"}</strong><small>{group.lowest ? `${group.lowest.mall} · ${shippingKnown(group.lowest) ? "배송비 포함" : "배송비 확인 필요"}` : "유효한 가격이 없습니다"}</small><PriceRange items={group.rows.filter((row) => !isReviewRequired(row))} /></a>)}</div>
         <p className="seller-caption">{result.run.collection_mode === "openai_web_search" ? "AI가 공개 웹 검색의 출처 링크에서 확인한 최저가 후보입니다." : result.run.collection_mode === "hybrid_ai_supervised" ? "네이버는 사용자가 지켜보는 로그인 화면에서 AI가 판독하고, 나머지는 공개 웹 출처에서 확인한 후보입니다." : result.run.collection_mode === "server_managed_browser_agent" ? "AI가 현재 화면에서 판독하고 상세 확인한 최저가 후보입니다." : "이전에 저장된 가격 후보입니다."} 동일 모델·옵션과 배송 조건은 원본 링크에서 검토해 주세요.</p>
         {result.warnings?.map((warning, index) => <p className="seller-review-note" key={index}>{warning}</p>)}

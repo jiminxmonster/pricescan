@@ -10,8 +10,9 @@ export type SellerOffer = {
   benefit_summary?: string; benefit_condition?: string; detail_methods?: string[];
 };
 export type SellerSearchResult = {
-  run: { id: string; query: string; status: string; created_at: string; collection_mode?: string } | null;
+  run: { id: string; query: string; status: string; created_at: string; collection_mode?: string; sources?: string[] } | null;
   items: SellerOffer[]; warnings?: string[];
+  source_status?: Record<string, { status: string; count: number; message?: string }>;
 };
 export type WatchedOffer = SellerOffer & {
   offer_key: string; seen_in_latest: boolean;
@@ -50,6 +51,13 @@ export function safeOfferUrl(url: string): string | undefined {
     const parsed = new URL(url);
     return ["http:", "https:"].includes(parsed.protocol) && !parsed.username && !parsed.password ? parsed.href : undefined;
   } catch { return undefined; }
+}
+export function naverShoppingSearchUrl(query: string): string {
+  return `https://search.shopping.naver.com/ns/search?query=${encodeURIComponent(" ".concat(query).trim())}`;
+}
+export function sourceNeedsAttention(result: SellerSearchResult | null | undefined, source: string): boolean {
+  const status = result?.source_status?.[source];
+  return Boolean(result?.run?.sources?.includes(source) && status && status.status !== "completed");
 }
 export function offerIdentity(offer: Pick<SellerOffer, "source" | "url">): string {
   const url = safeOfferUrl(offer.url);

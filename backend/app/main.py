@@ -4125,6 +4125,7 @@ def get_run_payload(db: sqlite3.Connection, run_id: str) -> dict[str, Any]:
     return {
         "run": run_data,
         "items": items,
+        "source_status": metadata.get("source_status", {}) if isinstance(metadata, dict) else {},
         "summary": {
             "collected_count": len(rows),
             "lowest_count": len([item for item in items if item["status"] == "baseline"]),

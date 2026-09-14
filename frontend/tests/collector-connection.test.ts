@@ -37,6 +37,8 @@ test("AI price search uses the extensionless server flow for every selected stor
   assert.doesNotMatch(appSource, /checkCollectorConnection/);
   assert.doesNotMatch(appSource, /collectorConnectionCopy/);
   assert.doesNotMatch(appSource, /showCollectorConnection/);
+  assert.match(sellerSource, /네이버 결과를 직접 확인할까요\?/);
+  assert.match(sellerSource, /네이버에서 직접 확인/);
   assert.doesNotMatch(sellerSource, /const automatic = await onSearch\(title\.trim\(\)\)/);
   assert.match(sellerSource, /legacy_parser_fallback/);
   assert.doesNotMatch(appSource, /if \(includesNaver\) \{[\s\S]{0,300}?return;/);

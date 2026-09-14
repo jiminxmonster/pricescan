@@ -67,7 +67,11 @@ class SellerWorkspaceTest(unittest.TestCase):
             metadata = json.loads(run_data["filters_json"])
             run_data["sources"] = metadata.get("sources", [])
             run_data["collection_mode"] = metadata.get("collection_mode", "")
-            return {"run": run_data, "items": items, "summary": {"collected_count": len(items)}}
+            return {
+                "run": run_data, "items": items,
+                "source_status": metadata.get("source_status", {}),
+                "summary": {"collected_count": len(items)},
+            }
 
         def auth(authorization: str = Header(default="")):
             if authorization != "Bearer test-token":
@@ -305,6 +309,7 @@ class SellerWorkspaceTest(unittest.TestCase):
         product = result.json()
         self.assertEqual(product["search"]["run"]["collection_mode"], "openai_web_search")
         self.assertEqual(product["search"]["items"][0]["url"], product_url)
+        self.assertEqual(product["search"]["source_status"]["naver"]["status"], "completed")
         self.assertEqual(product["ai_source_status"]["naver"]["status"], "completed")
         request = remote.post.call_args.kwargs["json"]
         self.assertEqual(remote.post.call_args.args[0], "https://api.openai.com/v1/responses")
