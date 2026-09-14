@@ -325,7 +325,7 @@ export default function SellerWorkspace({ token, busy, progress, selectedSources
       </div>)}
     </section>}
     {view === "search" ? <section className="seller-search-view seller-page" aria-label="상품 검색과 가격 검토">
-      <div className="seller-search-intro"><span>AI PRICE SEARCH</span><h1>찾을 상품만 입력하세요</h1><p>별도 확장프로그램 없이 공개된 최저가 후보를 한 번에 정리합니다.</p></div>
+      <div className="seller-search-intro"><span>AI PRICE SEARCH</span><h1>찾을 상품만 입력하세요</h1><p>다나와·에누리·쿠팡은 공개 웹 AI로, 네이버는 로그인된 브라우저의 감시형 AI로 조사합니다.</p></div>
       <form className="seller-search-form" onSubmit={(event) => { event.preventDefault(); void search(); }}>
         <input value={query} onChange={(event) => setQuery(event.target.value)} aria-label="상품명 또는 모델명" placeholder="예: 라이젠 5 노트북 512GB" maxLength={300} disabled={locked || Boolean(permissionQuery || naverSupervisionQuery)} />
         <button disabled={locked || Boolean(permissionQuery || naverSupervisionQuery) || !query.trim()}>{searching && <i className="seller-search-button-spinner" aria-hidden="true" />}{searching ? "AI 조사 중" : "AI 최저가 찾기"}</button>
