@@ -176,14 +176,15 @@ test('legacy Naver-first entry point is disabled so PriceScan remains the single
   assert.equal(result, null);
   assert.deepEqual(calls, []);
 });
-test('PriceScan search is the single entry point and Naver uses supervised AI', () => {
+test('PriceScan web search is extensionless while the collector remains compatibility-only', () => {
   const ui = fs.readFileSync(`${__dirname}/../../frontend/src/SellerWorkspace.tsx`, 'utf8');
   const app = fs.readFileSync(`${__dirname}/../../frontend/src/App.tsx`, 'utf8');
   assert.match(ui, /AI 최저가 찾기/);
   assert.match(ui, /pricescan:ai-search-allowed/);
-  assert.match(ui, /supervised_sources: supervisedNaver/);
-  assert.match(ui, /requireApprovalCollector/);
-  assert.match(ui, /네이버 로그인 상태를 확인했고 감시형 AI 조사에 동의/);
+  assert.doesNotMatch(ui, /supervised_sources/);
+  assert.doesNotMatch(ui, /requireApprovalCollector/);
+  assert.doesNotMatch(ui, /네이버 로그인 상태를 확인했고 감시형 AI 조사에 동의/);
+  assert.match(ui, /확장 프로그램 없이 네이버·다나와·에누리·쿠팡/);
   assert.doesNotMatch(ui, /네이버는 여기서 검색하지 않습니다/);
   assert.doesNotMatch(ui, /naverFirst/);
   assert.doesNotMatch(app, /window\.open\(naverShoppingSearchUrl/);

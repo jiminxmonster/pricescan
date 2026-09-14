@@ -217,7 +217,7 @@ def create_seller_router(connect: Callable, require_authenticated: Callable, get
 
     @router.post("/assistant/price-search")
     async def assistant_price_search(payload: AiPriceSearchRequest, current_user: dict[str, Any] | None = Depends(require_authenticated)):
-        """Run public AI search while reserving Naver for a supervised browser pass."""
+        """Run one public AI web search for every selected shopping source."""
         title = " ".join(payload.query.split())
         selected_sources = list(dict.fromkeys(payload.sources))
         supervised_sources = list(dict.fromkeys(payload.supervised_sources))

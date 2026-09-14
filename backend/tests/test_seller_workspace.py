@@ -279,6 +279,38 @@ class SellerWorkspaceTest(unittest.TestCase):
         self.assertFalse(request["store"])
         self.assertNotIn("test-secret", json.dumps(request, ensure_ascii=False))
 
+    def test_naver_uses_public_web_search_without_an_extension(self):
+        product_url = "https://search.shopping.naver.com/catalog/12345"
+        model_output = {"items": [{
+            "name": "아이패드 프로 12.9", "mall": "테스트몰", "price": 1299000,
+            "shipping": 0, "url": product_url, "evidence": "1,299,000원 무료배송",
+        }], "note": ""}
+        with patch.dict(os.environ, {
+            "PRICESCAN_AI_API_KEY": "test-secret", "PRICESCAN_AI_MODEL": "gpt-5.6-luna",
+            "PRICESCAN_AI_PROVIDER": "OpenAI", "PRICESCAN_AI_BASE_URL": "https://api.openai.com/v1",
+        }), patch("app.collection_agent.httpx.AsyncClient") as client_class:
+            remote = AsyncMock()
+            client_class.return_value.__aenter__.return_value = remote
+            response = unittest.mock.Mock(status_code=200)
+            response.json.return_value = {"output": [
+                {"type": "web_search_call", "action": {"sources": [{"type": "url", "url": product_url}]}},
+                {"type": "message", "content": [{"type": "output_text", "text": json.dumps(model_output, ensure_ascii=False)}]},
+            ]}
+            remote.post.return_value = response
+            result = self.client.post(f"{self.root}/assistant/price-search", json={
+                "query": "아이패드 프로 12.9", "sources": ["naver"],
+            })
+
+        self.assertEqual(result.status_code, 200, result.text)
+        product = result.json()
+        self.assertEqual(product["search"]["run"]["collection_mode"], "openai_web_search")
+        self.assertEqual(product["search"]["items"][0]["url"], product_url)
+        self.assertEqual(product["ai_source_status"]["naver"]["status"], "completed")
+        request = remote.post.call_args.kwargs["json"]
+        self.assertEqual(remote.post.call_args.args[0], "https://api.openai.com/v1/responses")
+        self.assertEqual(request["tools"][0]["type"], "web_search")
+        self.assertIn("search.shopping.naver.com", request["tools"][0]["filters"]["allowed_domains"])
+
     def test_ai_price_search_rejects_model_url_that_web_search_did_not_return(self):
         invented = "https://www.coupang.com/vp/products/999"
         model_output = {"items": [{

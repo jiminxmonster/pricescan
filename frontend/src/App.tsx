@@ -2681,7 +2681,6 @@ export default function App() {
             settingsLabel={authProfile?.role === "superadmin" ? "슈퍼관리자로 돌아가기" : "관리자설정"}
             onSearchReserved={() => void request<AuthProfile>("/auth/me", token).then(setAuthProfile)}
             onToggleSource={toggleSearchSource}
-            onBrowser={showBrowserConnection}
             onSettings={() => authProfile?.role === "superadmin" ? setSuperAdminHome(false) : setTab((current) => current === "settings" ? "search" : "settings")}
             onLogout={logout}
           />
