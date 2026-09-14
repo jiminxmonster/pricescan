@@ -1,6 +1,6 @@
 # Chrome Web Store 등록 체크리스트
 
-- 업로드 ZIP: `scripts/build-pricescan-collector-webstore.sh` 출력의 `pricescan-collector-0.5.2-webstore.zip` (재빌드는 시각 접미사)
+- 업로드 ZIP: `scripts/build-pricescan-collector-webstore.sh` 출력의 `pricescan-collector-0.5.3-webstore.zip` (재빌드는 시각 접미사)
 - 확장 프로그램 이름: `PriceScan - AI 감독형 가격 조사`
 - 카테고리: `쇼핑`
 - 언어: `한국어`
@@ -25,7 +25,7 @@
 3. ZIP 업로드 후 스토어 설명, 아이콘, 스크린샷, 권한 사유, 데이터 사용 선언을 입력합니다.
 4. 초안 내용을 최종 검토한 뒤 게시 심사에 제출합니다.
 
-## 0.5.2 출시 전 검증 (미완료 항목)
+## 0.5.3 출시 전 검증 (미완료 항목)
 
 - 각 쇼핑몰의 실제 검색/상품 페이지 DOM에서 후보와 상세 가격 인식 검증
 - CleanFile 외장 테스트 프로필의 ChatGPT 연결을 확인한 뒤 사이드 패널 고정/탭 이동 검증

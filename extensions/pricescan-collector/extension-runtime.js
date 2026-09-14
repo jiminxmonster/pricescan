@@ -1,5 +1,5 @@
 if (typeof importScripts === 'function') importScripts('approval-flow.js', 'approval-runtime.js');
-const VERSION = "0.5.2";
+const VERSION = "0.5.3";
 const PENDING_CAPTURE_KEY = "pricescanPendingCapture";
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -10,6 +10,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message || typeof message !== "object") return false;
   const authority = globalThis.PriceScanApprovalRuntime;
   if (authority && !authority.internal(_sender) && !authority.fromApp(_sender)) return false;
+
+  if (message.type === "PRICESCAN_RUNTIME_PING") {
+    sendResponse({ ok: true, version: VERSION, approvalFlow: true });
+    return false;
+  }
 
   if (message.type === "PRICESCAN_GET_PENDING_CAPTURE") {
     chrome.storage.local.get(PENDING_CAPTURE_KEY)

@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 import { checkCollectorConnection, collectorConnectionCopy, launchCollectorBrowser } from "../src/collector-connection.ts";
+import { compatibleApprovalCollector } from "../src/approval-collector.ts";
 
 const appSource = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
 const sellerSource = readFileSync(new URL("../src/SellerWorkspace.tsx", import.meta.url), "utf8");
@@ -38,7 +39,7 @@ test("AI price search uses supervised Chrome only for Naver and server search fo
   assert.doesNotMatch(appSource, /priceSources\.filter\(\(source\) => source !== ["']naver["']\)/);
 });
 
-function contentBridge(runtimeId: string | undefined) {
+function contentBridge(runtimeId: string | undefined, runtimeReady = true) {
   let receive: (event: unknown) => void = () => {};
   const posted: Array<{type: string; nonce: string}> = [];
   const window = {
@@ -46,26 +47,50 @@ function contentBridge(runtimeId: string | undefined) {
     addEventListener: (_: string, listener: typeof receive) => { receive = listener; },
     postMessage: (message: typeof posted[number]) => posted.push(message),
   };
-  const chrome = { runtime: { id: runtimeId, onMessage: { addListener() {} } } };
+  const chrome = { runtime: {
+    id: runtimeId,
+    onMessage: { addListener() {} },
+    sendMessage(message: {type: string}, callback?: (value: unknown) => void) {
+      if (callback) { callback(null); return undefined; }
+      if (message.type === "PRICESCAN_RUNTIME_PING") return runtimeReady
+        ? Promise.resolve({ ok: true, version: "0.5.3" }) : Promise.reject(new Error("worker unavailable"));
+      return Promise.resolve({ ok: true });
+    },
+  } };
   const document = { hidden: false, addEventListener() {} };
   vm.runInNewContext(bridgeSource, { window, chrome, document });
   return { window, chrome, posted, ping() { receive({source: window, origin: window.location.origin, data: {type: "PRICESCAN_COLLECTOR_PING", nonce: "test-nonce"}}); } };
 }
 
-test("an invalidated collector must not announce that it is connected", () => {
+test("an invalidated collector must not announce that it is connected", async () => {
   const bridge = contentBridge("live-extension");
   bridge.ping();
+  await Promise.resolve();
   assert.equal(bridge.posted.length, 1);
   bridge.chrome.runtime.id = undefined;
   bridge.ping();
   assert.equal(bridge.posted.length, 1, "old content scripts must stay silent after extension reload");
 });
 
-test("a working built-in collector answers the page handshake", () => {
+test("a working built-in collector answers only after its runtime is ready", async () => {
   const bridge = contentBridge("live-extension");
   bridge.ping();
+  await Promise.resolve();
   assert.equal(bridge.posted[0].type, "PRICESCAN_COLLECTOR_PONG");
   assert.equal(bridge.posted[0].nonce, "test-nonce");
+  assert.equal((bridge.posted[0] as {runtimeReady?: boolean}).runtimeReady, true);
+});
+
+test("a missing background runtime cannot pass the approval collector gate", async () => {
+  const bridge = contentBridge("live-extension", false);
+  bridge.ping();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal((bridge.posted[0] as {runtimeReady?: boolean}).runtimeReady, false);
+  assert.equal(compatibleApprovalCollector({ approvalFlow: true, runtimeReady: false, version: "0.5.3" }), false);
+  assert.equal(compatibleApprovalCollector({ approvalFlow: true, runtimeReady: true, version: "0.5.2" }), false);
+  assert.equal(compatibleApprovalCollector({ approvalFlow: true, runtimeReady: true, version: "0.5.3" }), true);
+  assert.equal(compatibleApprovalCollector({ approvalFlow: true, runtimeReady: true, version: "0.6.0" }), true);
 });
 
 class FakePage {

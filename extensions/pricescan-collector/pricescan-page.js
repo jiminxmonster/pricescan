@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = "0.5.2";
+  const VERSION = "0.5.3";
   const PING = "PRICESCAN_COLLECTOR_PING";
   const PONG = "PRICESCAN_COLLECTOR_PONG";
   const CAPTURED = "PRICESCAN_CURRENT_PAGE_CAPTURED";
@@ -19,7 +19,14 @@
     const message = event.data;
     if (!message || typeof message !== "object") return;
     if (message.type === PING && hasRuntimeContext()) {
-      window.postMessage({ type: PONG, nonce: message.nonce, version: VERSION, approvalFlow: true }, window.location.origin);
+      chrome.runtime.sendMessage({ type: "PRICESCAN_RUNTIME_PING" })
+        .then(response => window.postMessage({
+          type: PONG, nonce: message.nonce, version: VERSION,
+          approvalFlow: true, runtimeReady: Boolean(response?.ok && response?.version === VERSION),
+        }, window.location.origin))
+        .catch(() => window.postMessage({
+          type: PONG, nonce: message.nonce, version: VERSION, approvalFlow: true, runtimeReady: false,
+        }, window.location.origin));
       requestPendingCapture();
       return;
     }
