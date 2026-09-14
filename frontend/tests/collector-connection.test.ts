@@ -26,11 +26,13 @@ test("the normal app never offers developer installation or a blocking collector
   assert.equal(appSource.includes("가격수집기가 준비된 PriceScan 전용 Chrome입니다"), false, "a launch URL is not proof of a working collector");
 });
 
-test("AI price search uses the extensionless server flow for every selected store", () => {
+test("AI price search stays extensionless and uses supervised Naver only inside the desktop app", () => {
   assert.doesNotMatch(sellerSource, /requireApprovalCollector/);
   assert.doesNotMatch(sellerSource, /startApprovalCollection/);
   assert.match(sellerSource, /"\/assistant\/price-search"/);
-  assert.doesNotMatch(sellerSource, /supervised_sources/);
+  assert.match(sellerSource, /aiPriceSearchRequest\(title, selectedSources, supervisedNaver\)/);
+  assert.match(sellerSource, /desktop!\.start\(/);
+  assert.match(sellerSource, /네이버 AI 자율주행을 시작할까요\?/);
   assert.doesNotMatch(sellerSource, /네이버에 로그인되어 있나요/);
   assert.doesNotMatch(sellerSource, /로그인 상태<\/button>/);
   assert.match(sellerSource, /확장 프로그램 없이 네이버·다나와·에누리·쿠팡/);
