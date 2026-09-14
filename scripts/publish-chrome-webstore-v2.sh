@@ -18,33 +18,36 @@ publish_url="https://chromewebstore.googleapis.com/v2/${item_name}:publish"
 auth_header="Authorization: Bearer ${CHROME_WEBSTORE_ACCESS_TOKEN}"
 
 echo "Uploading ${zip_path}"
-curl --fail-with-body --silent --show-error \
+upload_json="$(curl --fail-with-body --silent --show-error \
   -H "$auth_header" \
   -H "Content-Type: application/zip" \
   -X POST \
   -T "$zip_path" \
-  "$upload_url"
-echo
+  "$upload_url")"
+printf '%s\n' "$upload_json"
+upload_state="$(printf '%s' "$upload_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("uploadState", ""))')"
 
-for attempt in {1..30}; do
-  status_json="$(curl --fail-with-body --silent --show-error -H "$auth_header" "$status_url")"
-  upload_state="$(printf '%s' "$status_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("uploadState", ""))')"
-  echo "Upload state: ${upload_state:-unknown}"
+if [[ "$upload_state" != "SUCCEEDED" && "$upload_state" != "UPLOAD_SUCCEEDED" ]]; then
+  for attempt in {1..30}; do
+    status_json="$(curl --fail-with-body --silent --show-error -H "$auth_header" "$status_url")"
+    upload_state="$(printf '%s' "$status_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("uploadState", ""))')"
+    echo "Upload state: ${upload_state:-unknown}"
 
-  if [[ "$upload_state" == "UPLOAD_SUCCEEDED" || "$upload_state" == "SUCCEEDED" ]]; then
-    break
-  fi
-  if [[ "$upload_state" == *"FAILED" || "$upload_state" == *"ERROR" ]]; then
-    printf '%s\n' "$status_json" >&2
-    exit 1
-  fi
-  if [[ "$attempt" -eq 30 ]]; then
-    printf '%s\n' "$status_json" >&2
-    echo "Timed out waiting for Chrome Web Store upload processing." >&2
-    exit 1
-  fi
-  sleep 10
-done
+    if [[ "$upload_state" == "UPLOAD_SUCCEEDED" || "$upload_state" == "SUCCEEDED" ]]; then
+      break
+    fi
+    if [[ "$upload_state" == *"FAILED" || "$upload_state" == *"ERROR" ]]; then
+      printf '%s\n' "$status_json" >&2
+      exit 1
+    fi
+    if [[ "$attempt" -eq 30 ]]; then
+      printf '%s\n' "$status_json" >&2
+      echo "Timed out waiting for Chrome Web Store upload processing." >&2
+      exit 1
+    fi
+    sleep 10
+  done
+fi
 
 echo "Submitting the uploaded version for review"
 curl --fail-with-body --silent --show-error \

@@ -1,5 +1,5 @@
 if (typeof importScripts === 'function') importScripts('approval-flow.js', 'approval-runtime.js');
-const VERSION = "0.5.1";
+const VERSION = "0.5.2";
 const PENDING_CAPTURE_KEY = "pricescanPendingCapture";
 
 chrome.runtime.onInstalled.addListener(() => {

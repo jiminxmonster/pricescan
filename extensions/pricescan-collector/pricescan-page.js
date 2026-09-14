@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = "0.5.1";
+  const VERSION = "0.5.2";
   const PING = "PRICESCAN_COLLECTOR_PING";
   const PONG = "PRICESCAN_COLLECTOR_PONG";
   const CAPTURED = "PRICESCAN_CURRENT_PAGE_CAPTURED";

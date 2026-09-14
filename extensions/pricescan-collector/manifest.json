@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "PriceScan Collector",
   "description": "검색 한 번으로 사전 로그인된 네 쇼핑몰의 보이는 최저가 후보를 AI 감독형 흐름으로 조사합니다.",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "minimum_chrome_version": "116",
   "side_panel": { "default_path": "approval-panel.html" },
   "icons": {
