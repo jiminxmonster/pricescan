@@ -97,8 +97,8 @@ function findVisibleNaverLowestSort() {
     if (!label.startsWith('낮은가격순')) continue;
     const rect = element.getBoundingClientRect();
     const style = getComputedStyle(element);
-    if (!rect || rect.width < 40 || rect.height < 20 || rect.bottom <= 0 || rect.right <= 0
-      || rect.top >= innerHeight || rect.left >= innerWidth || style.visibility === 'hidden'
+    if (!rect || rect.width < 40 || rect.height < 20 || rect.right <= 0 || rect.left >= innerWidth
+      || style.visibility === 'hidden'
       || style.display === 'none' || Number(style.opacity || 1) === 0) continue;
     const className = String(element.className?.baseVal || element.className || '');
     const selected = label.includes('선택됨') || element.getAttribute('aria-selected') === 'true'
@@ -106,6 +106,8 @@ function findVisibleNaverLowestSort() {
       || element.getAttribute('data-selected') === 'true'
       || /(^|[_\s-])(active|selected|on)([_\s-]|$)/i.test(className);
     if (selected) return { selected: true };
+    if (rect.bottom <= 0) return { selected: false, scroll: 'up' };
+    if (rect.top >= innerHeight) return { selected: false, scroll: 'down' };
     const x = Math.max(0, Math.min(innerWidth - 1, rect.left + rect.width / 2));
     const y = Math.max(0, Math.min(innerHeight - 1, rect.top + rect.height / 2));
     if (Number.isFinite(x) && Number.isFinite(y)) return { selected: false, x, y, width: rect.width, height: rect.height };

@@ -29,4 +29,12 @@ async function submitVisibleSearch(webContents, target, value, wait = delay) {
   webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Enter' });
 }
 
-module.exports = { clickVisibleTarget, submitVisibleSearch };
+async function scrollVisiblePage(webContents, direction, wait = delay) {
+  const keyCode = direction === 'up' ? 'PageUp' : direction === 'down' ? 'PageDown' : '';
+  if (!keyCode) throw new Error('화면 스크롤 방향이 올바르지 않습니다.');
+  webContents.sendInputEvent({ type: 'keyDown', keyCode });
+  webContents.sendInputEvent({ type: 'keyUp', keyCode });
+  await wait(350);
+}
+
+module.exports = { clickVisibleTarget, submitVisibleSearch, scrollVisiblePage };

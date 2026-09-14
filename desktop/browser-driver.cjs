@@ -1,7 +1,7 @@
 const path = require('node:path');
 const { WebContentsView, session } = require('electron');
 const { isShopUrl, findVisibleSearchInput, findVisibleNaverLowestSort, inspectShoppingPage } = require('./security.cjs');
-const { clickVisibleTarget, submitVisibleSearch } = require('./native-search.cjs');
+const { clickVisibleTarget, submitVisibleSearch, scrollVisiblePage } = require('./native-search.cjs');
 const { EmbeddedLayout } = require('./embedded-layout.cjs');
 const parser = require('./parser.cjs');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -52,11 +52,13 @@ function captureVisibleObservation(source, query) {
   };
 }
 
-function decideNaverSort(sortTarget, { manual = false, clickAttempted = false, timedOut = false } = {}) {
+function decideNaverSort(sortTarget, { manual = false, clickAttempted = false, scrollCount = 0, timedOut = false } = {}) {
   if (sortTarget?.selected) return 'done';
   if (manual) return 'wait_for_user';
-  if (sortTarget && !clickAttempted) return 'click';
+  if (sortTarget?.scroll && !clickAttempted && scrollCount < 8 && !timedOut) return `scroll_${sortTarget.scroll}`;
+  if (sortTarget && !sortTarget.scroll && !clickAttempted) return 'click';
   if (clickAttempted || timedOut) return 'handoff';
+  if (sortTarget?.scroll && scrollCount >= 8) return 'handoff';
   return 'wait';
 }
 
@@ -260,6 +262,8 @@ class BrowserDriver {
       entry.naverSearchSubmitted = false;
       entry.naverLowestSortApplied = false;
       entry.naverLowestSortClickAttempted = false;
+      entry.naverLowestSortScrollCount = 0;
+      entry.naverLowestSortStartedAt = 0;
       const definition = parser.SOURCE_DEFINITIONS[source];
       const url = source === 'naver' ? definition.landingUrl : definition.searchUrl(job.query, job.sortMode);
       if (!isShopUrl(source, url)) throw new Error('허용되지 않은 검색 주소입니다.');
@@ -287,6 +291,7 @@ class BrowserDriver {
           progress('loading', '보이는 네이버 쇼핑 검색창에 검색어를 입력하고 있습니다.');
           await submitVisibleSearch(entry.view.webContents, target, job.query);
           entry.naverSearchSubmitted = true;
+          entry.naverLowestSortStartedAt = 0;
           stableSince = 0; readyCount = 0; lastHumanState = ''; lastMessage = '';
           await delay(1200); continue;
         }
@@ -302,11 +307,13 @@ class BrowserDriver {
       }
       if (state !== 'ready') { if (!lastHumanState && Date.now() - started > 45000) throw new Error('검색 화면 로딩 시간이 초과되었습니다.'); await delay(1500); continue; }
       if (source === 'naver' && job.sortMode === 'lowest' && !entry.naverLowestSortApplied) {
+        if (!entry.naverLowestSortStartedAt) entry.naverLowestSortStartedAt = Date.now();
         const sortTarget = await this.evaluate(entry, findVisibleNaverLowestSort, []);
         const sortAction = decideNaverSort(sortTarget, {
           manual: job.captureMode === 'manual_scroll',
           clickAttempted: entry.naverLowestSortClickAttempted,
-          timedOut: Date.now() - started > 45000,
+          scrollCount: entry.naverLowestSortScrollCount,
+          timedOut: Date.now() - entry.naverLowestSortStartedAt > 60000,
         });
         if (sortAction === 'done') {
           entry.naverLowestSortApplied = true;
@@ -320,6 +327,13 @@ class BrowserDriver {
           entry.naverLowestSortClickAttempted = true;
           stableSince = 0; readyCount = 0; lastHumanState = ''; lastMessage = '';
           await delay(1200); continue;
+        } else if (sortAction === 'scroll_down' || sortAction === 'scroll_up') {
+          const direction = sortAction === 'scroll_up' ? 'up' : 'down';
+          progress('loading', '네이버 낮은 가격순 버튼이 보이도록 결과 화면을 이동하고 있습니다.');
+          await scrollVisiblePage(entry.view.webContents, direction);
+          entry.naverLowestSortScrollCount += 1;
+          stableSince = 0; readyCount = 0; lastHumanState = ''; lastMessage = '';
+          await delay(700); continue;
         } else if (sortAction === 'handoff') {
           progress('needs_page', '낮은 가격순 버튼을 찾지 못했습니다. 화면에서 한 번 선택한 뒤 이어서 진행해 주세요.');
           return { paused: true };
