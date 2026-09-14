@@ -2,7 +2,7 @@ export type DesktopTask = { source: string; state: string; message: string; coun
 export type DesktopJob = { id: string; query: string; productId: string; captureMode?: string; active: boolean; createdAt: number; updatedAt: number; tasks: DesktopTask[] };
 export type DesktopBridge = {
   version: string;
-  start: (payload: { query: string; productId: string; token: string; sources: string[]; sortMode: string; captureMode?: 'automatic' | 'ai_supervised' | 'manual_scroll' }) => Promise<{ id: string }>;
+  start: (payload: { query: string; productId: string; mergeRunId?: string; token: string; sources: string[]; sortMode: string; captureMode?: 'automatic' | 'ai_supervised' | 'manual_scroll' }) => Promise<{ id: string }>;
   list: () => Promise<DesktopJob[]>;
   authorize: (token: string) => Promise<void>;
   logout: () => Promise<void>;

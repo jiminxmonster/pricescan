@@ -238,8 +238,10 @@ export default function SellerWorkspace({ token, busy, progress, selectedSources
       acceptProduct(searched, true);
       setView("search");
       if (supervisedNaver) {
+        const mergeRunId = searched.search?.run?.id;
+        if (!mergeRunId) throw new Error("네이버 결과를 합칠 AI 검색 실행을 찾지 못했습니다.");
         await desktop!.start({
-          query: title.trim(), productId: searched.id, token, sources: ["naver"], sortMode: "lowest", captureMode: "ai_supervised",
+          query: title.trim(), productId: searched.id, mergeRunId, token, sources: ["naver"], sortMode: "lowest", captureMode: "ai_supervised",
         });
       }
       const count = searched.search?.items.length || 0;

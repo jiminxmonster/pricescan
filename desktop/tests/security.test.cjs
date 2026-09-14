@@ -4,7 +4,7 @@ const vm = require('node:vm');
 const { isShopUrl, isAppUrl, normalizeAppUrl, findVisibleSearchInput, findVisibleNaverLowestSort, inspectShoppingPage, validateStart } = require('../security.cjs');
 const { clickVisibleTarget, submitVisibleSearch } = require('../native-search.cjs');
 const { captureVisibleShoppingProducts } = require('../parser.cjs');
-const { captureVisibleObservation } = require('../browser-driver.cjs');
+const { captureVisibleObservation, decideNaverSort } = require('../browser-driver.cjs');
 test('shopping navigation is HTTPS and exact-domain scoped', () => {
   for (const url of ['javascript:alert(1)', 'file:///etc/passwd', 'http://naver.com', 'https://naver.com.attacker.test', 'https://user:pass@naver.com', 'https://localhost:8400', 'https://naver.com:8443']) assert.equal(isShopUrl('naver', url), false, url);
   assert.equal(isShopUrl('naver', 'https://nid.naver.com/nidlogin.login'), true);
@@ -47,7 +47,10 @@ test('start input cannot carry arbitrary URLs or shell commands into stored jobs
   assert.equal(input.apiBaseUrl, undefined); assert.equal(input.command, undefined); assert.equal(input.token, undefined); assert.equal(input.cookies, undefined);
 });
 test('manual scroll collection is an explicit validated mode with legacy grid compatibility', () => {
-  assert.equal(validateStart({ query: '노트북', productId: 'p1', token: 'secret', sources: ['naver'], captureMode: 'ai_supervised' }).captureMode, 'ai_supervised');
+  const ai = validateStart({ query: '노트북', productId: 'p1', mergeRunId: 'ai_123', token: 'secret', sources: ['naver'], captureMode: 'ai_supervised' });
+  assert.equal(ai.captureMode, 'ai_supervised');
+  assert.equal(ai.mergeRunId, 'ai_123');
+  assert.throws(() => validateStart({ query: '노트북', productId: 'p1', token: 'secret', sources: ['naver'], captureMode: 'ai_supervised' }), /AI 검색 실행/);
   assert.equal(validateStart({ query: '노트북', productId: 'p1', token: 'secret', sources: ['naver'], captureMode: 'manual_scroll' }).captureMode, 'manual_scroll');
   assert.equal(validateStart({ query: '노트북', productId: 'p1', token: 'secret', sources: ['naver'], captureMode: 'manual_grid' }).captureMode, 'manual_grid');
   assert.equal(validateStart({ query: '노트북', productId: 'p1', token: 'secret', sources: ['naver'], captureMode: 'other' }).captureMode, 'automatic');
@@ -80,6 +83,15 @@ test('Naver lowest-price locator finds only the visible low-price control and re
   assert.deepEqual({ ...locateLowestSort([high, low]) }, { selected: false, x: 460, y: 120, width: 120, height: 40 });
   assert.deepEqual({ ...locateLowestSort([], 'https://search.shopping.naver.com/search/all?query=test&sort=price_asc') }, { selected: true });
   assert.deepEqual({ ...locateLowestSort([], 'https://search.shopping.naver.com/ns/search?query=test&sort=LOW_PRICE') }, { selected: true });
+});
+test('Naver lowest-price automation clicks once and requires confirmed selection before collection', () => {
+  const target = { selected: false, x: 460, y: 120 };
+  assert.equal(decideNaverSort({ selected: true }), 'done');
+  assert.equal(decideNaverSort(target), 'click');
+  assert.equal(decideNaverSort(target, { clickAttempted: true }), 'handoff');
+  assert.equal(decideNaverSort(null, { timedOut: false }), 'wait');
+  assert.equal(decideNaverSort(null, { timedOut: true }), 'handoff');
+  assert.equal(decideNaverSort(target, { manual: true }), 'wait_for_user');
 });
 test('native target click sends exactly one normal mouse click', async () => {
   const events = [];

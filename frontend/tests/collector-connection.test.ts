@@ -32,6 +32,7 @@ test("AI price search stays extensionless and uses supervised Naver only inside 
   assert.match(sellerSource, /"\/assistant\/price-search"/);
   assert.match(sellerSource, /aiPriceSearchRequest\(title, selectedSources, supervisedNaver\)/);
   assert.match(sellerSource, /desktop!\.start\(/);
+  assert.match(sellerSource, /mergeRunId/);
   assert.match(sellerSource, /네이버 AI 자율주행을 시작할까요\?/);
   assert.doesNotMatch(sellerSource, /네이버에 로그인되어 있나요/);
   assert.doesNotMatch(sellerSource, /로그인 상태<\/button>/);

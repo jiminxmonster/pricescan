@@ -38,8 +38,10 @@ function validateStart(input) {
   if (typeof input.productId !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(input.productId)) throw new Error('내 판매상품을 먼저 등록하세요.');
   if (typeof input.token !== 'string' || !input.token || input.token.length > 4096 || /[\r\n]/.test(input.token)) throw new Error('PriceScan에 다시 로그인하세요.');
   const captureModes = new Set(['automatic', 'ai_supervised', 'manual_scroll', 'manual_grid']);
-  return { query, sources, productId: input.productId, sortMode: input.sortMode === 'relevance' ? 'relevance' : 'lowest',
-    captureMode: captureModes.has(input.captureMode) ? input.captureMode : 'automatic' };
+  const captureMode = captureModes.has(input.captureMode) ? input.captureMode : 'automatic';
+  const mergeRunId = typeof input.mergeRunId === 'string' && /^[a-zA-Z0-9_-]{1,100}$/.test(input.mergeRunId) ? input.mergeRunId : '';
+  if (captureMode === 'ai_supervised' && !mergeRunId) throw new Error('네이버 결과를 합칠 AI 검색 실행이 필요합니다.');
+  return { query, sources, productId: input.productId, mergeRunId, sortMode: input.sortMode === 'relevance' ? 'relevance' : 'lowest', captureMode };
 }
 
 // Runs in an isolated world. Returns geometry only; it never reads or returns field contents.

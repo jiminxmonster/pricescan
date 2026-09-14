@@ -52,6 +52,14 @@ function captureVisibleObservation(source, query) {
   };
 }
 
+function decideNaverSort(sortTarget, { manual = false, clickAttempted = false, timedOut = false } = {}) {
+  if (sortTarget?.selected) return 'done';
+  if (manual) return 'wait_for_user';
+  if (sortTarget && !clickAttempted) return 'click';
+  if (clickAttempted || timedOut) return 'handoff';
+  return 'wait';
+}
+
 function secureSession(source) {
   const ses = session.fromPartition(`persist:pricescan-${source}`);
   ses.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
@@ -251,6 +259,7 @@ class BrowserDriver {
       entry.checkedDanawaDetail = false;
       entry.naverSearchSubmitted = false;
       entry.naverLowestSortApplied = false;
+      entry.naverLowestSortClickAttempted = false;
       const definition = parser.SOURCE_DEFINITIONS[source];
       const url = source === 'naver' ? definition.landingUrl : definition.searchUrl(job.query, job.sortMode);
       if (!isShopUrl(source, url)) throw new Error('허용되지 않은 검색 주소입니다.');
@@ -294,19 +303,24 @@ class BrowserDriver {
       if (state !== 'ready') { if (!lastHumanState && Date.now() - started > 45000) throw new Error('검색 화면 로딩 시간이 초과되었습니다.'); await delay(1500); continue; }
       if (source === 'naver' && job.sortMode === 'lowest' && !entry.naverLowestSortApplied) {
         const sortTarget = await this.evaluate(entry, findVisibleNaverLowestSort, []);
-        if (sortTarget?.selected) {
+        const sortAction = decideNaverSort(sortTarget, {
+          manual: job.captureMode === 'manual_scroll',
+          clickAttempted: entry.naverLowestSortClickAttempted,
+          timedOut: Date.now() - started > 45000,
+        });
+        if (sortAction === 'done') {
           entry.naverLowestSortApplied = true;
-        } else if (job.captureMode === 'manual_scroll') {
+        } else if (sortAction === 'wait_for_user') {
           progress('needs_sort', '네이버 화면에서 “낮은 가격순”을 눌러 주세요. 적용되면 자동으로 준비 완료됩니다.');
           stableSince = 0; readyCount = 0;
           await delay(1500); continue;
-        } else if (sortTarget) {
+        } else if (sortAction === 'click') {
           progress('loading', '네이버 낮은 가격순을 한 번 선택하고 있습니다.');
           await clickVisibleTarget(entry.view.webContents, sortTarget);
-          entry.naverLowestSortApplied = true;
+          entry.naverLowestSortClickAttempted = true;
           stableSince = 0; readyCount = 0; lastHumanState = ''; lastMessage = '';
           await delay(1200); continue;
-        } else if (Date.now() - started > 45000) {
+        } else if (sortAction === 'handoff') {
           progress('needs_page', '낮은 가격순 버튼을 찾지 못했습니다. 화면에서 한 번 선택한 뒤 이어서 진행해 주세요.');
           return { paused: true };
         } else {
@@ -345,6 +359,8 @@ class BrowserDriver {
         const observation = await this.evaluate(entry, captureVisibleObservation, [source, job.query]);
         const interpreted = await this.interpret(controls.token, observation, controls.signal);
         if (stopped()) return { paused: true };
+        const after = await this.evaluate(entry, inspectShoppingPage, [source, job.query]);
+        if (after.state !== 'ready') { lastHumanState = ''; stableSince = 0; continue; }
         if (interpreted?.needs_user) {
           progress('needs_page', interpreted.message || 'AI가 확실한 가격을 판독하지 못했습니다. 현재 화면을 확인해 주세요.');
           return { paused: true };
@@ -375,4 +391,4 @@ class BrowserDriver {
     this.focus('login', 'naver'); this.render(entry);
   }
 }
-module.exports = { BrowserDriver, captureVisibleObservation };
+module.exports = { BrowserDriver, captureVisibleObservation, decideNaverSort };

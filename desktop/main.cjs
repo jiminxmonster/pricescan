@@ -3,6 +3,7 @@ const path = require('node:path');
 const { JobManager } = require('./job-manager.cjs');
 const { BrowserDriver } = require('./browser-driver.cjs');
 const { APP_URL, API_URL, isAppUrl, isShopUrl } = require('./security.cjs');
+const { buildServerSaveRequest } = require('./server-payload.cjs');
 
 app.setName('PriceScan Desktop');
 // A new app-owned profile, not Chrome's or the legacy PriceScan profile.
@@ -39,8 +40,8 @@ async function api(pathname, token, body, signal) {
 }
 async function save(job, source, token, signal) {
   const task = job.tasks[source];
-  const payload = await api('/price-search/desktop-results', token, { collection_id: job.id, query: job.query, sort_mode: job.sortMode,
-    approval_scope: 'desktop_supervised', page_urls: { [source]: task.pageUrl }, warnings: task.warnings, items: task.items }, signal);
+  const request = buildServerSaveRequest(job, source, task);
+  const payload = await api(request.pathname, token, request.body, signal);
   await api(`/seller-products/${encodeURIComponent(job.productId)}/search-results`, token, { run_id: payload.run.id, warnings: payload.warnings || [] }, signal);
 }
 function guard(event) {
