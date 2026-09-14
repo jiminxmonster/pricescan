@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const { isShopUrl, isAppUrl, normalizeAppUrl, findVisibleSearchInput, findVisibleNaverLowestSort, inspectShoppingPage, validateStart } = require('../security.cjs');
-const { clickVisibleTarget, submitVisibleSearch } = require('../native-search.cjs');
+const { clickVisibleTarget, submitVisibleSearch, scrollVisiblePage } = require('../native-search.cjs');
 const { captureVisibleShoppingProducts } = require('../parser.cjs');
 const { captureVisibleObservation, decideNaverSort } = require('../browser-driver.cjs');
 test('shopping navigation is HTTPS and exact-domain scoped', () => {
@@ -84,6 +84,10 @@ test('Naver lowest-price locator finds only the visible low-price control and re
   assert.deepEqual({ ...locateLowestSort([], 'https://search.shopping.naver.com/search/all?query=test&sort=price_asc') }, { selected: true });
   assert.deepEqual({ ...locateLowestSort([], 'https://search.shopping.naver.com/ns/search?query=test&sort=LOW_PRICE') }, { selected: true });
 });
+test('Naver lowest-price locator asks the visible browser to scroll when the control is below the fold', () => {
+  const below = { matches: ['button'], innerText: '낮은 가격순', getAttribute: () => null, className: '', getBoundingClientRect: () => ({ left: 400, top: 1600, right: 520, bottom: 1640, width: 120, height: 40 }) };
+  assert.deepEqual({ ...locateLowestSort([below]) }, { selected: false, scroll: 'down' });
+});
 test('Naver lowest-price automation clicks once and requires confirmed selection before collection', () => {
   const target = { selected: false, x: 460, y: 120 };
   assert.equal(decideNaverSort({ selected: true }), 'done');
@@ -92,6 +96,9 @@ test('Naver lowest-price automation clicks once and requires confirmed selection
   assert.equal(decideNaverSort(null, { timedOut: false }), 'wait');
   assert.equal(decideNaverSort(null, { timedOut: true }), 'handoff');
   assert.equal(decideNaverSort(target, { manual: true }), 'wait_for_user');
+  assert.equal(decideNaverSort({ selected: false, scroll: 'down' }), 'scroll_down');
+  assert.equal(decideNaverSort({ selected: false, scroll: 'up' }, { scrollCount: 2 }), 'scroll_up');
+  assert.equal(decideNaverSort({ selected: false, scroll: 'down' }, { scrollCount: 8 }), 'handoff');
 });
 test('native target click sends exactly one normal mouse click', async () => {
   const events = [];
@@ -106,6 +113,11 @@ test('native search uses visible click, normal text insertion and Enter', async 
   assert.deepEqual(inserted, ['노트북 1TB']);
   assert.deepEqual(events.slice(0, 3).map(event => event.type), ['mouseMove', 'mouseDown', 'mouseUp']);
   assert.deepEqual(events.slice(-2).map(event => [event.type, event.keyCode]), [['keyDown', 'Enter'], ['keyUp', 'Enter']]);
+});
+test('native page scrolling uses one visible PageDown key press', async () => {
+  const events = [];
+  await scrollVisiblePage({ sendInputEvent: event => events.push(event) }, 'down', async () => {});
+  assert.deepEqual(events, [{ type: 'keyDown', keyCode: 'PageDown' }, { type: 'keyUp', keyCode: 'PageDown' }]);
 });
 test('serialized parser works without extension globals or outer helper functions', async () => {
   const empty = { innerText: '', textContent: '', querySelectorAll: () => [], querySelector: () => null };
