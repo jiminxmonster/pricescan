@@ -11,8 +11,8 @@ test('shopping navigation is HTTPS and exact-domain scoped', () => {
   assert.equal(isShopUrl('naver', 'https://search.shopping.naver.com/search/all?query=a'), true);
   assert.equal(isShopUrl('naver', 'https://www.coupang.com'), false);
 });
-test('only the fixed local PriceScan origin has a desktop bridge', () => {
-  assert.equal(isAppUrl('http://127.0.0.1:8300/pricescan/'), true);
+test('only the fixed production PriceScan origin has a desktop bridge by default', () => {
+  assert.equal(isAppUrl('https://pricescan.d2blue.com/pricescan/'), true);
   for (const value of ['https://naver.com', 'http://127.0.0.1:9999/pricescan/', 'http://127.0.0.1:8300/elsewhere', 'http://attacker.test/pricescan/']) assert.equal(isAppUrl(value), false);
 });
 test('the desktop shell accepts an explicit HTTPS deployment URL but rejects unsafe app URLs', () => {
