@@ -24,21 +24,25 @@ SOURCE_RECIPES: dict[str, dict[str, Any]] = {
     "naver": {
         "label": "네이버 쇼핑",
         "hosts": ["shopping.naver.com", "search.shopping.naver.com", "smartstore.naver.com", "brand.naver.com", "cr.shopping.naver.com"],
+        "allowed_roots": ["naver.com"],
         "search_url": "https://search.shopping.naver.com/ns/search?query={query}",
     },
     "danawa": {
         "label": "다나와",
         "hosts": ["search.danawa.com", "prod.danawa.com"],
+        "allowed_roots": ["danawa.com"],
         "search_url": "https://search.danawa.com/dsearch.php?query={query}",
     },
     "enuri": {
         "label": "에누리",
         "hosts": ["www.enuri.com", "enuri.com"],
+        "allowed_roots": ["enuri.com"],
         "search_url": "https://www.enuri.com/search.jsp?keyword={query}",
     },
     "coupang": {
         "label": "쿠팡",
         "hosts": ["www.coupang.com"],
+        "allowed_roots": ["coupang.com"],
         "search_url": "https://www.coupang.com/np/search?q={query}",
     },
 }
@@ -90,6 +94,11 @@ class ObservedLink(BaseModel):
     url: str = Field(max_length=3000)
 
 
+class ObservedLinkContext(BaseModel):
+    url: str = Field(max_length=3000)
+    context: str = Field(default="", max_length=1200)
+
+
 class PageObservation(BaseModel):
     source: Literal["naver", "danawa", "enuri", "coupang"]
     query: str = Field(min_length=1, max_length=300)
@@ -98,6 +107,7 @@ class PageObservation(BaseModel):
     page_title: str = Field(default="", max_length=500)
     visible_text: str = Field(default="", max_length=14000)
     links: list[ObservedLink] = Field(default_factory=list, max_length=100)
+    link_contexts: list[ObservedLinkContext] = Field(default_factory=list, max_length=100)
 
 
 def allowed_source_url(value: str, source: str) -> bool:
@@ -108,7 +118,8 @@ def allowed_source_url(value: str, source: str) -> bool:
     recipe = SOURCE_RECIPES.get(source)
     if not recipe or url.scheme != "https" or not url.hostname or url.username or url.password:
         return False
-    if url.hostname not in recipe["hosts"]:
+    allowed_roots = recipe.get("allowed_roots", recipe["hosts"])
+    if not any(url.hostname == host or url.hostname.endswith(f".{host}") for host in allowed_roots):
         return False
     return not any(word in url.path.casefold() for word in ("login", "signin", "checkout", "order", "payment"))
 
@@ -336,6 +347,8 @@ def _sanitized_observation(payload: PageObservation) -> dict[str, Any]:
     if not allowed_source_url(payload.page_url, payload.source):
         raise HTTPException(422, "선택한 쇼핑몰의 안전한 공개 상품 화면만 읽을 수 있습니다.")
     links = [link.model_dump() for link in payload.links if allowed_source_url(link.url, payload.source)]
+    allowed_link_urls = {link["url"] for link in links}
+    link_contexts = [item.model_dump() for item in payload.link_contexts if item.url in allowed_link_urls]
     return {
         "source": payload.source,
         "query": " ".join(payload.query.split()),
@@ -344,6 +357,7 @@ def _sanitized_observation(payload: PageObservation) -> dict[str, Any]:
         "page_title": payload.page_title,
         "visible_text": payload.visible_text,
         "links": links,
+        "link_contexts": link_contexts,
     }
 
 
@@ -377,9 +391,10 @@ async def interpret_page(payload: PageObservation) -> dict[str, Any]:
         shipping = _integer(raw.get("shipping"), 0)
         name = " ".join(str(raw.get("name") or "").split())[:500]
         mall = " ".join(str(raw.get("mall") or SOURCE_RECIPES[payload.source]["label"]).split())[:200]
+        if shipping == 0 and not free_shipping_visible:
+            shipping = None
         if (url not in allowed_urls or not allowed_source_url(url, payload.source) or not name or price is None
-                or price not in visible_money or (shipping is not None and shipping > 0 and shipping not in visible_money)
-                or (shipping == 0 and not free_shipping_visible)):
+                or price not in visible_money or (shipping is not None and shipping > 0 and shipping not in visible_money)):
             continue
         items.append({
             "source": payload.source,

@@ -1,6 +1,6 @@
 const path = require('node:path');
 const { WebContentsView, session } = require('electron');
-const { isShopUrl, findVisibleSearchInput, findVisibleNaverLowestSort, inspectShoppingPage } = require('./security.cjs');
+const { isShopUrl, findVisibleSearchInput, findVisibleLowestSort, findVisibleNaverLowestSort, inspectShoppingPage } = require('./security.cjs');
 const { clickVisibleTarget, submitVisibleSearch, scrollVisiblePage } = require('./native-search.cjs');
 const { EmbeddedLayout } = require('./embedded-layout.cjs');
 const parser = require('./parser.cjs');
@@ -25,7 +25,7 @@ function captureVisibleObservation(source, query) {
       && rect.top < innerHeight && rect.left < innerWidth && style?.visibility !== 'hidden'
       && style?.display !== 'none' && Number(style?.opacity || 1) !== 0);
   };
-  const links = []; const snippets = []; const seenUrls = new Set(); const seenText = new Set();
+  const links = []; const linkContexts = []; const snippets = []; const seenUrls = new Set(); const seenText = new Set();
   for (const anchor of document.querySelectorAll('a[href]')) {
     if (!visible(anchor)) continue;
     let url;
@@ -33,22 +33,24 @@ function captureVisibleObservation(source, query) {
     if (!url.startsWith('https://') || seenUrls.has(url)) continue;
     const label = String(anchor.innerText || anchor.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 500);
     if (!label) continue;
-    seenUrls.add(url); links.push({ text: label, url });
+    let context = label;
     let container = anchor;
     for (let depth = 0; depth < 5 && container?.parentElement; depth += 1) {
       container = container.parentElement;
       const text = String(container.innerText || '').replace(/\s+/g, ' ').trim();
       if (/\d[\d,]*\s*원/.test(text) && text.length >= label.length && text.length <= 1200) {
+        context = text;
         if (!seenText.has(text)) { seenText.add(text); snippets.push(text); }
         break;
       }
     }
+    seenUrls.add(url); links.push({ text: label, url }); linkContexts.push({ url, context });
     if (links.length >= 100) break;
   }
   return {
     source, query, stage: 'results', page_url: location.href,
     page_title: String(document.title || '').slice(0, 500),
-    visible_text: snippets.join('\n').slice(0, 14000), links,
+    visible_text: snippets.join('\n').slice(0, 14000), links, link_contexts: linkContexts,
   };
 }
 
@@ -260,10 +262,10 @@ class BrowserDriver {
     if (!controls.resume) {
       entry.checkedDanawaDetail = false;
       entry.naverSearchSubmitted = false;
-      entry.naverLowestSortApplied = false;
-      entry.naverLowestSortClickAttempted = false;
-      entry.naverLowestSortScrollCount = 0;
-      entry.naverLowestSortStartedAt = 0;
+      entry.lowestSortApplied = false;
+      entry.lowestSortClickAttempted = false;
+      entry.lowestSortScrollCount = 0;
+      entry.lowestSortStartedAt = 0;
       const definition = parser.SOURCE_DEFINITIONS[source];
       const url = source === 'naver' ? definition.landingUrl : definition.searchUrl(job.query, job.sortMode);
       if (!isShopUrl(source, url)) throw new Error('허용되지 않은 검색 주소입니다.');
@@ -291,7 +293,7 @@ class BrowserDriver {
           progress('loading', '보이는 네이버 쇼핑 검색창에 검색어를 입력하고 있습니다.');
           await submitVisibleSearch(entry.view.webContents, target, job.query);
           entry.naverSearchSubmitted = true;
-          entry.naverLowestSortStartedAt = 0;
+          entry.lowestSortStartedAt = 0;
           stableSince = 0; readyCount = 0; lastHumanState = ''; lastMessage = '';
           await delay(1200); continue;
         }
@@ -306,36 +308,38 @@ class BrowserDriver {
         await delay(2500); continue;
       }
       if (state !== 'ready') { if (!lastHumanState && Date.now() - started > 45000) throw new Error('검색 화면 로딩 시간이 초과되었습니다.'); await delay(1500); continue; }
-      if (source === 'naver' && job.sortMode === 'lowest' && !entry.naverLowestSortApplied) {
-        if (!entry.naverLowestSortStartedAt) entry.naverLowestSortStartedAt = Date.now();
-        const sortTarget = await this.evaluate(entry, findVisibleNaverLowestSort, []);
+      if (job.sortMode === 'lowest' && !entry.lowestSortApplied) {
+        if (!entry.lowestSortStartedAt) entry.lowestSortStartedAt = Date.now();
+        const sortTarget = source === 'naver'
+          ? await this.evaluate(entry, findVisibleNaverLowestSort, [])
+          : await this.evaluate(entry, findVisibleLowestSort, [source]);
         const sortAction = decideNaverSort(sortTarget, {
           manual: job.captureMode === 'manual_scroll',
-          clickAttempted: entry.naverLowestSortClickAttempted,
-          scrollCount: entry.naverLowestSortScrollCount,
-          timedOut: Date.now() - entry.naverLowestSortStartedAt > 60000,
+          clickAttempted: entry.lowestSortClickAttempted,
+          scrollCount: Number(entry.lowestSortScrollCount || 0),
+          timedOut: Date.now() - entry.lowestSortStartedAt > 60000,
         });
         if (sortAction === 'done') {
-          entry.naverLowestSortApplied = true;
+          entry.lowestSortApplied = true;
         } else if (sortAction === 'wait_for_user') {
-          progress('needs_sort', '네이버 화면에서 “낮은 가격순”을 눌러 주세요. 적용되면 자동으로 준비 완료됩니다.');
+          progress('needs_sort', `${labels[source]} 화면에서 최저가 정렬을 눌러 주세요. 적용되면 자동으로 이어집니다.`);
           stableSince = 0; readyCount = 0;
           await delay(1500); continue;
         } else if (sortAction === 'click') {
-          progress('loading', '네이버 낮은 가격순을 한 번 선택하고 있습니다.');
+          progress('loading', `${labels[source]} 최저가 정렬을 한 번 선택하고 있습니다.`);
           await clickVisibleTarget(entry.view.webContents, sortTarget);
-          entry.naverLowestSortClickAttempted = true;
+          entry.lowestSortClickAttempted = true;
           stableSince = 0; readyCount = 0; lastHumanState = ''; lastMessage = '';
           await delay(1200); continue;
         } else if (sortAction === 'scroll_down' || sortAction === 'scroll_up') {
           const direction = sortAction === 'scroll_up' ? 'up' : 'down';
-          progress('loading', '네이버 낮은 가격순 버튼이 보이도록 결과 화면을 이동하고 있습니다.');
+          progress('loading', `${labels[source]} 최저가 정렬 버튼이 보이도록 결과 화면을 이동하고 있습니다.`);
           await scrollVisiblePage(entry.view.webContents, direction);
-          entry.naverLowestSortScrollCount += 1;
+          entry.lowestSortScrollCount = Number(entry.lowestSortScrollCount || 0) + 1;
           stableSince = 0; readyCount = 0; lastHumanState = ''; lastMessage = '';
           await delay(700); continue;
         } else if (sortAction === 'handoff') {
-          progress('needs_page', '낮은 가격순 버튼을 찾지 못했습니다. 화면에서 한 번 선택한 뒤 이어서 진행해 주세요.');
+          progress('needs_page', `${labels[source]} 최저가 정렬 버튼을 찾지 못했습니다. 화면에서 한 번 선택한 뒤 이어서 진행해 주세요.`);
           return { paused: true };
         } else {
           await delay(1500); continue;
@@ -369,23 +373,38 @@ class BrowserDriver {
       if (lastMessage !== readingMessage) { progress('reading', readingMessage); lastMessage = readingMessage; }
       if (job.captureMode === 'ai_supervised') {
         if (typeof this.interpret !== 'function') throw new Error('AI 화면 판독 연결이 준비되지 않았습니다.');
-        progress('reading', `AI가 현재 ${labels[source]} 상품 목록의 가격 순위와 링크를 판독하고 있습니다.`);
-        const observation = await this.evaluate(entry, captureVisibleObservation, [source, job.query]);
-        const interpreted = await this.interpret(controls.token, observation, controls.signal);
-        if (stopped()) return { paused: true };
-        const after = await this.evaluate(entry, inspectShoppingPage, [source, job.query]);
-        if (after.state !== 'ready') { lastHumanState = ''; stableSince = 0; continue; }
-        if (interpreted?.needs_user) {
-          progress('needs_page', interpreted.message || 'AI가 확실한 가격을 판독하지 못했습니다. 현재 화면을 확인해 주세요.');
+        const items = []; const seenItems = new Set(); let pageUrl = entry.url; let lastReason = '';
+        for (let viewport = 0; viewport < 5 && items.length < captureLimit; viewport += 1) {
+          progress('reading', `AI가 ${labels[source]} 가격 순위를 판독하고 있습니다 · 화면 ${viewport + 1}/5`);
+          const observation = await this.evaluate(entry, captureVisibleObservation, [source, job.query]);
+          pageUrl = observation.page_url || pageUrl;
+          const interpreted = await this.interpret(controls.token, observation, controls.signal);
+          if (stopped()) return { paused: true };
+          const after = await this.evaluate(entry, inspectShoppingPage, [source, job.query]);
+          if (after.state !== 'ready') { lastHumanState = ''; stableSince = 0; break; }
+          lastReason = interpreted?.message || lastReason;
+          for (const item of interpreted?.items || []) {
+            const key = `${item.url}|${item.price}`;
+            if (seenItems.has(key)) continue;
+            seenItems.add(key);
+            const shippingKnown = Number.isInteger(item.shipping) && item.shipping >= 0;
+            const shipping = shippingKnown ? item.shipping : 0;
+            items.push({ ...item, source, shipping, total: Number(item.price || 0) + shipping,
+              extraction_methods: ['ai_visible_page', ...(shippingKnown ? [] : ['shipping_unknown'])] });
+            if (items.length >= captureLimit) break;
+          }
+          const boundary = await this.evaluate(entry, inspectScrollBoundary, []);
+          const securityReason = /로그인|캡차|보안|접근\s*제한|차단/i.test(String(interpreted?.message || ''));
+          if (securityReason || boundary.atBottom || items.length >= captureLimit) break;
+          await scrollVisiblePage(entry.view.webContents, 'down');
+          await delay(900);
+        }
+        if (!items.length) {
+          progress('needs_page', lastReason || 'AI가 확실한 가격을 판독하지 못했습니다. 현재 화면을 확인해 주세요.');
           return { paused: true };
         }
-        const items = (interpreted?.items || []).slice(0, captureLimit).map(item => {
-          const shippingKnown = Number.isInteger(item.shipping) && item.shipping >= 0;
-          const shipping = shippingKnown ? item.shipping : 0;
-          return { ...item, source, shipping, total: Number(item.price || 0) + shipping,
-            extraction_methods: ['ai_visible_page', ...(shippingKnown ? [] : ['shipping_unknown'])] };
-        });
-        return { items, pageUrl: observation.page_url, warnings: [] };
+        items.sort((a, b) => Number(a.total || a.price) - Number(b.total || b.price));
+        return { items: items.slice(0, captureLimit), pageUrl, warnings: [] };
       }
       const result = await this.evaluate(entry, parser.captureVisibleShoppingProducts, [source, captureLimit, job.query]);
       if (stopped()) return { paused: true };

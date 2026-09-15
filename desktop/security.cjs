@@ -77,11 +77,56 @@ function findVisibleSearchInput() {
   return null;
 }
 
-// Runs in an isolated world. Locates only the visible Naver low-price sort control.
+// Runs in an isolated world. Locates the visible low-price sort control for one marketplace.
+function findVisibleLowestSort(source = 'naver') {
+  const url = new URL(location.href);
+  const sort = String(url.searchParams.get('sort') || '').toLowerCase();
+  const sorter = String(url.searchParams.get('sorter') || '').toLowerCase();
+  if (['price_asc', 'priceasc', 'low_price'].includes(sort) || sorter === 'salepriceasc') return { selected: true };
+  const labels = {
+    naver: ['낮은가격순'],
+    danawa: ['낮은가격순', '단위환산최저가순'],
+    enuri: ['최저가순', '단위환산최저가순'],
+    coupang: ['낮은가격순'],
+  };
+  const expected = labels[source] || labels.naver;
+  const selectors = ['a', 'button', "[role='button']", "[role='tab']"];
+  const roots = [document];
+  for (let index = 0; index < roots.length; index += 1) {
+    const root = roots[index];
+    for (const element of root.querySelectorAll('*')) if (element.shadowRoot) roots.push(element.shadowRoot);
+  }
+  const candidates = [];
+  for (const root of roots) for (const selector of selectors) {
+    for (const element of root.querySelectorAll(selector)) if (!candidates.includes(element)) candidates.push(element);
+  }
+  for (const element of candidates) {
+    const label = String(element.innerText || element.textContent || '').replace(/\s+/g, '');
+    if (!expected.some(value => label.startsWith(value))) continue;
+    const rect = element.getBoundingClientRect();
+    const style = getComputedStyle(element);
+    if (!rect || rect.width < 40 || rect.height < 20 || rect.right <= 0 || rect.left >= innerWidth
+      || style.visibility === 'hidden'
+      || style.display === 'none' || Number(style.opacity || 1) === 0) continue;
+    const className = String(element.className?.baseVal || element.className || '');
+    const selected = label.includes('선택됨') || element.getAttribute('aria-selected') === 'true'
+      || ['true', 'page'].includes(String(element.getAttribute('aria-current') || ''))
+      || element.getAttribute('data-selected') === 'true'
+      || /(^|[_\s-])(active|selected|on)([_\s-]|$)/i.test(className);
+    if (selected) return { selected: true };
+    if (rect.bottom <= 0) return { selected: false, scroll: 'up' };
+    if (rect.top >= innerHeight) return { selected: false, scroll: 'down' };
+    const x = Math.max(0, Math.min(innerWidth - 1, rect.left + rect.width / 2));
+    const y = Math.max(0, Math.min(innerHeight - 1, rect.top + rect.height / 2));
+    if (Number.isFinite(x) && Number.isFinite(y)) return { selected: false, x, y, width: rect.width, height: rect.height };
+  }
+  return null;
+}
+
 function findVisibleNaverLowestSort() {
   const url = new URL(location.href);
   const sort = String(url.searchParams.get('sort') || '').toLowerCase();
-  if (sort === 'price_asc' || sort === 'priceasc' || sort === 'low_price') return { selected: true };
+  if (['price_asc', 'priceasc', 'low_price'].includes(sort)) return { selected: true };
   const selectors = ['a', 'button', "[role='button']", "[role='tab']"];
   const roots = [document];
   for (let index = 0; index < roots.length; index += 1) {
@@ -98,8 +143,7 @@ function findVisibleNaverLowestSort() {
     const rect = element.getBoundingClientRect();
     const style = getComputedStyle(element);
     if (!rect || rect.width < 40 || rect.height < 20 || rect.right <= 0 || rect.left >= innerWidth
-      || style.visibility === 'hidden'
-      || style.display === 'none' || Number(style.opacity || 1) === 0) continue;
+      || style.visibility === 'hidden' || style.display === 'none' || Number(style.opacity || 1) === 0) continue;
     const className = String(element.className?.baseVal || element.className || '');
     const selected = label.includes('선택됨') || element.getAttribute('aria-selected') === 'true'
       || ['true', 'page'].includes(String(element.getAttribute('aria-current') || ''))
@@ -132,4 +176,4 @@ function inspectShoppingPage(source, expectedQuery) {
   }
   return { state: 'ready' };
 }
-module.exports = { APP_URL, API_URL, normalizeAppUrl, isShopUrl, isAppUrl, validateStart, findVisibleSearchInput, findVisibleNaverLowestSort, inspectShoppingPage };
+module.exports = { APP_URL, API_URL, normalizeAppUrl, isShopUrl, isAppUrl, validateStart, findVisibleSearchInput, findVisibleLowestSort, findVisibleNaverLowestSort, inspectShoppingPage };
