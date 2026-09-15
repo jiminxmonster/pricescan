@@ -90,7 +90,7 @@ function findVisibleLowestSort(source = 'naver') {
     coupang: ['낮은가격순'],
   };
   const expected = labels[source] || labels.naver;
-  const selectors = ['a', 'button', "[role='button']", "[role='tab']"];
+  const selectors = ['a', 'button', "[role='button']", "[role='tab']", '[data-sort-method]', '[data-sort]', 'li'];
   const roots = [document];
   for (let index = 0; index < roots.length; index += 1) {
     const root = roots[index];
@@ -101,17 +101,20 @@ function findVisibleLowestSort(source = 'naver') {
     for (const element of root.querySelectorAll(selector)) if (!candidates.includes(element)) candidates.push(element);
   }
   for (const element of candidates) {
-    const label = String(element.innerText || element.textContent || '').replace(/\s+/g, '');
+    const label = String(element.innerText || element.textContent || element.getAttribute?.('aria-label') || element.getAttribute?.('title') || '').replace(/\s+/g, '');
     if (!expected.some(value => label.startsWith(value))) continue;
-    const rect = element.getBoundingClientRect();
+    const target = (typeof element.matches === 'function' && element.matches('a,button,[role="button"],[role="tab"]')) ? element
+      : element.querySelector?.('a,button,[role="button"],[role="tab"]') || element;
+    const rect = target.getBoundingClientRect();
     const style = getComputedStyle(element);
     if (!rect || rect.width < 40 || rect.height < 20 || rect.right <= 0 || rect.left >= innerWidth
       || style.visibility === 'hidden'
       || style.display === 'none' || Number(style.opacity || 1) === 0) continue;
-    const className = String(element.className?.baseVal || element.className || '');
-    const selected = label.includes('선택됨') || element.getAttribute('aria-selected') === 'true'
-      || ['true', 'page'].includes(String(element.getAttribute('aria-current') || ''))
-      || element.getAttribute('data-selected') === 'true'
+    const className = String(target.className?.baseVal || target.className || element.className?.baseVal || element.className || '');
+    const selected = label.includes('선택됨') || target.getAttribute('aria-selected') === 'true'
+      || ['true', 'page'].includes(String(target.getAttribute('aria-current') || ''))
+      || target.getAttribute('data-selected') === 'true'
+      || /(^|[_\s-])(active|selected|on)([_\s-]|$)/i.test(String(element.className?.baseVal || element.className || ''))
       || /(^|[_\s-])(active|selected|on)([_\s-]|$)/i.test(className);
     if (selected) return { selected: true };
     if (rect.bottom <= 0) return { selected: false, scroll: 'up' };
