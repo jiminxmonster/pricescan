@@ -1,7 +1,9 @@
 const SHOP_DOMAINS = {
   naver: ['naver.com'], danawa: ['danawa.com'], enuri: ['enuri.com'], coupang: ['coupang.com'],
 };
-const DEFAULT_APP_URL = 'http://127.0.0.1:8300/pricescan/';
+// Finder-launched release builds must work without a terminal environment.
+// Local development can still select localhost with PRICESCAN_APP_URL.
+const DEFAULT_APP_URL = 'https://pricescan.d2blue.com/pricescan/';
 
 function normalizeAppUrl(value = DEFAULT_APP_URL) {
   const url = new URL(value);
