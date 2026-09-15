@@ -31,14 +31,15 @@ function captureVisibleObservation(source, query) {
     let url;
     try { url = new URL(anchor.href, location.href).href; } catch { continue; }
     if (!url.startsWith('https://') || seenUrls.has(url)) continue;
-    const label = String(anchor.innerText || anchor.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 500);
+    const label = String(anchor.innerText || anchor.textContent || anchor.getAttribute?.('aria-label') || anchor.getAttribute?.('title') || '')
+      .replace(/\s+/g, ' ').trim().slice(0, 500);
     if (!label) continue;
     let context = label;
     let container = anchor;
-    for (let depth = 0; depth < 5 && container?.parentElement; depth += 1) {
+    for (let depth = 0; depth < 10 && container?.parentElement; depth += 1) {
       container = container.parentElement;
       const text = String(container.innerText || '').replace(/\s+/g, ' ').trim();
-      if (/\d[\d,]*\s*원/.test(text) && text.length >= label.length && text.length <= 1200) {
+      if (/\d[\d,]*\s*원/.test(text) && text.length >= label.length && text.length <= 2400) {
         context = text;
         if (!seenText.has(text)) { seenText.add(text); snippets.push(text); }
         break;
@@ -262,6 +263,7 @@ class BrowserDriver {
     if (!controls.resume) {
       entry.checkedDanawaDetail = false;
       entry.naverSearchSubmitted = false;
+      entry.naverLandingRecoveryAttempted = false;
       entry.lowestSortApplied = false;
       entry.lowestSortClickAttempted = false;
       entry.lowestSortScrollCount = 0;
@@ -288,11 +290,24 @@ class BrowserDriver {
       const state = inspection.state;
       if (state === 'blocked') { progress('blocked', `${labels[source]} 접속 제한 · 현재 화면을 확인한 뒤 이어서 진행하거나, 준비된 다른 쇼핑몰을 먼저 완료하세요.`); return { paused: true }; }
       if (source === 'naver' && state === 'needs_page' && !entry.naverSearchSubmitted) {
+        const currentUrl = new URL(entry.view.webContents.getURL());
+        if (currentUrl.hostname !== 'shopping.naver.com' && currentUrl.hostname !== 'search.shopping.naver.com'
+          && !entry.naverLandingRecoveryAttempted) {
+          const landingUrl = parser.SOURCE_DEFINITIONS.naver.landingUrl;
+          progress('loading', '네이버 쇼핑 검색 화면으로 돌아가고 있습니다. 로그인 상태는 그대로 유지됩니다.');
+          entry.naverLandingRecoveryAttempted = true;
+          void entry.view.webContents.loadURL(landingUrl).catch(error => {
+            if (error.code !== 'ERR_ABORTED') entry.loadError = '네이버 쇼핑 검색 화면을 열지 못했습니다. 연결을 확인하세요.';
+          });
+          stableSince = 0; readyCount = 0; lastHumanState = ''; lastMessage = '';
+          await delay(1200); continue;
+        }
         const target = await this.evaluate(entry, findVisibleSearchInput, []);
         if (target) {
           progress('loading', '보이는 네이버 쇼핑 검색창에 검색어를 입력하고 있습니다.');
           await submitVisibleSearch(entry.view.webContents, target, job.query);
           entry.naverSearchSubmitted = true;
+          entry.naverLandingRecoveryAttempted = true;
           entry.lowestSortStartedAt = 0;
           stableSince = 0; readyCount = 0; lastHumanState = ''; lastMessage = '';
           await delay(1200); continue;
@@ -339,8 +354,14 @@ class BrowserDriver {
           stableSince = 0; readyCount = 0; lastHumanState = ''; lastMessage = '';
           await delay(700); continue;
         } else if (sortAction === 'handoff') {
-          progress('needs_page', `${labels[source]} 최저가 정렬 버튼을 찾지 못했습니다. 화면에서 한 번 선택한 뒤 이어서 진행해 주세요.`);
-          return { paused: true };
+          if (job.captureMode === 'ai_supervised') {
+            entry.lowestSortApplied = true;
+            entry.sortWarning = `${labels[source]} 정렬 제어를 확인하지 못해, AI가 화면에서 확인한 후보를 총액순으로 정리합니다.`;
+            stableSince = 0; readyCount = 0;
+          } else {
+            progress('needs_page', `${labels[source]} 최저가 정렬 버튼을 찾지 못했습니다. 화면에서 한 번 선택한 뒤 이어서 진행해 주세요.`);
+            return { paused: true };
+          }
         } else {
           await delay(1500); continue;
         }
@@ -404,7 +425,7 @@ class BrowserDriver {
           return { paused: true };
         }
         items.sort((a, b) => Number(a.total || a.price) - Number(b.total || b.price));
-        return { items: items.slice(0, captureLimit), pageUrl, warnings: [] };
+        return { items: items.slice(0, captureLimit), pageUrl, warnings: entry.sortWarning ? [entry.sortWarning] : [] };
       }
       const result = await this.evaluate(entry, parser.captureVisibleShoppingProducts, [source, captureLimit, job.query]);
       if (stopped()) return { paused: true };

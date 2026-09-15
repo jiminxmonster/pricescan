@@ -381,8 +381,12 @@ async def interpret_page(payload: PageObservation) -> dict[str, Any]:
     allowed_urls = {link["url"] for link in observation["links"]}
     if payload.stage != "results":
         allowed_urls.add(payload.page_url)
-    visible_money = _visible_money_values(payload.visible_text)
-    free_shipping_visible = bool(re.search(r"무료\s*배송", payload.visible_text, flags=re.IGNORECASE))
+    evidence_text = "\n".join([
+        payload.visible_text,
+        *(item.get("context", "") for item in observation["link_contexts"]),
+    ])
+    visible_money = _visible_money_values(evidence_text)
+    free_shipping_visible = bool(re.search(r"무료\s*배송", evidence_text, flags=re.IGNORECASE))
     for raw in result.get("items") if isinstance(result.get("items"), list) else []:
         if not isinstance(raw, dict):
             continue
