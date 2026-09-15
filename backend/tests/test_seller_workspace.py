@@ -342,21 +342,24 @@ class SellerWorkspaceTest(unittest.TestCase):
         self.assertEqual(result.json()["search"]["items"], [])
         self.assertEqual(result.json()["ai_source_status"]["coupang"]["status"], "needs_review")
 
-    def test_naver_can_wait_for_supervised_ai_without_public_web_search(self):
+    def test_all_marketplaces_can_wait_for_one_supervised_browser_job_without_public_web_search(self):
         with patch.dict(os.environ, {
             "PRICESCAN_AI_API_KEY": "test-secret", "PRICESCAN_AI_MODEL": "gpt-5.6-luna",
             "PRICESCAN_AI_PROVIDER": "OpenAI", "PRICESCAN_AI_BASE_URL": "https://api.openai.com/v1",
         }), patch("app.collection_agent.httpx.AsyncClient") as client_class:
             result = self.client.post(f"{self.root}/assistant/price-search", json={
-                "query": "아이패드 12.9", "sources": ["naver"], "supervised_sources": ["naver"],
+                "query": "아이패드 12.9", "sources": ["naver", "danawa", "enuri", "coupang"],
+                "supervised_sources": ["naver", "danawa", "enuri", "coupang"],
             })
 
         self.assertEqual(result.status_code, 200, result.text)
         product = result.json()
-        self.assertEqual(product["search"]["run"]["collection_mode"], "hybrid_ai_supervised")
+        self.assertEqual(product["search"]["run"]["collection_mode"], "server_managed_browser_agent")
+        self.assertEqual(product["search"]["run"]["status"], "collecting")
         self.assertEqual(product["search"]["items"], [])
-        self.assertEqual(product["ai_source_status"]["naver"]["status"], "awaiting_supervision")
-        self.assertFalse(client_class.called, "supervised Naver must not use public web search")
+        self.assertEqual(set(product["ai_source_status"]), {"naver", "danawa", "enuri", "coupang"})
+        self.assertTrue(all(value["status"] == "awaiting_supervision" for value in product["ai_source_status"].values()))
+        self.assertFalse(client_class.called, "supervised browser sources must not use public web search")
 
     def test_collection_config_is_server_versioned_and_has_no_parser_fallback(self):
         with patch.dict(os.environ, {"PRICESCAN_AI_API_KEY": "test-secret", "PRICESCAN_AI_MODEL": "test-model"}):

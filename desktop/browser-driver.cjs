@@ -284,7 +284,7 @@ class BrowserDriver {
         await delay(1000); continue;
       }
       const state = inspection.state;
-      if (state === 'blocked') { progress('blocked', '네이버 접속 제한 · “검색결과로” 돌아가 현재 결과를 수집하거나, 준비된 다른 쇼핑몰만 먼저 수집하세요.'); return { paused: true }; }
+      if (state === 'blocked') { progress('blocked', `${labels[source]} 접속 제한 · 현재 화면을 확인한 뒤 이어서 진행하거나, 준비된 다른 쇼핑몰을 먼저 완료하세요.`); return { paused: true }; }
       if (source === 'naver' && state === 'needs_page' && !entry.naverSearchSubmitted) {
         const target = await this.evaluate(entry, findVisibleSearchInput, []);
         if (target) {
@@ -298,7 +298,7 @@ class BrowserDriver {
       }
       if (['needs_login', 'needs_verification', 'needs_page'].includes(state)) {
         stableSince = 0; readyCount = 0;
-        const message = state === 'needs_login' ? '네이버 로그인이 필요합니다. 프로그램 안의 수집 화면에서 직접 로그인하세요.'
+        const message = state === 'needs_login' ? `${labels[source]} 로그인이 필요합니다. 프로그램 안의 수집 화면에서 직접 로그인하세요.`
           : state === 'needs_verification' ? '보안확인이 필요합니다. 프로그램 안의 수집 화면에서 직접 처리하면 자동으로 이어갑니다.'
             : `검색 화면 확인 필요 · 프로그램 안에서 “${job.query}” 쇼핑 검색 결과를 열어 주세요.`;
         if (lastHumanState !== state) { progress(state, message); lastHumanState = state; lastMessage = message; }
@@ -369,7 +369,7 @@ class BrowserDriver {
       if (lastMessage !== readingMessage) { progress('reading', readingMessage); lastMessage = readingMessage; }
       if (job.captureMode === 'ai_supervised') {
         if (typeof this.interpret !== 'function') throw new Error('AI 화면 판독 연결이 준비되지 않았습니다.');
-        progress('reading', 'AI가 현재 네이버 상품 목록의 가격과 링크를 판독하고 있습니다.');
+        progress('reading', `AI가 현재 ${labels[source]} 상품 목록의 가격 순위와 링크를 판독하고 있습니다.`);
         const observation = await this.evaluate(entry, captureVisibleObservation, [source, job.query]);
         const interpreted = await this.interpret(controls.token, observation, controls.signal);
         if (stopped()) return { paused: true };

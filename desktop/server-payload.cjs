@@ -1,3 +1,10 @@
+const { createHash } = require('node:crypto');
+
+function sourceCaptureId(jobId, source) {
+  const hex = createHash('sha256').update(`${jobId}:${source}`).digest('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
+
 function buildServerSaveRequest(job, source, task) {
   const common = {
     query: job.query,
@@ -9,7 +16,7 @@ function buildServerSaveRequest(job, source, task) {
   if (job.captureMode === 'ai_supervised' && job.mergeRunId) {
     return {
       pathname: '/price-search/extension-results',
-      body: { ...common, capture_id: job.id, merge_run_id: job.mergeRunId, approval_scope: 'server_managed_ai' },
+      body: { ...common, capture_id: sourceCaptureId(job.id, source), merge_run_id: job.mergeRunId, approval_scope: 'server_managed_ai' },
     };
   }
   return {
@@ -18,4 +25,4 @@ function buildServerSaveRequest(job, source, task) {
   };
 }
 
-module.exports = { buildServerSaveRequest };
+module.exports = { buildServerSaveRequest, sourceCaptureId };

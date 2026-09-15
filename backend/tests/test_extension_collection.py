@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -91,8 +92,43 @@ class ExtensionCollectionTest(unittest.TestCase):
 
         self.assertEqual(merged["run"]["id"], first["run"]["id"])
         self.assertEqual(merged["run"]["collection_mode"], "hybrid_ai_supervised")
+        self.assertEqual(merged["source_status"]["naver"]["status"], "completed")
+        self.assertEqual(merged["source_status"]["naver"]["count"], 1)
         self.assertEqual({item["source"] for item in repeated["items"]}, {"danawa", "naver"})
         self.assertEqual(len(repeated["items"]), 2)
+
+    def test_four_independent_browser_saves_complete_one_shared_run(self):
+        sources = ["naver", "danawa", "enuri", "coupang"]
+        run_id = "ai_four_sources"
+        metadata = {
+            "sources": sources,
+            "collection_mode": "server_managed_browser_agent",
+            "source_status": {source: {"status": "awaiting_supervision", "count": 0} for source in sources},
+            "warnings": [],
+        }
+        with main.connect() as db:
+            db.execute(
+                "INSERT INTO search_runs (id, query, sort_mode, status, filters_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (run_id, "노트북 MODEL-1", "lowest", "collecting", json.dumps(metadata), main.now()),
+            )
+
+        merged = None
+        capture_ids = [
+            "00000000-0000-5000-8000-000000000001",
+            "00000000-0000-5000-8000-000000000002",
+            "00000000-0000-5000-8000-000000000003",
+            "00000000-0000-5000-8000-000000000004",
+        ]
+        for index, source in enumerate(sources):
+            payload = self.payload(source, 900000 + index * 10000, run_id)
+            payload.capture_id = capture_ids[index]
+            payload.approval_scope = "server_managed_ai"
+            merged = main.save_extension_price_results(payload)
+            expected_status = "completed" if index == len(sources) - 1 else "collecting"
+            self.assertEqual(merged["run"]["status"], expected_status)
+
+        self.assertEqual({item["source"] for item in merged["items"]}, set(sources))
+        self.assertTrue(all(merged["source_status"][source]["status"] == "completed" for source in sources))
 
 
 if __name__ == "__main__":
