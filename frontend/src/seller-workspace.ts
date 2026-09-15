@@ -55,12 +55,12 @@ export function safeOfferUrl(url: string): string | undefined {
 export function naverShoppingSearchUrl(query: string): string {
   return `https://search.shopping.naver.com/ns/search?query=${encodeURIComponent(" ".concat(query).trim())}`;
 }
-export function aiPriceSearchRequest(query: string, sources: readonly string[], supervisedNaver: boolean) {
+export function aiPriceSearchRequest(query: string, sources: readonly string[], supervisedBrowser: boolean) {
   const selected = [...sources];
   return {
     query: query.trim(),
     sources: selected,
-    ...(supervisedNaver && selected.includes("naver") ? { supervised_sources: ["naver"] } : {}),
+    ...(supervisedBrowser ? { supervised_sources: selected } : {}),
   };
 }
 export function sourceNeedsAttention(result: SellerSearchResult | null | undefined, source: string): boolean {

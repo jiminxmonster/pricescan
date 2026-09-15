@@ -4711,10 +4711,20 @@ def save_extension_price_results(payload: ExtensionPriceResultsPayload) -> dict[
             complete_collection_request(db, source, "browser_success")
         exclusion_reasons = automatic_exclusion_reasons(payload.query, items, get_search_exception_terms(db))
         existing_sources = [str(value) for value in metadata.get("sources", [])]
+        source_status = metadata.get("source_status") if isinstance(metadata.get("source_status"), dict) else {}
+        source_status = {**source_status, **{
+            source: {"status": "completed", "count": len([item for item in items if item["source"] == source]),
+                     "message": "앱 Chromium 화면에서 상품 순위와 가격을 확인했습니다."}
+            for source in selected_sources
+        }}
+        all_sources = list(dict.fromkeys([*existing_sources, *selected_sources]))
+        all_completed = bool(all_sources) and all(source_status.get(source, {}).get("status") == "completed" for source in all_sources)
         metadata.update(
             {
-                "sources": list(dict.fromkeys([*existing_sources, *selected_sources])),
-                "collection_mode": "hybrid_ai_supervised" if payload.merge_run_id and payload.approval_scope == "server_managed_ai"
+                "sources": all_sources,
+                "source_status": source_status,
+                "collection_mode": "server_managed_browser_agent" if payload.merge_run_id and payload.approval_scope == "server_managed_ai" and set(selected_sources) <= set(existing_sources)
+                else "hybrid_ai_supervised" if payload.merge_run_id and payload.approval_scope == "server_managed_ai"
                 else "server_managed_browser_agent" if payload.approval_scope == "server_managed_ai"
                 else "chrome_extension_approval" if payload.capture_id
                 else "server_and_current_page" if existing else "chrome_extension_current_page",
@@ -4737,8 +4747,8 @@ def save_extension_price_results(payload: ExtensionPriceResultsPayload) -> dict[
         )
         if existing:
             db.execute(
-                "UPDATE search_runs SET filters_json = ?, status = 'completed' WHERE id = ?",
-                (json.dumps(metadata, ensure_ascii=False), run_id),
+                "UPDATE search_runs SET filters_json = ?, status = ? WHERE id = ?",
+                (json.dumps(metadata, ensure_ascii=False), "completed" if all_completed else "collecting", run_id),
             )
             for source in selected_sources:
                 db.execute("DELETE FROM price_items WHERE run_id = ? AND source = ?", (run_id, source))

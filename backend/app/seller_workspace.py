@@ -86,7 +86,7 @@ class SearchPlanRequest(BaseModel):
 class AiPriceSearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=300)
     sources: list[Literal["naver", "danawa", "enuri", "coupang"]] = Field(min_length=1, max_length=4)
-    supervised_sources: list[Literal["naver"]] = Field(default_factory=list, max_length=1)
+    supervised_sources: list[Literal["naver", "danawa", "enuri", "coupang"]] = Field(default_factory=list, max_length=4)
 
 
 def init_seller_workspace(db: sqlite3.Connection) -> None:
@@ -217,7 +217,7 @@ def create_seller_router(connect: Callable, require_authenticated: Callable, get
 
     @router.post("/assistant/price-search")
     async def assistant_price_search(payload: AiPriceSearchRequest, current_user: dict[str, Any] | None = Depends(require_authenticated)):
-        """Run one public AI web search for every selected shopping source."""
+        """Create one search run and route each source to public search or the supervised app browser."""
         title = " ".join(payload.query.split())
         selected_sources = list(dict.fromkeys(payload.sources))
         supervised_sources = list(dict.fromkeys(payload.supervised_sources))
@@ -242,10 +242,10 @@ def create_seller_router(connect: Callable, require_authenticated: Callable, get
         for source in supervised_sources:
             searched["sources"][source] = {
                 "status": "awaiting_supervision", "count": 0,
-                "message": "로그인된 Chrome 화면에서 사용자 확인 후 AI 판독을 기다리고 있습니다.",
+                "message": "PriceScan 앱의 로그인 유지 Chromium 화면에서 AI 판독을 기다리고 있습니다.",
             }
             searched["warnings"].append(
-                "네이버 쇼핑: 로그인·보안 확인을 사용자가 지켜보는 감시형 AI 조사를 기다리고 있습니다."
+                f"{source}: 앱 Chromium의 감시형 AI 조사를 기다리고 있습니다."
             )
         run_id = f"ai_{uuid4().hex[:16]}"
         collected_at = timestamp()
@@ -255,14 +255,14 @@ def create_seller_router(connect: Callable, require_authenticated: Callable, get
         metadata = {
             "filters": ["openai_web_search", *(["supervised_visible_page"] if supervised_sources else [])],
             "sources": selected_sources,
-            "collection_mode": "hybrid_ai_supervised" if supervised_sources else "openai_web_search",
+            "collection_mode": "server_managed_browser_agent" if supervised_sources == selected_sources else "hybrid_ai_supervised" if supervised_sources else "openai_web_search",
             "source_status": searched["sources"],
             "warnings": warnings,
         }
         with connect() as db:
             db.execute(
                 "INSERT INTO search_runs (id, query, sort_mode, status, filters_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (run_id, title, "price_asc", "completed", json.dumps(metadata, ensure_ascii=False), collected_at),
+                (run_id, title, "price_asc", "collecting" if supervised_sources else "completed", json.dumps(metadata, ensure_ascii=False), collected_at),
             )
             for item in items:
                 db.execute(
