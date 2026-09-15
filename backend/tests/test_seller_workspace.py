@@ -315,6 +315,9 @@ class SellerWorkspaceTest(unittest.TestCase):
         self.assertEqual(remote.post.call_args.args[0], "https://api.openai.com/v1/responses")
         self.assertEqual(request["tools"][0]["type"], "web_search")
         self.assertIn("search.shopping.naver.com", request["tools"][0]["filters"]["allowed_domains"])
+        self.assertIn("naver.com", request["tools"][0]["filters"]["allowed_domains"])
+        self.assertEqual(request["tools"][0]["search_context_size"], "high")
+        self.assertIn("site:smartstore.naver.com 아이패드 프로 12.9", request["input"])
 
     def test_ai_price_search_rejects_model_url_that_web_search_did_not_return(self):
         invented = "https://www.coupang.com/vp/products/999"

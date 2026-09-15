@@ -19,11 +19,25 @@ from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
 
-PROTOCOL_VERSION = "2026-09-14.1"
+PROTOCOL_VERSION = "2026-09-15.2"
 SOURCE_RECIPES: dict[str, dict[str, Any]] = {
     "naver": {
         "label": "네이버 쇼핑",
-        "hosts": ["shopping.naver.com", "search.shopping.naver.com", "smartstore.naver.com", "brand.naver.com", "cr.shopping.naver.com"],
+        # OpenAI's web index does not always expose Naver Shopping's dynamic
+        # result page directly.  Include Naver's public search surface and
+        # mobile/canonical product hosts so the model can follow indexed price
+        # evidence without using a logged-in browser session.
+        "hosts": [
+            "naver.com",
+            "search.naver.com",
+            "shopping.naver.com",
+            "search.shopping.naver.com",
+            "msearch.shopping.naver.com",
+            "smartstore.naver.com",
+            "m.smartstore.naver.com",
+            "brand.naver.com",
+            "cr.shopping.naver.com",
+        ],
         "allowed_roots": ["naver.com"],
         "search_url": "https://search.shopping.naver.com/ns/search?query={query}",
     },
@@ -180,6 +194,17 @@ async def _web_search_source(query: str, source: str) -> tuple[list[dict[str, An
     if provider.casefold() != "openai" and hostname != "api.openai.com":
         raise HTTPException(503, "완전 자동 검색은 OpenAI Responses 웹 검색 연결이 필요합니다.")
     recipe = SOURCE_RECIPES[source]
+    search_guidance = (
+        f"쇼핑몰: {recipe['label']}\n검색어 데이터: {query}\n"
+        "이 쇼핑몰의 현재 최저가 후보를 조사하세요."
+    )
+    if source == "naver":
+        search_guidance += (
+            "\n네이버 쇼핑의 동적 검색 화면만 열려고 하지 말고, 웹 검색에서 다음 범위를 모두 확인하세요: "
+            f"site:search.shopping.naver.com {query}, site:shopping.naver.com {query}, "
+            f"site:smartstore.naver.com {query}, site:brand.naver.com {query}. "
+            "모델명·용량이 일치하고 현재 원화 가격이 출처에 표시된 상품/카탈로그 URL만 반환하세요."
+        )
     request_body = {
         "model": model,
         "instructions": (
@@ -190,11 +215,11 @@ async def _web_search_source(query: str, source: str) -> tuple[list[dict[str, An
             "url은 웹 검색 도구가 반환한 해당 쇼핑몰 URL을 정확히 복사한다. JSON 객체만 반환한다: "
             "{\"items\":[{\"name\":\"\",\"mall\":\"\",\"price\":0,\"shipping\":null,\"url\":\"\",\"evidence\":\"\"}],\"note\":\"\"}"
         ),
-        "input": f"쇼핑몰: {recipe['label']}\n검색어 데이터: {query}\n이 쇼핑몰의 현재 최저가 후보를 조사하세요.",
+        "input": search_guidance,
         "tools": [{
             "type": "web_search",
             "filters": {"allowed_domains": recipe["hosts"]},
-            "search_context_size": "medium",
+            "search_context_size": "high" if source == "naver" else "medium",
         }],
         "tool_choice": {"type": "web_search"},
         "include": ["web_search_call.action.sources"],
